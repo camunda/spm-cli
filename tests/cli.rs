@@ -228,6 +228,26 @@ fn clean_removes_generated_config() {
 }
 
 #[test]
+fn multi_target_wires_both_vendors() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude,copilot"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+
+    assert!(sb
+        .vendor_dir("claude")
+        .join("plugin/skills/greet/SKILL.md")
+        .exists());
+    assert!(sb
+        .vendor_dir("copilot")
+        .join("instructions/greet.instructions.md")
+        .exists());
+    assert!(sb.read(".claude/settings.local.json").contains("spm@spm"));
+    assert!(sb
+        .read(".vscode/settings.json")
+        .contains("chat.instructionsFilesLocations"));
+}
+
+#[test]
 fn unknown_target_is_rejected() {
     let sb = Sandbox::new();
     let out = sb.spm(&["init", "--target", "nonsense"]);

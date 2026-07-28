@@ -8,8 +8,8 @@ pub const MANIFEST_FILE: &str = "ai.json";
 /// The user-authored, VCS-committed declaration file (`ai.json`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
-    /// Target vendor: "claude" or "copilot".
-    pub target: String,
+    /// Target vendors, e.g. `["claude", "copilot"]`.
+    pub targets: Vec<String>,
     #[serde(default)]
     pub skills: BTreeMap<String, SkillSpec>,
 }

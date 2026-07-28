@@ -26,7 +26,7 @@ On a fresh clone, teammates run `spm install` — it rebuilds their own store + 
 
 ```json
 {
-  "target": "claude",
+  "targets": ["claude", "copilot"],
   "skills": {
     "pdf-tools": { "git": "https://github.com/org/skills", "tag": "v1.2.0", "path": "skills/pdf" },
     "reviewer":  { "git": "https://github.com/me/reviewer", "branch": "main" },
@@ -34,6 +34,9 @@ On a fresh clone, teammates run `spm install` — it rebuilds their own store + 
   }
 }
 ```
+
+`targets` lists one or more vendors — skills resolve once and project into each
+independently (`.claude/settings.local.json` **and** `.vscode/settings.json`).
 
 Version selectors (exactly one per skill):
 
@@ -63,7 +66,7 @@ instead of hanging on a prompt (helpers and ssh-agent still work).
 ## Commands
 
 ```bash
-spm init [--target claude|copilot]                 # scaffold ai.json
+spm init [--target claude|copilot ...]             # scaffold ai.json (repeatable / comma-separated)
 spm add <git> (--tag|--branch|--commit <v>) \      # add + install a skill
         [--path <subdir>] [--name <local-name>]
 spm remove <name>                                  # drop a skill

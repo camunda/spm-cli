@@ -18,9 +18,9 @@ pub struct Cli {
 enum Command {
     /// Create a new ai.json in the current directory.
     Init {
-        /// Target vendor: claude or copilot.
-        #[arg(long, default_value = "claude")]
-        target: String,
+        /// Target vendor(s): claude and/or copilot. Repeatable or comma-separated.
+        #[arg(long = "target", value_delimiter = ',', default_value = "claude")]
+        targets: Vec<String>,
     },
     /// Add a skill dependency and install it.
     Add {
@@ -65,7 +65,7 @@ pub fn run() -> Result<()> {
     let cli = Cli::parse();
     let root = std::env::current_dir()?;
     match cli.command {
-        Command::Init { target } => init(&root, &target),
+        Command::Init { targets } => init(&root, targets),
         Command::Add {
             git,
             version,
@@ -86,18 +86,28 @@ pub fn run() -> Result<()> {
 
 fn clean(root: &Path) -> Result<()> {
     let manifest = Manifest::load(root)?;
-    vendor::for_target(&manifest.target)?.clean(root)?;
-    println!("cleaned generated config for target `{}`", manifest.target);
+    for target in &manifest.targets {
+        vendor::for_target(target)?.clean(root)?;
+    }
+    println!(
+        "cleaned generated config for target(s): {}",
+        manifest.targets.join(", ")
+    );
     Ok(())
 }
 
-fn init(root: &Path, target: &str) -> Result<()> {
+fn init(root: &Path, targets: Vec<String>) -> Result<()> {
     if Manifest::exists(root) {
         bail!("{} already exists", Manifest::path_in(root).display());
     }
-    vendor::for_target(target)?; // validate target early
+    if targets.is_empty() {
+        bail!("at least one --target is required");
+    }
+    for target in &targets {
+        vendor::for_target(target)?; // validate targets early
+    }
     let manifest = Manifest {
-        target: target.to_string(),
+        targets,
         skills: BTreeMap::new(),
     };
     manifest.save(root)?;
@@ -174,7 +184,15 @@ fn list(root: &Path) -> Result<()> {
 /// refresh to a single skill (used by `update <name>`).
 fn sync(root: &Path, force_refresh: bool, only: Option<&str>) -> Result<()> {
     let manifest = Manifest::load(root)?;
-    let vendor = vendor::for_target(&manifest.target)?;
+    if manifest.targets.is_empty() {
+        bail!("ai.json declares no targets");
+    }
+    // Validate all targets up front before doing any network work.
+    let vendors = manifest
+        .targets
+        .iter()
+        .map(|t| vendor::for_target(t))
+        .collect::<Result<Vec<_>>>()?;
     let mut prev = Lockfile::load_or_default(root)?;
     let mut lock = Lockfile::default();
 
@@ -208,7 +226,10 @@ fn sync(root: &Path, force_refresh: bool, only: Option<&str>) -> Result<()> {
         });
     }
 
-    vendor.materialize(root, &materialized)?;
+    // Same resolved skills projected into every configured vendor.
+    for vendor in &vendors {
+        vendor.materialize(root, &materialized)?;
+    }
     Ok(())
 }
 
