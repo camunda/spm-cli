@@ -45,6 +45,21 @@ Version selectors (exactly one per skill):
 
 `path` (optional) selects a subdirectory — for monorepos holding many skills.
 
+### Repo URLs (HTTPS & SSH)
+
+`git` accepts any URL the system `git` understands:
+
+```bash
+spm add https://github.com/org/repo --tag v1.0.0            # HTTPS
+spm add git@github.com:org/repo.git --branch main           # SSH (scp-style)
+spm add ssh://git@github.com/org/repo.git --branch main     # SSH (url form)
+```
+
+SSH auth goes through your ssh-agent / keys — spm never handles credentials.
+Private HTTPS repos use your git credential helper. spm runs git with
+`GIT_TERMINAL_PROMPT=0`, so a missing credential fails with a clear error
+instead of hanging on a prompt (helpers and ssh-agent still work).
+
 ## Commands
 
 ```bash

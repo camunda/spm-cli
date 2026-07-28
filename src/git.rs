@@ -3,9 +3,16 @@ use std::path::Path;
 use std::process::Command;
 
 /// Run `git` with the given args, returning trimmed stdout. Errors on non-zero exit.
+///
+/// SSH remotes (`git@host:org/repo.git`, `ssh://…`) work transparently through
+/// the user's ssh-agent/keys. `GIT_TERMINAL_PROMPT=0` stops git from blocking on
+/// an interactive username/password prompt for private repos — credential
+/// helpers and ssh-agent still supply auth non-interactively; only the hanging
+/// TTY fallback is disabled, so auth failures surface as errors instead of hangs.
 fn git(args: &[&str], cwd: Option<&Path>) -> Result<String> {
     let mut cmd = Command::new("git");
     cmd.args(args);
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }

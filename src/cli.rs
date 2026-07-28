@@ -212,11 +212,27 @@ fn sync(root: &Path, force_refresh: bool, only: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// Derive a skill name from a repo URL. Handles https, `ssh://`, and scp-style
+/// (`git@host:org/repo.git`) forms by splitting on both `/` and the scp `:`.
 fn default_name(git: &str) -> String {
     git.trim_end_matches('/')
-        .rsplit('/')
+        .rsplit(['/', ':'])
         .next()
         .unwrap_or(git)
         .trim_end_matches(".git")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::default_name;
+
+    #[test]
+    fn default_name_handles_url_forms() {
+        assert_eq!(default_name("https://github.com/org/repo"), "repo");
+        assert_eq!(default_name("https://github.com/org/repo.git"), "repo");
+        assert_eq!(default_name("git@github.com:org/repo.git"), "repo");
+        assert_eq!(default_name("ssh://git@host/org/repo.git"), "repo");
+        assert_eq!(default_name("git@host:repo.git"), "repo");
+    }
 }
