@@ -49,7 +49,18 @@ impl Sandbox {
         .unwrap();
         let g = |args: &[&str]| {
             let ok = Command::new("git")
-                .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                // Pin identity and disable signing so the harness is hermetic
+                // regardless of the developer's global git config.
+                .args([
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "tag.gpgSign=false",
+                ])
                 .args(args)
                 .current_dir(&self.skill_repo)
                 .status()
