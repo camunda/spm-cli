@@ -6,6 +6,7 @@ mod lockfile;
 mod manifest;
 mod paths;
 mod resolver;
+mod schema;
 mod store;
 mod vendor;
 

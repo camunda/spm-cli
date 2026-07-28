@@ -254,3 +254,30 @@ fn unknown_target_is_rejected() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("unknown target"));
 }
+
+#[test]
+fn schema_rejects_unknown_target_value() {
+    let sb = Sandbox::new();
+    std::fs::write(
+        sb.project.join("ai.json"),
+        r#"{"targets":["bogus"],"skills":{}}"#,
+    )
+    .unwrap();
+    let out = sb.spm(&["install"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("does not match schema"), "{err}");
+}
+
+#[test]
+fn schema_rejects_skill_without_version_selector() {
+    let sb = Sandbox::new();
+    std::fs::write(
+        sb.project.join("ai.json"),
+        r#"{"targets":["claude"],"skills":{"x":{"git":"u"}}}"#,
+    )
+    .unwrap();
+    let out = sb.spm(&["install"]);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("oneOf"));
+}

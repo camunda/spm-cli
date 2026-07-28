@@ -69,7 +69,10 @@ impl Manifest {
         let p = Self::path_in(dir);
         let text = std::fs::read_to_string(&p)
             .with_context(|| format!("no {MANIFEST_FILE} found at {}", p.display()))?;
-        serde_json::from_str(&text).with_context(|| format!("parsing {}", p.display()))
+        let value: serde_json::Value =
+            serde_json::from_str(&text).with_context(|| format!("parsing {}", p.display()))?;
+        crate::schema::validate(&value).with_context(|| format!("in {}", p.display()))?;
+        serde_json::from_value(value).with_context(|| format!("parsing {}", p.display()))
     }
 
     pub fn save(&self, dir: &Path) -> Result<()> {

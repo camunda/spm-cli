@@ -1,0 +1,54 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/camunda/spm/blob/main/schema/ai.schema.json",
+  "title": "ai.json",
+  "description": "spm skill manifest: declares target vendors and skill git dependencies.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["targets"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional editor hint pointing at this schema."
+    },
+    "targets": {
+      "type": "array",
+      "description": "Vendors the skills are materialized for.",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "enum": ["claude", "copilot"] }
+    },
+    "skills": {
+      "type": "object",
+      "description": "Skill dependencies, keyed by local name.",
+      "additionalProperties": { "$ref": "#/definitions/skill" }
+    }
+  },
+  "definitions": {
+    "skill": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["git"],
+      "properties": {
+        "git": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Git repository URL (https, ssh, scp-style, or file://)."
+        },
+        "tag": { "type": "string", "minLength": 1 },
+        "branch": { "type": "string", "minLength": 1 },
+        "commit": { "type": "string", "minLength": 1 },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Subdirectory within the repo (monorepo of skills)."
+        }
+      },
+      "oneOf": [
+        { "required": ["tag"] },
+        { "required": ["branch"] },
+        { "required": ["commit"] }
+      ]
+    }
+  }
+}

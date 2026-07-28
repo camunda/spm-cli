@@ -38,6 +38,23 @@ On a fresh clone, teammates run `spm install` — it rebuilds their own store + 
 `targets` lists one or more vendors — skills resolve once and project into each
 independently (`.claude/settings.local.json` **and** `.vscode/settings.json`).
 
+### Schema & validation
+
+`ai.json` is described by a JSON Schema at [`schema/ai.schema.json`](schema/ai.schema.json)
+(draft-07). spm embeds it and validates every `ai.json` on load, reporting all
+violations at once with their JSON path:
+
+```
+error: in ai.json: ai.json does not match schema:
+  at /skills/x: {"git":"u"} is not valid under any of the schemas listed in the 'oneOf' keyword
+```
+
+Add a `"$schema"` reference for editor autocompletion/validation:
+
+```json
+{ "$schema": "./schema/ai.schema.json", "targets": ["claude"], "skills": {} }
+```
+
 Version selectors (exactly one per skill):
 
 | field    | meaning                                    | locked to      |
