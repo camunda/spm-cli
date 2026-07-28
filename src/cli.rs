@@ -5,7 +5,7 @@ use crate::{resolver, store};
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Parser)]
 #[command(name = "spm", version, about = "Manage AI skills declared in ai.json")]
@@ -75,8 +75,8 @@ pub fn run() -> Result<()> {
         Command::Remove { name } => remove(&root, &name),
         Command::Update { name } => update(&root, name),
         Command::Install => {
-            sync(&root, false, None)?;
-            println!("installed");
+            let n = sync(&root, false, None)?;
+            println!("installed {n} skill(s)");
             Ok(())
         }
         Command::List => list(&root),
@@ -182,7 +182,7 @@ fn list(root: &Path) -> Result<()> {
 ///
 /// `force_refresh` re-resolves refs to their latest commit; `only` limits the
 /// refresh to a single skill (used by `update <name>`).
-fn sync(root: &Path, force_refresh: bool, only: Option<&str>) -> Result<()> {
+fn sync(root: &Path, force_refresh: bool, only: Option<&str>) -> Result<usize> {
     let manifest = Manifest::load(root)?;
     if manifest.targets.is_empty() {
         bail!("ai.json declares no targets");
@@ -196,6 +196,19 @@ fn sync(root: &Path, force_refresh: bool, only: Option<&str>) -> Result<()> {
     let mut prev = Lockfile::load_or_default(root)?;
     let mut lock = Lockfile::default();
 
+    // Column width for aligned per-skill output.
+    let width = manifest.skills.keys().map(String::len).max().unwrap_or(0);
+
+    if manifest.skills.is_empty() {
+        println!("no skills declared");
+    } else {
+        println!(
+            "resolving {} skill(s) for: {}",
+            manifest.skills.len(),
+            manifest.targets.join(", ")
+        );
+    }
+
     for (name, spec) in &manifest.skills {
         let requested = spec.version()?; // validates selectors
         let reference = requested.label();
@@ -206,31 +219,45 @@ fn sync(root: &Path, force_refresh: bool, only: Option<&str>) -> Result<()> {
             !refresh && l.git == spec.git && l.reference == reference && l.path == spec.path
         });
 
-        let locked = match reuse {
-            Some(l) => l,
-            None => resolver::resolve(spec).with_context(|| format!("resolving skill `{name}`"))?,
+        let (locked, how) = match reuse {
+            Some(l) => (l, "locked"),
+            None => (
+                resolver::resolve(spec).with_context(|| format!("resolving skill `{name}`"))?,
+                "resolved",
+            ),
         };
+        let short = &locked.commit[..locked.commit.len().min(8)];
+        println!("  {name:<width$}  {reference} @ {short}  ({how})");
         lock.skills.insert(name.clone(), locked);
     }
 
     lock.save(root)?;
 
     // Populate the store and collect absolute paths for the vendor.
+    if !manifest.skills.is_empty() {
+        println!("fetching skills into store");
+    }
     let mut materialized: Vec<MaterializedSkill> = Vec::new();
     for (name, locked) in &lock.skills {
-        let path: PathBuf =
-            store::ensure(locked).with_context(|| format!("fetching skill `{name}`"))?;
+        let ensured = store::ensure(locked).with_context(|| format!("fetching skill `{name}`"))?;
+        println!(
+            "  {name:<width$}  {}",
+            if ensured.fetched { "fetched" } else { "cached" }
+        );
         materialized.push(MaterializedSkill {
             name: name.clone(),
-            path,
+            path: ensured.path,
         });
     }
 
     // Same resolved skills projected into every configured vendor.
+    if !manifest.skills.is_empty() {
+        println!("materializing: {}", manifest.targets.join(", "));
+    }
     for vendor in &vendors {
         vendor.materialize(root, &materialized)?;
     }
-    Ok(())
+    Ok(lock.skills.len())
 }
 
 /// Derive a skill name from a repo URL. Handles https, `ssh://`, and scp-style
