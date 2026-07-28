@@ -13,7 +13,7 @@ pub fn ensure(locked: &LockedSkill) -> Result<PathBuf> {
             std::fs::remove_dir_all(&repo_dir)?;
         }
         std::fs::create_dir_all(repo_dir.parent().unwrap())?;
-        git::clone_at(&locked.git, &locked.commit, &repo_dir)?;
+        git::fetch_commit(&locked.git, &locked.commit, &repo_dir)?;
     }
 
     let content = match &locked.path {

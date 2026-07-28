@@ -52,10 +52,20 @@ pub fn is_at_commit(dir: &Path, sha: &str) -> bool {
     matches!(git(&["rev-parse", "HEAD"], Some(dir)), Ok(head) if head == sha)
 }
 
-/// Clone `url` into `dest` and check out `sha`. `dest` must not already exist.
-pub fn clone_at(url: &str, sha: &str, dest: &Path) -> Result<()> {
-    git(&["clone", "--no-checkout", url, &dest.to_string_lossy()], None)
-        .with_context(|| format!("cloning {url}"))?;
+/// Fetch just `sha` from `url` into a fresh checkout at `dest`.
+///
+/// Tries a shallow single-commit fetch first (cheapest); if the server refuses
+/// fetch-by-SHA (not all enable `uploadpack.allowAnySHA1InWant`), falls back to
+/// a full fetch. `dest` is created if missing.
+pub fn fetch_commit(url: &str, sha: &str, dest: &Path) -> Result<()> {
+    std::fs::create_dir_all(dest)?;
+    git(&["init", "-q"], Some(dest))?;
+    // Remote may already exist if a prior attempt was interrupted.
+    let _ = git(&["remote", "add", "origin", url], Some(dest));
+
+    if git(&["fetch", "--depth", "1", "origin", sha], Some(dest)).is_err() {
+        git(&["fetch", "origin"], Some(dest)).with_context(|| format!("fetching {url}"))?;
+    }
     git(&["checkout", "--detach", sha], Some(dest))
         .with_context(|| format!("checking out {sha} in {}", dest.display()))?;
     Ok(())
