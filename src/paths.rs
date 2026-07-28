@@ -32,14 +32,3 @@ pub fn vendor_project_dir(vendor: &str, project_root: &std::path::Path) -> Resul
         .collect();
     Ok(vendors_dir()?.join(vendor).join(key.trim_matches('_')))
 }
-
-/// Render `dir` as a `~`-relative path when it sits under the home directory,
-/// else its absolute form. Copilot's instruction-location setting accepts `~/…`.
-pub fn tildify(dir: &std::path::Path) -> String {
-    if let Some(base) = directories::BaseDirs::new() {
-        if let Ok(rel) = dir.strip_prefix(base.home_dir()) {
-            return format!("~/{}", rel.to_string_lossy());
-        }
-    }
-    dir.to_string_lossy().into_owned()
-}

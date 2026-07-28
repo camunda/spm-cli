@@ -84,6 +84,9 @@ impl Sandbox {
             .args(args)
             .current_dir(&self.project)
             .env("SPM_HOME", &self.spm_home)
+            // Stub the copilot CLI with a no-op so tests never touch (or require)
+            // the real, user-global copilot installation.
+            .env("SPM_COPILOT_BIN", "true")
             .output()
             .unwrap()
     }
@@ -158,7 +161,7 @@ fn claude_add_resolves_tag_to_commit_and_wires_marketplace() {
 }
 
 #[test]
-fn copilot_add_writes_instruction_file() {
+fn copilot_add_assembles_plugin_marketplace() {
     let sb = Sandbox::new();
     sb.ok(&["init", "--target", "copilot"]);
     sb.ok(&[
@@ -170,19 +173,15 @@ fn copilot_add_writes_instruction_file() {
         "greet",
     ]);
 
-    let instr = sb
-        .vendor_dir("copilot")
-        .join("instructions/greet.instructions.md");
-    let body = std::fs::read_to_string(&instr).unwrap();
-    assert!(body.contains("applyTo: \"**\""), "{body}");
-    assert!(body.contains("description: Say hello nicely."), "{body}");
-    assert!(body.contains("Greet warmly."), "{body}");
-
-    let settings = sb.read(".vscode/settings.json");
-    assert!(
-        settings.contains("chat.instructionsFilesLocations"),
-        "{settings}"
-    );
+    let dir = sb.vendor_dir("copilot");
+    // Self-contained marketplace: manifest, plugin manifest, and the skill inside.
+    let marketplace = dir.join(".github/plugin/marketplace.json");
+    let manifest = std::fs::read_to_string(&marketplace).unwrap();
+    assert!(manifest.contains("\"source\": \"plugin\""), "{manifest}");
+    assert!(dir.join("plugin/plugin.json").exists());
+    assert!(dir.join("plugin/skills/greet/SKILL.md").exists());
+    // No VS Code instruction files anymore.
+    assert!(!sb.project.join(".vscode").exists());
 }
 
 #[test]
@@ -239,12 +238,9 @@ fn multi_target_wires_both_vendors() {
         .exists());
     assert!(sb
         .vendor_dir("copilot")
-        .join("instructions/greet.instructions.md")
+        .join("plugin/skills/greet/SKILL.md")
         .exists());
     assert!(sb.read(".claude/settings.local.json").contains("spm@spm"));
-    assert!(sb
-        .read(".vscode/settings.json")
-        .contains("chat.instructionsFilesLocations"));
 }
 
 #[test]
