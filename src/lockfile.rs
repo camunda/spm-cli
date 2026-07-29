@@ -45,7 +45,7 @@ pub struct LockedSkill {
     pub commit: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub path: Option<String>,
-    /// Store directory key: `<sanitized-url>@<sha>`.
+    /// Store directory key: `<repo-name>-<url-hash>@<sha>`.
     pub store: String,
 }
 
@@ -142,13 +142,57 @@ pub fn validate_store_key(key: &str) -> Result<()> {
     Ok(())
 }
 
-/// Derive a filesystem-safe, stable store key from a repo URL and commit SHA.
+/// Derive a filesystem-safe, **bounded-length** store key from a repo URL and
+/// commit SHA. The previous scheme sanitized the entire URL into the directory
+/// name, which for long URLs (e.g. `file://` paths on CI) pushed the full
+/// `.../store/<key>/.git/objects/...` path past Windows' 260-char limit. We now
+/// use a short human-readable repo-name hint plus a hash of the full URL, so the
+/// key length is bounded regardless of URL length while staying collision-safe.
 pub fn store_key(url: &str, sha: &str) -> String {
-    let sanitized: String = url
+    // FNV-1a 64-bit hash of the full URL — stable across platforms.
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in url.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    // Short readable hint: the trailing repo name, alphanumerics only, capped.
+    let hint: String = url
+        .trim_end_matches('/')
+        .rsplit(['/', ':'])
+        .next()
+        .unwrap_or(url)
+        .trim_end_matches(".git")
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .filter(char::is_ascii_alphanumeric)
+        .take(32)
         .collect();
-    // Trim runs of underscores for readability, keep full sha for collision safety.
-    let sanitized = sanitized.trim_matches('_').to_string();
-    format!("{sanitized}@{sha}")
+    format!("{hint}-{h:016x}@{sha}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{store_key, validate_store_key};
+
+    #[test]
+    fn store_key_is_bounded_safe_and_stable() {
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        // A pathologically long URL (e.g. a `file://` temp path on CI) must still
+        // yield a short, filesystem-safe key so paths stay under Windows' limit.
+        let long = format!(
+            "file://{}/skill",
+            "C_Users_runner_AppData_Local_Temp".repeat(20)
+        );
+        let key = store_key(&long, sha);
+        validate_store_key(&key).expect("generated key must pass validation");
+        // hint(<=32) + '-' + 16 hex + '@' + 40 sha == 90 max.
+        assert!(key.len() <= 90, "key too long: {} ({})", key.len(), key);
+        assert!(key.ends_with(&format!("@{sha}")));
+        // Deterministic.
+        assert_eq!(key, store_key(&long, sha));
+        // Distinct URLs do not collide on the same sha.
+        assert_ne!(
+            store_key("https://github.com/a/repo", sha),
+            store_key("https://github.com/b/repo", sha)
+        );
+    }
 }

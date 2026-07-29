@@ -11,6 +11,10 @@ use std::process::Command;
 /// TTY fallback is disabled, so auth failures surface as errors instead of hangs.
 fn git(args: &[&str], cwd: Option<&Path>) -> Result<String> {
     let mut cmd = Command::new("git");
+    // `core.longpaths=true` lets git on Windows write paths longer than the
+    // legacy 260-char MAX_PATH (deep object/checkout paths under the store).
+    // The setting is a no-op on other platforms.
+    cmd.args(["-c", "core.longpaths=true"]);
     cmd.args(args);
     cmd.env("GIT_TERMINAL_PROMPT", "0");
     if let Some(dir) = cwd {

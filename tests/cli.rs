@@ -289,12 +289,10 @@ fn schema_rejects_skill_without_version_selector() {
 fn rejects_path_traversal_in_skill_path() {
     let sb = Sandbox::new();
     // A hostile `path` escaping the fetched repo must be refused, not fetched.
+    // Rejection happens at manifest load, before any git URL is touched.
     std::fs::write(
         sb.project.join("ai.json"),
-        format!(
-            r#"{{"targets":["claude"],"skills":{{"evil":{{"git":"{}","tag":"v0.1.0","path":"../../../../../../etc"}}}}}}"#,
-            sb.skill_url()
-        ),
+        r#"{"targets":["claude"],"skills":{"evil":{"git":"u","tag":"v0.1.0","path":"../../../../../../etc"}}}"#,
     )
     .unwrap();
     let out = sb.spm(&["install"]);
@@ -308,10 +306,7 @@ fn rejects_absolute_skill_path() {
     let sb = Sandbox::new();
     std::fs::write(
         sb.project.join("ai.json"),
-        format!(
-            r#"{{"targets":["claude"],"skills":{{"evil":{{"git":"{}","tag":"v0.1.0","path":"/etc"}}}}}}"#,
-            sb.skill_url()
-        ),
+        r#"{"targets":["claude"],"skills":{"evil":{"git":"u","tag":"v0.1.0","path":"/etc"}}}"#,
     )
     .unwrap();
     let out = sb.spm(&["install"]);
@@ -327,10 +322,7 @@ fn rejects_path_traversal_in_skill_name() {
     // its skills/ directory. Reject it at the manifest layer.
     std::fs::write(
         sb.project.join("ai.json"),
-        format!(
-            r#"{{"targets":["claude"],"skills":{{"../../evil":{{"git":"{}","tag":"v0.1.0"}}}}}}"#,
-            sb.skill_url()
-        ),
+        r#"{"targets":["claude"],"skills":{"../../evil":{"git":"u","tag":"v0.1.0"}}}"#,
     )
     .unwrap();
     let out = sb.spm(&["install"]);
