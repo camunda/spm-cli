@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+#
+# spm pre-commit hook (installed automatically by cargo-husky on `cargo test`).
+# Mirrors the fast half of the CI gate so formatting/lint failures are caught
+# locally instead of in CI. Run `git commit --no-verify` to bypass in a pinch.
+set -euo pipefail
+
+echo "pre-commit: cargo fmt --all --check"
+cargo fmt --all --check
+
+echo "pre-commit: cargo clippy --all-targets -- -D warnings"
+cargo clippy --all-targets -- -D warnings
+
+echo "pre-commit: ok"

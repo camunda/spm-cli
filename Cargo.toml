@@ -23,6 +23,11 @@ anyhow = "1"
 directories = "5"
 jsonschema = { version = "0.17", default-features = false }
 
+# Installs the committed git hooks in .cargo-husky/hooks/ into .git/hooks the
+# first time `cargo test`/`cargo build` runs — no manual setup step needed.
+[dev-dependencies]
+cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
+
 [profile.release]
 opt-level = 3
 lto = true

@@ -134,3 +134,14 @@ spm clean                                          # remove generated vendor con
 - **Cross-OS**: shells out to the system `git` (no libgit2 build deps); no symlinks; all paths via `std::path`. Runs on Linux, macOS, Windows.
 - **`SPM_HOME`** overrides the store/vendor root (default `~/.spm`) — used by tests.
 - **Vendor adapters**: adding a target means implementing one `Vendor` trait (`src/vendor/`). Both `claude` and `copilot` assemble the same plugin-marketplace layout (`marketplace.json` → `plugin.json` → `skills/<name>/SKILL.md`); they differ only in how the marketplace is registered.
+
+## Development
+
+`make check` runs the full CI gate locally (`fmt-check` + `clippy` + `test`).
+
+A **pre-commit hook** (fmt + clippy) installs itself automatically via
+[`cargo-husky`](https://github.com/rhysd/cargo-husky) — just run `cargo test`
+(or `cargo build`) once after cloning and the hook lands in `.git/hooks`. The
+hook source lives in [`.cargo-husky/hooks/`](.cargo-husky/hooks). Bypass a
+single commit with `git commit --no-verify`.
+
