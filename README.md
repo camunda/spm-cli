@@ -87,21 +87,27 @@ instead of hanging on a prompt (helpers and ssh-agent still work).
 `spm` ships as a single self-contained binary (needs the system `git` on `PATH`
 at runtime, plus the `copilot` CLI if you target `copilot`).
 
-**Prebuilt binary** — download the asset for your platform from the
-[latest release](https://github.com/camunda/spm-cli/releases/latest) and put it on
-your `PATH`:
+**Prebuilt binary** — the repo is **internal**, so release assets require
+authentication. Download with the [GitHub CLI](https://cli.github.com/) (you must
+be signed in via `gh auth login` and be a Camunda org member), then put the binary
+on your `PATH`:
 
 ```bash
-# example: Apple Silicon macOS
-curl -L -o spm https://github.com/camunda/spm-cli/releases/latest/download/spm-aarch64-apple-darwin
+# pick the asset for your platform (see list below); example: Apple Silicon macOS
+gh release download --repo camunda/spm-cli \
+  --pattern 'spm-aarch64-apple-darwin' --output spm
 chmod +x spm && sudo mv spm /usr/local/bin/
 ```
+
+`--repo camunda/spm-cli` with no tag grabs the latest release; add
+`v0.1.0` as the first positional arg to pin a specific version.
 
 Assets: `spm-x86_64-unknown-linux-gnu`, `spm-aarch64-unknown-linux-gnu`,
 `spm-x86_64-apple-darwin`, `spm-aarch64-apple-darwin`,
 `spm-x86_64-pc-windows-msvc.exe`.
 
-**From crates.io** (the crate is `spm-cli`; it installs a binary named `spm`):
+**From crates.io** — _not published yet_. The crate name `spm-cli` is reserved
+(the binary is `spm`); once it's published you'll be able to run:
 
 ```bash
 cargo install spm-cli
