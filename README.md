@@ -82,6 +82,40 @@ Private HTTPS repos use your git credential helper. spm runs git with
 `GIT_TERMINAL_PROMPT=0`, so a missing credential fails with a clear error
 instead of hanging on a prompt (helpers and ssh-agent still work).
 
+## Installation
+
+`spm` ships as a single self-contained binary (needs the system `git` on `PATH`
+at runtime, plus the `copilot` CLI if you target `copilot`).
+
+**Prebuilt binary** — download the asset for your platform from the
+[latest release](https://github.com/camunda/spm/releases/latest) and put it on
+your `PATH`:
+
+```bash
+# example: Apple Silicon macOS
+curl -L -o spm https://github.com/camunda/spm/releases/latest/download/spm-aarch64-apple-darwin
+chmod +x spm && sudo mv spm /usr/local/bin/
+```
+
+Assets: `spm-x86_64-unknown-linux-gnu`, `spm-aarch64-unknown-linux-gnu`,
+`spm-x86_64-apple-darwin`, `spm-aarch64-apple-darwin`,
+`spm-x86_64-pc-windows-msvc.exe`.
+
+**From crates.io** (the crate is `spm-cli`; it installs a binary named `spm`):
+
+```bash
+cargo install spm-cli
+```
+
+**From source:**
+
+```bash
+git clone https://github.com/camunda/spm && cd spm
+make install                  # release build → /usr/local/bin/spm
+make install PREFIX=~/.local  # or a custom prefix
+# or: cargo install --path .
+```
+
 ## Commands
 
 ```bash

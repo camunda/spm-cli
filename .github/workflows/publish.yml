@@ -1,0 +1,109 @@
+name: Publish
+
+# Publish the `spm-cli` crate to crates.io using crates.io Trusted Publishing
+# (OIDC) — no long-lived CARGO_REGISTRY_TOKEN secret. `rust-lang/crates-io-auth-action`
+# exchanges the GitHub Actions OIDC token for a short-lived crates.io token that is
+# automatically revoked when the job finishes.
+#
+# Note: the crate is named `spm-cli` (the name `spm` is taken on crates.io), but it
+# installs a binary called `spm`. Users run `cargo install spm-cli`.
+#
+# First publish (bootstrap):
+#   Trusted Publishing can only be configured for a crate that ALREADY exists on
+#   crates.io, so the very first publish of a brand-new crate cannot use OIDC.
+#   Set a temporary `CARGO_REGISTRY_TOKEN` repo secret; the workflow uses it in
+#   preference to OIDC. After the crate exists, register its trusted publisher
+#   (below) and DELETE the secret — every later release then authenticates via OIDC.
+#
+# Prerequisites (one-time, on crates.io):
+#   Register a Trusted Publisher for the `spm-cli` crate, pointing at this repo +
+#   this workflow file ("publish.yml").
+#
+# Release flow:
+#   1. Bump `version` in Cargo.toml (+ Cargo.lock), commit.
+#   2. Tag the commit `vX.Y.Z` and push the tag.
+#   The tag push triggers this workflow, which verifies the tag matches the crate
+#   version, runs the test gate, then publishes to crates.io.
+#
+# A manual `workflow_dispatch` run supports `dry_run: true` to exercise everything
+# except the final upload.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Package + verify without uploading to crates.io'
+        type: boolean
+        default: true
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write   # required for crates.io Trusted Publishing (OIDC)
+
+jobs:
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Trusted Publishing can only be configured AFTER a crate first exists on
+      # crates.io. For the initial publish of a brand-new crate, set a temporary
+      # CARGO_REGISTRY_TOKEN secret; the workflow uses it in preference to OIDC.
+      # Once the crate exists and its trusted publisher is registered, delete the
+      # secret and every release authenticates via OIDC automatically.
+      HAS_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # For tag releases, fail fast if the tag does not match the crate version so we
+      # never publish vX.Y.Z from a manifest still on a different version.
+      - name: Verify tag matches crate version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          crate_version="$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c "import json,sys; m=json.load(sys.stdin); print(next(p['version'] for p in m['packages'] if p['name']=='spm-cli'))")"
+          tag_version="${GITHUB_REF_NAME#v}"
+          echo "tag=$tag_version crate=$crate_version"
+          if [ "$tag_version" != "$crate_version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match crate version $crate_version"
+            exit 1
+          fi
+
+      - name: Test gate
+        run: cargo test --locked
+
+      # OIDC auth is only needed when no bootstrap token is configured and we are
+      # actually uploading. It fails unless a trusted publisher is registered for
+      # the crate, so it is skipped during the token bootstrap and on dry-runs.
+      - name: Authenticate to crates.io (Trusted Publishing)
+        id: auth
+        if: ${{ env.HAS_TOKEN == 'false' && env.DRY_RUN != 'true' }}
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: Publish
+        env:
+          # Prefer the bootstrap token if present, else the OIDC-exchanged token.
+          # Empty on dry-run (cargo does not need a token then).
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN || steps.auth.outputs.token }}
+        run: |
+          set -euo pipefail
+          if [ "$DRY_RUN" = "true" ]; then
+            cargo publish --locked --dry-run
+          else
+            cargo publish --locked
+          fi
