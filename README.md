@@ -87,7 +87,7 @@ instead of hanging on a prompt (helpers and ssh-agent still work).
 `spm` ships as a single self-contained binary (needs the system `git` on `PATH`
 at runtime, plus the `copilot` CLI if you target `copilot`).
 
-**From npm (recommended)** — _pending the initial publish ([#TODO](https://github.com/camunda/spm-cli/issues))_.
+**From npm (recommended)** — _pending the initial publish ([#6](https://github.com/camunda/spm-cli/issues/6))_.
 Once published, this is the zero-setup path on every platform — it puts `spm` on
 your `PATH` with no manual steps:
 
