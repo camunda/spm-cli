@@ -19,7 +19,15 @@ impl Vendor for Claude {
     /// assemble a self-contained marketplace in `~/.spm/vendors/claude/<project>/`
     /// (outside the repo) and register it via the project's gitignored
     /// `.claude/settings.local.json`. Nothing lands in the project tree.
-    fn materialize(&self, project_root: &Path, skills: &[MaterializedSkill]) -> Result<()> {
+    // Claude registration is per-project (a pointer in the repo's gitignored
+    // settings.local.json), so the marketplace name can stay fixed and the
+    // stable project_id is unused here.
+    fn materialize(
+        &self,
+        project_root: &Path,
+        _project_id: &str,
+        skills: &[MaterializedSkill],
+    ) -> Result<()> {
         let market_dir = paths::vendor_project_dir("claude", project_root)?;
         // Rebuild from scratch so removed skills disappear.
         if market_dir.exists() {
@@ -58,7 +66,7 @@ impl Vendor for Claude {
         Ok(())
     }
 
-    fn clean(&self, project_root: &Path) -> Result<()> {
+    fn clean(&self, project_root: &Path, _project_id: &str) -> Result<()> {
         let market_dir = paths::vendor_project_dir("claude", project_root)?;
         if market_dir.exists() {
             std::fs::remove_dir_all(&market_dir)?;

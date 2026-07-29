@@ -86,8 +86,9 @@ pub fn run() -> Result<()> {
 
 fn clean(root: &Path) -> Result<()> {
     let manifest = Manifest::load(root)?;
+    let lock = Lockfile::load_or_default(root)?;
     for target in &manifest.targets {
-        vendor::for_target(target)?.clean(root)?;
+        vendor::for_target(target)?.clean(root, &lock.id)?;
     }
     println!(
         "cleaned generated config for target(s): {}",
@@ -194,7 +195,17 @@ fn sync(root: &Path, force_refresh: bool, only: Option<&str>) -> Result<usize> {
         .map(|t| vendor::for_target(t))
         .collect::<Result<Vec<_>>>()?;
     let mut prev = Lockfile::load_or_default(root)?;
-    let mut lock = Lockfile::default();
+
+    // Stable, path-independent project id: reuse the locked one, else mint & persist.
+    let id = if prev.id.is_empty() {
+        crate::lockfile::generate_id(root)
+    } else {
+        prev.id.clone()
+    };
+    let mut lock = Lockfile {
+        id,
+        ..Default::default()
+    };
 
     // Column width for aligned per-skill output.
     let width = manifest.skills.keys().map(String::len).max().unwrap_or(0);
@@ -255,7 +266,7 @@ fn sync(root: &Path, force_refresh: bool, only: Option<&str>) -> Result<usize> {
         println!("materializing: {}", manifest.targets.join(", "));
     }
     for vendor in &vendors {
-        vendor.materialize(root, &materialized)?;
+        vendor.materialize(root, &lock.id, &materialized)?;
     }
     Ok(lock.skills.len())
 }

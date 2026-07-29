@@ -20,7 +20,7 @@ ai.json ──resolve──▶ ai.lock ──fetch──▶ ~/.spm/store/<repo>@
 - **Vendor projection** (`~/.spm/vendors`) — a self-contained plugin marketplace assembled outside your repo. Both vendors require skills to physically live inside a plugin dir, so spm copies them **here**, never into your project tree.
 - **Registration** differs per vendor:
   - **Claude** — spm writes a pointer to the marketplace into `.claude/settings.local.json` (gitignored by convention). Declarative, per-project, zero VCS footprint.
-  - **Copilot CLI** — spm shells out to `copilot plugin marketplace add` + `copilot plugin install`. Copilot marketplaces/plugins are **user-global** (no project-local config), so registration is global; spm uses a per-project marketplace id to avoid collisions. Requires the `copilot` CLI on PATH.
+  - **Copilot CLI** — spm shells out to `copilot plugin marketplace add` + `copilot plugin install`. Copilot marketplaces/plugins are **user-global** (no project-local config), so registration is global. spm names the registration by a **stable, path-independent project id** stored in `ai.lock` (`spm-xxxxxxxx`), so a moved or re-cloned checkout re-registers the *same* entry instead of leaving a duplicate. Orphaned registrations (whose local dir no longer exists) are pruned automatically on each `spm install`/`clean`. Requires the `copilot` CLI on PATH.
 
 On a fresh clone, teammates run `spm install` — it rebuilds their own store and re-registers from `ai.lock`. Same model as `node_modules`.
 

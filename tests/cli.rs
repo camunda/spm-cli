@@ -182,6 +182,13 @@ fn copilot_add_assembles_plugin_marketplace() {
     assert!(dir.join("plugin/skills/greet/SKILL.md").exists());
     // No VS Code instruction files anymore.
     assert!(!sb.project.join(".vscode").exists());
+
+    // The marketplace dir is named by the stable, path-independent id in ai.lock
+    // (so moved/re-cloned checkouts re-register the same entry, not a duplicate).
+    let lock = sb.read("ai.lock");
+    let id = dir.file_name().unwrap().to_string_lossy().to_string();
+    assert!(id.starts_with("spm-"), "dir id: {id}");
+    assert!(lock.contains(&format!("\"id\": \"{id}\"")), "{lock}");
 }
 
 #[test]

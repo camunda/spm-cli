@@ -18,10 +18,16 @@ pub trait Vendor {
     fn name(&self) -> &'static str;
 
     /// Generate/refresh whatever config makes this vendor load `skills`.
-    fn materialize(&self, project_root: &Path, skills: &[MaterializedSkill]) -> Result<()>;
+    /// `project_id` is the stable, path-independent id from the lockfile.
+    fn materialize(
+        &self,
+        project_root: &Path,
+        project_id: &str,
+        skills: &[MaterializedSkill],
+    ) -> Result<()>;
 
-    /// Remove everything this vendor generated for `project_root`.
-    fn clean(&self, project_root: &Path) -> Result<()>;
+    /// Remove everything this vendor generated for this project.
+    fn clean(&self, project_root: &Path, project_id: &str) -> Result<()>;
 }
 
 pub fn for_target(target: &str) -> Result<Box<dyn Vendor>> {

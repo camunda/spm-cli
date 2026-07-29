@@ -9,8 +9,31 @@ pub const LOCK_FILE: &str = "ai.lock";
 /// every version selector is resolved down to an immutable commit SHA + store key.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Lockfile {
+    /// Stable, path-independent project id (`spm-xxxxxxxx`), generated once and
+    /// then committed. Used to name per-project vendor registrations (e.g. the
+    /// Copilot marketplace/plugin) so they stay identical across clones, moves,
+    /// and machines — preventing orphaned duplicate registrations.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
     #[serde(default)]
     pub skills: BTreeMap<String, LockedSkill>,
+}
+
+/// Generate a fresh, kebab-safe project id. Called once when a lockfile has none;
+/// the value is then persisted, so uniqueness (not determinism) is what matters.
+pub fn generate_id(root: &Path) -> String {
+    let seed = format!(
+        "{:?}|{:?}|{}",
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH),
+        root,
+        std::process::id()
+    );
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in seed.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("spm-{:08x}", h & 0xffff_ffff)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
