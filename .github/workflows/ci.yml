@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
   workflow_dispatch:
 
 env:
@@ -15,6 +16,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Enforces Conventional Commits on the PR's commit messages via Camunda's
+  # reusable workflow. PR-only: it reads github.event.pull_request.* to
+  # determine the commit range, so it can only run on pull_request events.
+  commitlint:
+    if: github.event_name == 'pull_request'
+    uses: camunda/sdk-infra/.github/workflows/sdk-commitlint.yml@v1
+
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
