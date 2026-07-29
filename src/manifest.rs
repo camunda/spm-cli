@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 pub const MANIFEST_FILE: &str = "ai.json";
 
@@ -60,6 +60,49 @@ impl SkillSpec {
     }
 }
 
+/// Reject a skill name that could escape the vendor `skills/` directory when it
+/// is used verbatim as a path component (e.g. `skills_dir.join(name)`). Names
+/// come straight from `ai.json` keys, so a hostile manifest could otherwise
+/// write outside the intended directory via `..`, `/`, or an absolute path.
+pub fn validate_skill_name(name: &str) -> Result<()> {
+    let bad = name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains('\0');
+    if bad {
+        bail!(
+            "invalid skill name `{name}`: names must be non-empty and must not contain \
+             path separators, `.`, `..`, or NUL"
+        );
+    }
+    Ok(())
+}
+
+/// Reject a skill `path` that could escape the fetched repo root. The subdir is
+/// joined onto the store checkout (`repo_dir.join(path)`); without this a hostile
+/// manifest could use an absolute path or `..` to read arbitrary files off the
+/// host (e.g. `/etc`, or a sibling repo's checkout in the shared store).
+pub fn validate_subpath(path: &str) -> Result<()> {
+    let p = Path::new(path);
+    for comp in p.components() {
+        match comp {
+            Component::Prefix(_) | Component::RootDir => {
+                bail!("invalid path `{path}`: must be relative to the repo root")
+            }
+            Component::ParentDir => {
+                bail!("invalid path `{path}`: `..` components are not allowed")
+            }
+            Component::CurDir | Component::Normal(_) => {}
+        }
+    }
+    if path.contains('\0') {
+        bail!("invalid path `{path}`: must not contain NUL");
+    }
+    Ok(())
+}
+
 impl Manifest {
     pub fn path_in(dir: &Path) -> PathBuf {
         dir.join(MANIFEST_FILE)
@@ -72,7 +115,16 @@ impl Manifest {
         let value: serde_json::Value =
             serde_json::from_str(&text).with_context(|| format!("parsing {}", p.display()))?;
         crate::schema::validate(&value).with_context(|| format!("in {}", p.display()))?;
-        serde_json::from_value(value).with_context(|| format!("parsing {}", p.display()))
+        let manifest: Self =
+            serde_json::from_value(value).with_context(|| format!("parsing {}", p.display()))?;
+        for (name, spec) in &manifest.skills {
+            validate_skill_name(name).with_context(|| format!("in {}", p.display()))?;
+            if let Some(sub) = &spec.path {
+                validate_subpath(sub)
+                    .with_context(|| format!("skill `{name}` in {}", p.display()))?;
+            }
+        }
+        Ok(manifest)
     }
 
     pub fn save(&self, dir: &Path) -> Result<()> {

@@ -18,6 +18,9 @@ pub fn resolve(spec: &SkillSpec) -> Result<LockedSkill> {
         }
         Version::Branch(b) => git::ls_remote(&spec.git, &[&format!("refs/heads/{b}")])?,
     };
+    // Normalize to lowercase so the pin matches git's lowercase `rev-parse HEAD`
+    // (otherwise an uppercase SHA is treated as stale and refetched every run).
+    let commit = commit.to_lowercase();
 
     Ok(LockedSkill {
         git: spec.git.clone(),

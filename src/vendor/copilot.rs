@@ -97,7 +97,11 @@ impl Vendor for Copilot {
 }
 
 /// This project's marketplace dir, keyed by the stable id (not the path).
+/// Rejects an empty/invalid id: `market_dir("")` would otherwise resolve to the
+/// shared `~/.spm/vendors/copilot` root, which `clean` recursively deletes —
+/// wiping every project's registration.
 fn market_dir(project_id: &str) -> Result<PathBuf> {
+    crate::lockfile::validate_project_id(project_id)?;
     Ok(paths::vendors_dir()?.join("copilot").join(project_id))
 }
 

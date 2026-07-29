@@ -26,7 +26,7 @@ pub fn ensure(locked: &LockedSkill) -> Result<Ensured> {
 
     let content = match &locked.path {
         Some(sub) => repo_dir.join(sub),
-        None => repo_dir,
+        None => repo_dir.clone(),
     };
     if !content.exists() {
         bail!(
@@ -36,8 +36,20 @@ pub fn ensure(locked: &LockedSkill) -> Result<Ensured> {
             &locked.commit[..locked.commit.len().min(8)]
         );
     }
+    // Defense in depth: the subdir is validated lexically upstream, but a
+    // symlinked directory inside the repo could still resolve outside it.
+    // Canonicalize and require the content to stay within the checkout.
+    let repo_canon = repo_dir.canonicalize()?;
+    let content_canon = content.canonicalize()?;
+    if !content_canon.starts_with(&repo_canon) {
+        bail!(
+            "path `{}` escapes the repository checkout for {}",
+            locked.path.as_deref().unwrap_or("."),
+            locked.git
+        );
+    }
     Ok(Ensured {
-        path: content,
+        path: content_canon,
         fetched,
     })
 }

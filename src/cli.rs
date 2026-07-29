@@ -125,6 +125,10 @@ fn add(
 ) -> Result<()> {
     let mut manifest = Manifest::load(root)?;
     let name = name.unwrap_or_else(|| default_name(&git));
+    crate::manifest::validate_skill_name(&name)?;
+    if let Some(sub) = &path {
+        crate::manifest::validate_subpath(sub)?;
+    }
     let spec = SkillSpec {
         git,
         tag: version.tag,

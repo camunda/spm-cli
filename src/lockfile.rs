@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -60,7 +60,37 @@ impl Lockfile {
             return Ok(Self::default());
         }
         let text = std::fs::read_to_string(&p)?;
-        serde_json::from_str(&text).with_context(|| format!("parsing {}", p.display()))
+        let lock: Self =
+            serde_json::from_str(&text).with_context(|| format!("parsing {}", p.display()))?;
+        lock.validate()
+            .with_context(|| format!("in {}", p.display()))?;
+        Ok(lock)
+    }
+
+    /// `ai.lock` is committed to the repo and therefore untrusted input. Its
+    /// `id`, per-skill `store` keys, and `commit`s all feed directly into
+    /// filesystem paths that get recursively deleted and rewritten. Reject any
+    /// value that could escape the intended directories before we act on it.
+    fn validate(&self) -> Result<()> {
+        if !self.id.is_empty() {
+            validate_project_id(&self.id)?;
+        }
+        for (name, l) in &self.skills {
+            validate_commit(&l.commit)
+                .with_context(|| format!("skill `{name}`"))?;
+            validate_store_key(&l.store)
+                .with_context(|| format!("skill `{name}`"))?;
+            // The store key must be exactly what we would derive; a mismatch means
+            // the lockfile was hand-edited to point somewhere else.
+            let expected = store_key(&l.git, &l.commit);
+            if l.store != expected {
+                bail!(
+                    "skill `{name}`: store key `{}` does not match `{expected}` derived from git+commit",
+                    l.store
+                );
+            }
+        }
+        Ok(())
     }
 
     pub fn save(&self, dir: &Path) -> Result<()> {
@@ -68,6 +98,48 @@ impl Lockfile {
         let text = serde_json::to_string_pretty(self)?;
         std::fs::write(&p, text + "\n").with_context(|| format!("writing {}", p.display()))
     }
+}
+
+/// A project id is used verbatim as a directory name and as a Copilot
+/// marketplace/plugin name. Restrict it to a safe, separator-free token.
+pub fn validate_project_id(id: &str) -> Result<()> {
+    let ok = !id.is_empty()
+        && id != "."
+        && id != ".."
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !ok {
+        bail!("invalid project id `{id}`: expected `[A-Za-z0-9_-]+`");
+    }
+    Ok(())
+}
+
+/// A commit must be a full 40-character lowercase hex SHA. Full SHAs keep the
+/// store key unambiguous and let `is_at_commit` compare against the lowercase
+/// `rev-parse HEAD` without spurious refetches; they also prevent path-injection
+/// through the SHA, which is appended verbatim into the store key.
+pub fn validate_commit(commit: &str) -> Result<()> {
+    let ok = commit.len() == 40
+        && commit
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c));
+    if !ok {
+        bail!("invalid commit `{commit}`: expected a full 40-character lowercase hex SHA");
+    }
+    Ok(())
+}
+
+/// A store key names a single directory beneath the global store root. It must
+/// not contain path separators, `..`, or anything that could escape that root.
+pub fn validate_store_key(key: &str) -> Result<()> {
+    let bad = key.is_empty()
+        || key.contains('/')
+        || key.contains('\\')
+        || key.contains('\0')
+        || key.split('@').any(|seg| seg == "." || seg == "..");
+    if bad {
+        bail!("invalid store key `{key}`: must be a single path component");
+    }
+    Ok(())
 }
 
 /// Derive a filesystem-safe, stable store key from a repo URL and commit SHA.

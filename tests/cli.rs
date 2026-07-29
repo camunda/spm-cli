@@ -284,3 +284,162 @@ fn schema_rejects_skill_without_version_selector() {
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("oneOf"));
 }
+
+#[test]
+fn rejects_path_traversal_in_skill_path() {
+    let sb = Sandbox::new();
+    // A hostile `path` escaping the fetched repo must be refused, not fetched.
+    std::fs::write(
+        sb.project.join("ai.json"),
+        format!(
+            r#"{{"targets":["claude"],"skills":{{"evil":{{"git":"{}","tag":"v0.1.0","path":"../../../../../../etc"}}}}}}"#,
+            sb.skill_url()
+        ),
+    )
+    .unwrap();
+    let out = sb.spm(&["install"]);
+    assert!(!out.status.success(), "traversal path must be rejected");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("`..`"), "{err}");
+}
+
+#[test]
+fn rejects_absolute_skill_path() {
+    let sb = Sandbox::new();
+    std::fs::write(
+        sb.project.join("ai.json"),
+        format!(
+            r#"{{"targets":["claude"],"skills":{{"evil":{{"git":"{}","tag":"v0.1.0","path":"/etc"}}}}}}"#,
+            sb.skill_url()
+        ),
+    )
+    .unwrap();
+    let out = sb.spm(&["install"]);
+    assert!(!out.status.success(), "absolute path must be rejected");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("relative to the repo root"), "{err}");
+}
+
+#[test]
+fn rejects_path_traversal_in_skill_name() {
+    let sb = Sandbox::new();
+    // A skill name containing path separators would let the vendor write outside
+    // its skills/ directory. Reject it at the manifest layer.
+    std::fs::write(
+        sb.project.join("ai.json"),
+        format!(
+            r#"{{"targets":["claude"],"skills":{{"../../evil":{{"git":"{}","tag":"v0.1.0"}}}}}}"#,
+            sb.skill_url()
+        ),
+    )
+    .unwrap();
+    let out = sb.spm(&["install"]);
+    assert!(!out.status.success(), "traversal name must be rejected");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("invalid skill name"), "{err}");
+}
+
+#[test]
+fn rejects_traversal_name_on_add() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    let out = sb.spm(&[
+        "add",
+        &sb.skill_url(),
+        "--tag",
+        "v0.1.0",
+        "--name",
+        "../escape",
+    ]);
+    assert!(!out.status.success(), "add must reject a traversal name");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("invalid skill name"));
+    // A rejected add must not leave the bad name persisted in ai.json.
+    assert!(!sb.read("ai.json").contains("escape"));
+}
+
+#[test]
+fn rejects_forged_absolute_store_in_lock() {
+    let sb = Sandbox::new();
+    std::fs::write(
+        sb.project.join("ai.json"),
+        r#"{"targets":["claude"],"skills":{}}"#,
+    )
+    .unwrap();
+    // A committed ai.lock is untrusted: an absolute `store` must never be acted on.
+    std::fs::write(
+        sb.project.join("ai.lock"),
+        r#"{"id":"spm-deadbeef","skills":{"evil":{"git":"u","reference":"branch:main","commit":"0000000000000000000000000000000000000000","store":"/home/victim/.config/autostart"}}}"#,
+    )
+    .unwrap();
+    let out = sb.spm(&["install"]);
+    assert!(!out.status.success(), "forged store must be rejected");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("store key"));
+}
+
+#[test]
+fn rejects_forged_project_id_in_lock() {
+    let sb = Sandbox::new();
+    std::fs::write(
+        sb.project.join("ai.json"),
+        r#"{"targets":["copilot"],"skills":{}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        sb.project.join("ai.lock"),
+        r#"{"id":"../../evil","skills":{}}"#,
+    )
+    .unwrap();
+    let out = sb.spm(&["install"]);
+    assert!(!out.status.success(), "forged id must be rejected");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("invalid project id"));
+}
+
+#[test]
+fn schema_rejects_abbreviated_commit() {
+    let sb = Sandbox::new();
+    std::fs::write(
+        sb.project.join("ai.json"),
+        r#"{"targets":["claude"],"skills":{"x":{"git":"u","commit":"abc1234"}}}"#,
+    )
+    .unwrap();
+    let out = sb.spm(&["install"]);
+    assert!(!out.status.success(), "abbreviated commit must be rejected");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("does not match schema"));
+}
+
+#[test]
+fn empty_id_in_lock_does_not_wipe_shared_copilot_dir() {
+    let sb = Sandbox::new();
+    std::fs::write(
+        sb.project.join("ai.json"),
+        r#"{"targets":["copilot"],"skills":{}}"#,
+    )
+    .unwrap();
+    // Untrusted lock with an empty id must not let clean delete the shared
+    // ~/.spm/vendors/copilot root (which would wipe every other project).
+    std::fs::write(sb.project.join("ai.lock"), r#"{"id":"","skills":{}}"#).unwrap();
+    let sibling = sb.spm_home.join("vendors/copilot/spm-other");
+    std::fs::create_dir_all(&sibling).unwrap();
+
+    let out = sb.spm(&["clean"]);
+    assert!(!out.status.success(), "clean with empty id must fail");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("invalid project id"));
+    assert!(sibling.exists(), "sibling project dir must survive");
+}
+
+#[test]
+fn uppercase_commit_pin_is_not_refetched() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    // Pin the real HEAD as an UPPERCASE 40-hex SHA. It must resolve, and a second
+    // install must reuse the cached checkout rather than deleting and refetching.
+    let head = skill_head(&sb.skill_repo).to_uppercase();
+    sb.ok(&["add", &sb.skill_url(), "--commit", &head, "--name", "greet"]);
+    let second = sb.ok(&["install"]);
+    assert!(
+        second.contains("cached") && !second.contains("fetched"),
+        "second install should be cached, got: {second}"
+    );
+    // The lock stores the normalized lowercase SHA.
+    assert!(sb.read("ai.lock").contains(&head.to_lowercase()));
+}
