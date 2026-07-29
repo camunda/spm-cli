@@ -15,6 +15,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Enforces Conventional Commits on PR titles/commits via the org reusable
+  # workflow. PR-only: there are no commits to lint on a direct push to main.
+  commitlint:
+    if: github.event_name == 'pull_request'
+    uses: camunda/sdk-infra/.github/workflows/sdk-commitlint.yml@v1
+
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
