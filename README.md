@@ -88,12 +88,12 @@ instead of hanging on a prompt (helpers and ssh-agent still work).
 at runtime, plus the `copilot` CLI if you target `copilot`).
 
 **Prebuilt binary** — download the asset for your platform from the
-[latest release](https://github.com/camunda/spm/releases/latest) and put it on
+[latest release](https://github.com/camunda/spm-cli/releases/latest) and put it on
 your `PATH`:
 
 ```bash
 # example: Apple Silicon macOS
-curl -L -o spm https://github.com/camunda/spm/releases/latest/download/spm-aarch64-apple-darwin
+curl -L -o spm https://github.com/camunda/spm-cli/releases/latest/download/spm-aarch64-apple-darwin
 chmod +x spm && sudo mv spm /usr/local/bin/
 ```
 
@@ -110,7 +110,7 @@ cargo install spm-cli
 **From source:**
 
 ```bash
-git clone https://github.com/camunda/spm && cd spm
+git clone https://github.com/camunda/spm-cli && cd spm-cli
 make install                  # release build → /usr/local/bin/spm
 make install PREFIX=~/.local  # or a custom prefix
 # or: cargo install --path .

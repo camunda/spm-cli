@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://github.com/camunda/spm/blob/main/schema/ai.schema.json",
+  "$id": "https://github.com/camunda/spm-cli/blob/main/schema/ai.schema.json",
   "title": "ai.json",
   "description": "spm skill manifest: declares target vendors and skill git dependencies.",
   "type": "object",
