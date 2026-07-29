@@ -1,11 +1,17 @@
 name: release
 
-# Cross-compiles static binaries for every target and attaches them to the
-# GitHub Release when a v* tag is pushed.
+# Cross-compiles static binaries for every target, attaches them to the GitHub
+# Release, and publishes them to npm as `@camunda8/spm` (+ per-platform packages)
+# when a v* tag is pushed. See RELEASE.md for the full release procedure.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build + package npm without publishing (npm publish --dry-run)"
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -37,6 +43,14 @@ jobs:
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
+      # Upload the raw binary for the npm job to package, laid out as
+      # <target>/spm[.exe] so npm/build.mjs can find it by rust target.
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/spm${{ matrix.ext }}
+          if-no-files-found: error
       - name: Package
         shell: bash
         run: |
@@ -49,3 +63,69 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: ${{ env.ASSET }}
+
+  # Publishes the root `@camunda8/spm` launcher package plus the five
+  # per-platform binary packages to npm using npm Trusted Publishing (OIDC) — no
+  # long-lived NPM_TOKEN once the trusted publishers are configured. A temporary
+  # NPM_TOKEN secret, if set, is preferred for the one-time bootstrap publish
+  # (mirroring publish.yml's crates.io bootstrap). See RELEASE.md.
+  npm:
+    name: npm publish
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write # required for npm Trusted Publishing (OIDC)
+    env:
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+      # npm Trusted Publishing (OIDC) needs npm >= 11.5.1. Pinned (not @latest)
+      # for reproducible, supply-chain-safe releases.
+      - name: Update npm for OIDC Trusted Publishing
+        run: npm install -g npm@11.12.1
+      - name: Download binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      # Never publish vX.Y.Z npm packages from a manifest still on another version.
+      - name: Verify tag matches crate version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          crate_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          tag_version="${GITHUB_REF_NAME#v}"
+          echo "tag=$tag_version crate=$crate_version"
+          if [ "$tag_version" != "$crate_version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match crate version $crate_version"
+            exit 1
+          fi
+      - name: Generate npm packages
+        run: node npm/build.mjs --bin-dir artifacts
+      - name: Publish
+        env:
+          # Prefer a bootstrap token if present, else OIDC Trusted Publishing.
+          # npm uses OIDC automatically when NODE_AUTH_TOKEN is empty and a
+          # trusted publisher is configured for the package.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          publish() {
+            if [ "${DRY_RUN}" = "true" ]; then
+              npm publish "$1" --access public --dry-run
+            else
+              npm publish "$1" --access public
+            fi
+          }
+          # Platform packages first, then the root that depends on them.
+          for dir in npm/dist/@camunda8/spm-*; do
+            echo "::group::publish $dir"; publish "$dir"; echo "::endgroup::"
+          done
+          echo "::group::publish npm/dist/@camunda8/spm"
+          publish "npm/dist/@camunda8/spm"
+          echo "::endgroup::"
