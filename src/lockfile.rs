@@ -76,10 +76,8 @@ impl Lockfile {
             validate_project_id(&self.id)?;
         }
         for (name, l) in &self.skills {
-            validate_commit(&l.commit)
-                .with_context(|| format!("skill `{name}`"))?;
-            validate_store_key(&l.store)
-                .with_context(|| format!("skill `{name}`"))?;
+            validate_commit(&l.commit).with_context(|| format!("skill `{name}`"))?;
+            validate_store_key(&l.store).with_context(|| format!("skill `{name}`"))?;
             // The store key must be exactly what we would derive; a mismatch means
             // the lockfile was hand-edited to point somewhere else.
             let expected = store_key(&l.git, &l.commit);
@@ -106,7 +104,9 @@ pub fn validate_project_id(id: &str) -> Result<()> {
     let ok = !id.is_empty()
         && id != "."
         && id != ".."
-        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
     if !ok {
         bail!("invalid project id `{id}`: expected `[A-Za-z0-9_-]+`");
     }
