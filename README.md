@@ -87,9 +87,8 @@ instead of hanging on a prompt (helpers and ssh-agent still work).
 `spm` ships as a single self-contained binary (needs the system `git` on `PATH`
 at runtime, plus the `copilot` CLI if you target `copilot`).
 
-**From npm (recommended)** — _pending the initial publish ([#6](https://github.com/camunda/spm-cli/issues/6))_.
-Once published, this is the zero-setup path on every platform — it puts `spm` on
-your `PATH` with no manual steps:
+**From npm (recommended)** — the zero-setup path on every platform. It puts `spm`
+on your `PATH` with no manual steps:
 
 ```bash
 npm i -g @camunda8/spm
@@ -100,6 +99,13 @@ spm --help
 your OS/CPU via an optional dependency (`@camunda8/spm-<os>-<cpu>`), so nothing is
 compiled or downloaded outside npm. Supported: `darwin-x64`, `darwin-arm64`,
 `linux-x64`, `linux-arm64`, `win32-x64`. Update with `npm i -g @camunda8/spm@latest`.
+
+**From crates.io** — build and install from source via Cargo (needs a Rust
+toolchain). The crate is `spm-cli`; the installed binary is `spm`:
+
+```bash
+cargo install spm-cli
+```
 
 **Prebuilt binary** — the repo is **internal**, so release assets require
 authentication. Download with the [GitHub CLI](https://cli.github.com/) (you must
@@ -119,13 +125,6 @@ chmod +x spm && sudo mv spm /usr/local/bin/
 Assets: `spm-x86_64-unknown-linux-gnu`, `spm-aarch64-unknown-linux-gnu`,
 `spm-x86_64-apple-darwin`, `spm-aarch64-apple-darwin`,
 `spm-x86_64-pc-windows-msvc.exe`.
-
-**From crates.io** — _not published yet_. The crate name `spm-cli` is reserved
-(the binary is `spm`); once it's published you'll be able to run:
-
-```bash
-cargo install spm-cli
-```
 
 **From source:**
 
