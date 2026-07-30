@@ -30,7 +30,7 @@ jobs:
           - { os: macos-latest,   target: aarch64-apple-darwin,       ext: "" }
           - { os: windows-latest, target: x86_64-pc-windows-msvc,     ext: ".exe" }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -46,7 +46,7 @@ jobs:
       # Upload the raw binary for the npm job to package, laid out as
       # <target>/spm[.exe] so npm/build.mjs can find it by rust target.
       - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.target }}
           path: target/${{ matrix.target }}/release/spm${{ matrix.ext }}
@@ -80,8 +80,8 @@ jobs:
     env:
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
@@ -90,7 +90,7 @@ jobs:
       - name: Update npm for OIDC Trusted Publishing
         run: npm install -g npm@11.12.1
       - name: Download binary artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: artifacts
       # Never publish vX.Y.Z npm packages from a manifest still on another version.

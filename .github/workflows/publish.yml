@@ -61,7 +61,7 @@ jobs:
       HAS_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
