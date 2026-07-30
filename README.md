@@ -87,6 +87,20 @@ instead of hanging on a prompt (helpers and ssh-agent still work).
 `spm` ships as a single self-contained binary (needs the system `git` on `PATH`
 at runtime, plus the `copilot` CLI if you target `copilot`).
 
+**From npm (recommended)** — _pending the initial publish ([#6](https://github.com/camunda/spm-cli/issues/6))_.
+Once published, this is the zero-setup path on every platform — it puts `spm` on
+your `PATH` with no manual steps:
+
+```bash
+npm i -g @camunda8/spm
+spm --help
+```
+
+`@camunda8/spm` is a thin launcher that pulls in the matching prebuilt binary for
+your OS/CPU via an optional dependency (`@camunda8/spm-<os>-<cpu>`), so nothing is
+compiled or downloaded outside npm. Supported: `darwin-x64`, `darwin-arm64`,
+`linux-x64`, `linux-arm64`, `win32-x64`. Update with `npm i -g @camunda8/spm@latest`.
+
 **Prebuilt binary** — the repo is **internal**, so release assets require
 authentication. Download with the [GitHub CLI](https://cli.github.com/) (you must
 be signed in via `gh auth login` and be a Camunda org member), then put the binary
