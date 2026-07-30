@@ -84,9 +84,6 @@ impl Sandbox {
             .args(args)
             .current_dir(&self.project)
             .env("SPM_HOME", &self.spm_home)
-            // Stub the copilot CLI with a no-op so tests never touch (or require)
-            // the real, user-global copilot installation.
-            .env("SPM_COPILOT_BIN", "true")
             .output()
             .unwrap()
     }
@@ -161,7 +158,7 @@ fn claude_add_resolves_tag_to_commit_and_wires_marketplace() {
 }
 
 #[test]
-fn copilot_add_assembles_plugin_marketplace() {
+fn copilot_add_materializes_project_local_skills() {
     let sb = Sandbox::new();
     sb.ok(&["init", "--target", "copilot"]);
     sb.ok(&[
@@ -173,22 +170,22 @@ fn copilot_add_assembles_plugin_marketplace() {
         "greet",
     ]);
 
-    let dir = sb.vendor_dir("copilot");
-    // Self-contained marketplace: manifest, plugin manifest, and the skill inside.
-    let marketplace = dir.join(".github/plugin/marketplace.json");
-    let manifest = std::fs::read_to_string(&marketplace).unwrap();
-    assert!(manifest.contains("\"source\": \"plugin\""), "{manifest}");
-    assert!(dir.join("plugin/plugin.json").exists());
-    assert!(dir.join("plugin/skills/greet/SKILL.md").exists());
-    // No VS Code instruction files anymore.
-    assert!(!sb.project.join(".vscode").exists());
+    // Skills are copied into a project-local dir, not a user-global marketplace.
+    let skill_md = sb
+        .project
+        .join(".agents/skills/spm-managed-skills/greet/SKILL.md");
+    assert!(skill_md.exists(), "missing {}", skill_md.display());
+    // Nothing lands in the global vendors area anymore.
+    assert!(!sb.spm_home.join("vendors/copilot").exists());
 
-    // The marketplace dir is named by the stable, path-independent id in ai.lock
-    // (so moved/re-cloned checkouts re-register the same entry, not a duplicate).
-    let lock = sb.read("ai.lock");
-    let id = dir.file_name().unwrap().to_string_lossy().to_string();
-    assert!(id.starts_with("spm-"), "dir id: {id}");
-    assert!(lock.contains(&format!("\"id\": \"{id}\"")), "{lock}");
+    // The managed dir is gitignored (with an explanatory comment) so the copied
+    // skills are never committed.
+    let gitignore = sb.read(".gitignore");
+    assert!(
+        gitignore.contains(".agents/skills/spm-managed-skills/"),
+        "{gitignore}"
+    );
+    assert!(gitignore.contains("spm-managed"), "{gitignore}");
 }
 
 #[test]
@@ -244,8 +241,8 @@ fn multi_target_wires_both_vendors() {
         .join("plugin/skills/greet/SKILL.md")
         .exists());
     assert!(sb
-        .vendor_dir("copilot")
-        .join("plugin/skills/greet/SKILL.md")
+        .project
+        .join(".agents/skills/spm-managed-skills/greet/SKILL.md")
         .exists());
     assert!(sb.read(".claude/settings.local.json").contains("spm@spm"));
 }
@@ -400,23 +397,38 @@ fn schema_rejects_abbreviated_commit() {
 }
 
 #[test]
-fn empty_id_in_lock_does_not_wipe_shared_copilot_dir() {
+fn copilot_clean_removes_project_local_dir_and_gitignore_entry() {
     let sb = Sandbox::new();
-    std::fs::write(
-        sb.project.join("ai.json"),
-        r#"{"targets":["copilot"],"skills":{}}"#,
-    )
-    .unwrap();
-    // Untrusted lock with an empty id must not let clean delete the shared
-    // ~/.spm/vendors/copilot root (which would wipe every other project).
-    std::fs::write(sb.project.join("ai.lock"), r#"{"id":"","skills":{}}"#).unwrap();
-    let sibling = sb.spm_home.join("vendors/copilot/spm-other");
-    std::fs::create_dir_all(&sibling).unwrap();
+    sb.ok(&["init", "--target", "copilot"]);
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--name",
+        "greet",
+    ]);
 
-    let out = sb.spm(&["clean"]);
-    assert!(!out.status.success(), "clean with empty id must fail");
-    assert!(String::from_utf8_lossy(&out.stderr).contains("invalid project id"));
-    assert!(sibling.exists(), "sibling project dir must survive");
+    let managed = sb.project.join(".agents/skills/spm-managed-skills");
+    assert!(
+        managed.exists(),
+        "skills should be materialized before clean"
+    );
+    assert!(sb
+        .read(".gitignore")
+        .contains(".agents/skills/spm-managed-skills/"));
+
+    sb.ok(&["clean"]);
+
+    assert!(
+        !managed.exists(),
+        "clean must remove the managed skills dir"
+    );
+    assert!(
+        !sb.read(".gitignore")
+            .contains(".agents/skills/spm-managed-skills/"),
+        "clean must drop the gitignore entry"
+    );
 }
 
 #[test]

@@ -1,24 +1,31 @@
 use super::{MaterializedSkill, Vendor};
-use crate::{fsutil, jsonutil, paths};
-use anyhow::{bail, Context, Result};
-use serde_json::json;
+use crate::fsutil;
+use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// GitHub Copilot CLI adapter.
 ///
-/// Copilot CLI consumes skills through a plugin marketplace (`marketplace.json`
-/// → `plugin.json` → `skills/<name>/SKILL.md`), the same shape as Claude. spm
-/// assembles a self-contained marketplace under `~/.spm/vendors/copilot/<id>/`
-/// (outside the repo) and registers it by shelling out to the `copilot` CLI.
+/// Copilot CLI auto-discovers skills from `.agents/skills/**/SKILL.md` relative
+/// to the directory it runs in. To make spm-managed skills **truly project
+/// local** — available to Copilot when it runs in the repo, but never committed
+/// — spm copies each resolved skill into
+/// `.agents/skills/spm-managed-skills/<name>/` inside the project and adds that
+/// path to the project's `.gitignore` (with an explanatory comment).
 ///
-/// Unlike Claude, Copilot CLI marketplaces/plugins are **user-global** and
-/// command-driven — there is no project-local config file to write, so wiring
-/// mutates global `copilot` state. The registration is named by the stable,
-/// path-independent project id from the lockfile, so re-running from a moved or
-/// re-cloned checkout re-registers the *same* entry instead of leaving an
-/// orphaned duplicate. Orphans from earlier runs are pruned on every sync.
+/// This deliberately replaces the previous user-global approach (shelling out to
+/// `copilot plugin marketplace add`/`install`): there is no global state to
+/// register, prune, or leave orphaned, and nothing spm generates is committed.
 pub struct Copilot;
+
+/// Directory segments (relative to the project root) that spm materializes
+/// skills into. Kept in sync with the `.gitignore` entry below.
+const MANAGED_DIR: [&str; 3] = [".agents", "skills", "spm-managed-skills"];
+
+/// The `.gitignore` line (forward-slashed, trailing slash) that ignores the
+/// materialized skills, plus the comment written just above it.
+const GITIGNORE_ENTRY: &str = ".agents/skills/spm-managed-skills/";
+const GITIGNORE_COMMENT: &str =
+    "# spm-managed Copilot skills — materialized locally by `spm`, not committed.";
 
 impl Vendor for Copilot {
     fn name(&self) -> &'static str {
@@ -27,34 +34,27 @@ impl Vendor for Copilot {
 
     fn materialize(
         &self,
-        _project_root: &Path,
-        project_id: &str,
+        project_root: &Path,
+        _project_id: &str,
         skills: &[MaterializedSkill],
     ) -> Result<()> {
-        let dir = market_dir(project_id)?;
-        prune_orphans();
+        let dir = managed_dir(project_root);
 
-        // No skills: tear down this project's registration and remove the dir.
+        // Rebuild from scratch so removed skills disappear.
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).with_context(|| format!("clearing {}", dir.display()))?;
+        }
+
         if skills.is_empty() {
-            unregister(project_id);
-            if dir.exists() {
-                std::fs::remove_dir_all(&dir)?;
-            }
             return Ok(());
         }
 
-        // Rebuild the marketplace from scratch so removed skills disappear.
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir)?;
-        }
-        let plugin_dir = dir.join("plugin");
-        let skills_dir = plugin_dir.join("skills");
-        std::fs::create_dir_all(&skills_dir)?;
+        std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
 
         for s in skills {
-            let dest = skills_dir.join(&s.name);
+            let dest = dir.join(&s.name);
             fsutil::copy_tree(&s.path, &dest)
-                .with_context(|| format!("copying skill `{}` into plugin", s.name))?;
+                .with_context(|| format!("copying skill `{}` into {}", s.name, dir.display()))?;
             if !dest.join("SKILL.md").exists() {
                 eprintln!(
                     "warning: skill `{}` has no SKILL.md at its root — Copilot may ignore it",
@@ -63,159 +63,109 @@ impl Vendor for Copilot {
             }
         }
 
-        jsonutil::write(
-            &plugin_dir.join("plugin.json"),
-            &json!({ "name": project_id }),
-        )?;
-        jsonutil::write(
-            &dir.join(".github/plugin/marketplace.json"),
-            &json!({
-                "name": project_id,
-                "owner": { "name": "spm", "email": "spm@example.com" },
-                "metadata": { "description": "spm-managed skills", "version": "0.0.0" },
-                "plugins": [{
-                    "name": project_id,
-                    "description": "spm-managed skills",
-                    "version": "0.0.0",
-                    "source": "plugin"
-                }],
-            }),
-        )?;
-
-        register(project_id, &dir)
+        ensure_gitignored(project_root)
     }
 
-    fn clean(&self, _project_root: &Path, project_id: &str) -> Result<()> {
-        unregister(project_id);
-        prune_orphans();
-        let dir = market_dir(project_id)?;
+    fn clean(&self, project_root: &Path, _project_id: &str) -> Result<()> {
+        let dir = managed_dir(project_root);
         if dir.exists() {
-            std::fs::remove_dir_all(&dir)?;
+            std::fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
         }
-        Ok(())
+        remove_gitignore_entry(project_root)
     }
 }
 
-/// This project's marketplace dir, keyed by the stable id (not the path).
-/// Rejects an empty/invalid id: `market_dir("")` would otherwise resolve to the
-/// shared `~/.spm/vendors/copilot` root, which `clean` recursively deletes —
-/// wiping every project's registration.
-fn market_dir(project_id: &str) -> Result<PathBuf> {
-    crate::lockfile::validate_project_id(project_id)?;
-    Ok(paths::vendors_dir()?.join("copilot").join(project_id))
+/// Absolute path of the project-local managed skills directory.
+fn managed_dir(project_root: &Path) -> PathBuf {
+    MANAGED_DIR
+        .iter()
+        .fold(project_root.to_path_buf(), |p, seg| p.join(seg))
 }
 
-/// Register (or refresh) the generated marketplace with the copilot CLI.
-fn register(id: &str, dir: &Path) -> Result<()> {
-    if !copilot_available() {
-        eprintln!(
-            "warning: `copilot` CLI not found — skills assembled at {} but not registered.\n  \
-             Register manually:\n    copilot plugin marketplace add {}\n    copilot plugin install {id}@{id}",
-            dir.display(),
-            dir.display()
-        );
+/// Ensure the project's `.gitignore` ignores the managed skills dir, adding the
+/// comment + entry once. Idempotent: an existing entry (however authored) is
+/// left untouched.
+fn ensure_gitignored(project_root: &Path) -> Result<()> {
+    let path = project_root.join(".gitignore");
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    if existing.lines().any(|l| l.trim() == GITIGNORE_ENTRY) {
         return Ok(());
     }
-    // Refresh: drop any prior registration, then re-add and install.
-    run(&["plugin", "uninstall", id], true)?;
-    run(&["plugin", "marketplace", "remove", id], true)?;
-    run(
-        &["plugin", "marketplace", "add", &dir.to_string_lossy()],
-        false,
-    )?;
-    run(&["plugin", "install", &format!("{id}@{id}")], false)?;
-    Ok(())
-}
 
-/// Best-effort teardown of a project's copilot registration (used by clean/empty).
-fn unregister(id: &str) {
-    if copilot_available() {
-        let _ = run(&["plugin", "uninstall", id], true);
-        let _ = run(&["plugin", "marketplace", "remove", id], true);
-    }
-}
-
-/// Remove spm-managed marketplaces whose local directory no longer exists —
-/// leftovers from deleted projects or the old path-derived naming scheme.
-fn prune_orphans() {
-    if !copilot_available() {
-        return;
-    }
-    let Ok(out) = Command::new(copilot_bin())
-        .args(["plugin", "marketplace", "list"])
-        .output()
-    else {
-        return;
-    };
-    let listing = String::from_utf8_lossy(&out.stdout);
-    for (name, local) in parse_local_marketplaces(&listing) {
-        if name.starts_with("spm") && !Path::new(&local).exists() {
-            let _ = run(&["plugin", "uninstall", &name], true);
-            let _ = run(&["plugin", "marketplace", "remove", &name], true);
+    let mut out = existing;
+    if !out.is_empty() {
+        if !out.ends_with('\n') {
+            out.push('\n');
         }
+        out.push('\n'); // blank line separating our block from prior content
     }
+    out.push_str(GITIGNORE_COMMENT);
+    out.push('\n');
+    out.push_str(GITIGNORE_ENTRY);
+    out.push('\n');
+
+    std::fs::write(&path, out).with_context(|| format!("updating {}", path.display()))
 }
 
-/// Parse `copilot plugin marketplace list` lines of the form
-/// `  • <name> (Local: <path>)`, returning (name, path) for local marketplaces.
-fn parse_local_marketplaces(listing: &str) -> Vec<(String, String)> {
-    listing
+/// Remove the comment + entry spm added to `.gitignore` (used by `clean`).
+/// Lines the user added independently are preserved.
+fn remove_gitignore_entry(project_root: &Path) -> Result<()> {
+    let path = project_root.join(".gitignore");
+    let Ok(existing) = std::fs::read_to_string(&path) else {
+        return Ok(());
+    };
+
+    let mut kept: Vec<&str> = existing
         .lines()
-        .filter_map(|line| {
-            let (left, rest) = line.split_once(" (Local: ")?;
-            let name = left
-                .trim_start_matches(|c: char| !c.is_alphanumeric())
-                .trim();
-            let path = rest.trim_end().trim_end_matches(')');
-            (!name.is_empty()).then(|| (name.to_string(), path.to_string()))
+        .filter(|l| {
+            let t = l.trim();
+            t != GITIGNORE_ENTRY && t != GITIGNORE_COMMENT
         })
-        .collect()
-}
-
-/// The copilot binary, overridable via `SPM_COPILOT_BIN` (used by tests).
-fn copilot_bin() -> String {
-    std::env::var("SPM_COPILOT_BIN").unwrap_or_else(|_| "copilot".to_string())
-}
-
-fn copilot_available() -> bool {
-    Command::new(copilot_bin())
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-/// Run a copilot subcommand. When `ignore_err`, a non-zero exit is swallowed
-/// (e.g. removing something that isn't registered yet).
-fn run(args: &[&str], ignore_err: bool) -> Result<()> {
-    let out = Command::new(copilot_bin())
-        .args(args)
-        .output()
-        .with_context(|| format!("failed to run `copilot {}`", args.join(" ")))?;
-    if !out.status.success() && !ignore_err {
-        bail!(
-            "copilot {} failed: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+        .collect();
+    // Trim trailing blank lines left behind by the removal.
+    while kept.last().is_some_and(|l| l.trim().is_empty()) {
+        kept.pop();
     }
-    Ok(())
+
+    let out = if kept.is_empty() {
+        String::new()
+    } else {
+        format!("{}\n", kept.join("\n"))
+    };
+    std::fs::write(&path, out).with_context(|| format!("updating {}", path.display()))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_local_marketplaces;
+    use super::*;
 
     #[test]
-    fn parses_local_marketplaces_only() {
-        let listing = "Included with GitHub Copilot:\n  \u{25c6} copilot-plugins (GitHub: github/copilot-plugins)\n  \u{2022} spm-24918f1d (Local: /home/u/.spm/vendors/copilot/spm-24918f1d)\n";
-        let got = parse_local_marketplaces(listing);
-        assert_eq!(
-            got,
-            vec![(
-                "spm-24918f1d".to_string(),
-                "/home/u/.spm/vendors/copilot/spm-24918f1d".to_string()
-            )]
+    fn ensure_and_remove_gitignore_roundtrip() {
+        let tmp = std::env::temp_dir().join(format!("spm-gi-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let gi = tmp.join(".gitignore");
+        std::fs::write(&gi, "target/\n").unwrap();
+
+        ensure_gitignored(&tmp).unwrap();
+        let after = std::fs::read_to_string(&gi).unwrap();
+        assert!(after.contains(GITIGNORE_ENTRY), "{after}");
+        assert!(after.contains(GITIGNORE_COMMENT), "{after}");
+        assert!(
+            after.starts_with("target/\n"),
+            "preserves prior content: {after}"
         );
+
+        // Idempotent: a second call must not duplicate the entry.
+        ensure_gitignored(&tmp).unwrap();
+        let twice = std::fs::read_to_string(&gi).unwrap();
+        assert_eq!(twice.matches(GITIGNORE_ENTRY).count(), 1, "{twice}");
+
+        remove_gitignore_entry(&tmp).unwrap();
+        let cleaned = std::fs::read_to_string(&gi).unwrap();
+        assert!(!cleaned.contains(GITIGNORE_ENTRY), "{cleaned}");
+        assert!(!cleaned.contains(GITIGNORE_COMMENT), "{cleaned}");
+        assert_eq!(cleaned, "target/\n");
+
+        std::fs::remove_dir_all(&tmp).unwrap();
     }
 }

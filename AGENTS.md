@@ -9,9 +9,9 @@
 This repo is **spm** (`spm-cli`), a Rust command-line tool: a *skill package
 manager*. You declare AI skills as git dependencies in `ai.json`, and `spm`
 materializes them for AI tools (Claude Code and GitHub Copilot CLI) **without
-copying skills into your repo** — no symlinks in the project, no fragile
-`.gitignore` rules. See `README.md` for the user-facing model and `RELEASE.md`
-for distribution.
+committing skills to your repo** — anything written into the working tree is
+gitignored, and there are no symlinks. See `README.md` for the user-facing model
+and `RELEASE.md` for distribution.
 
 - **Project type**: single-binary CLI (`spm`).
 - **Source language**: Rust (edition 2021, MSRV **1.97**, pinned in `.tool-versions`).
@@ -43,7 +43,7 @@ generated source to regenerate.
 | `src/jsonutil.rs` | Merge-patches user-owned JSON config without clobbering user keys. |
 | `src/vendor/mod.rs` | The `Vendor` trait + `for_target` dispatch — the extension point for new targets. |
 | `src/vendor/claude.rs` | Claude adapter: writes a marketplace pointer into `.claude/settings.local.json`. |
-| `src/vendor/copilot.rs` | Copilot adapter: shells out to `copilot plugin marketplace add`/`install` (user-global). |
+| `src/vendor/copilot.rs` | Copilot adapter: copies skills into the gitignored, project-local `.agents/skills/spm-managed-skills/`. |
 | `tests/cli.rs` | End-to-end tests against the real binary with an isolated `SPM_HOME` per test. |
 | `schema/ai.schema.json` | Source of truth for the `ai.json` shape (draft-07); embedded by `src/schema.rs`. |
 | `npm/` | npm distribution: `build.mjs` generates the launcher + 5 platform packages from the crate version. |
@@ -156,8 +156,10 @@ Common `type` values: `feat`, `fix`, `chore`, `docs`, `style`, `refactor`,
 - Keep the subject concise; put rationale, links, and detail in the body.
 - Mark breaking changes with `BREAKING CHANGE:` in the body/footer.
 
-Always include the model used in the `Co-authored-by` section. Example:
-`Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`
+Attribute the AI author with a **single** `Co-authored-by` trailer: the Copilot
+co-author line, with the model name as the author name. Do not add a second,
+separate co-author line for the model. Example:
+`Co-authored-by: Copilot Opus 4.8 <223556219+Copilot@users.noreply.github.com>`
 
 ## Releasing
 
