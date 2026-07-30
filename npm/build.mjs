@@ -83,7 +83,9 @@ function main() {
   const binDir = resolve(args.binDir);
   const out = resolve(args.out);
 
-  rmSync(out, { recursive: true, force: true });
+  // Only clear the scope subdirectory we generate into, never the whole `out`
+  // (which is user-supplied and may point at an unrelated directory).
+  rmSync(join(out, SCOPE), { recursive: true, force: true });
 
   const optionalDependencies = {};
 
