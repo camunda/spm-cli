@@ -18,7 +18,7 @@ ai.json ──resolve──▶ ai.lock ──fetch──▶ ~/.spm/store/<repo>@
 - **Global store** (`~/.spm/store`) — each repo@commit fetched once, shared across all projects.
 - **Vendor projection** — spm copies the store's skills into wherever each vendor loads them from. Nothing spm generates is committed to your repo.
 - **Registration** differs per vendor:
-  - **Claude** — spm assembles a self-contained plugin marketplace under `~/.spm/vendors/claude/<project>/` (outside your repo) and writes a pointer to it into `.claude/settings.local.json` (gitignored by convention). Declarative, per-project, zero VCS footprint.
+  - **Claude** — spm assembles a self-contained plugin marketplace in the **project-local**, gitignored `.spm/claude/` dir and writes a pointer to it into `.claude/settings.local.json` (gitignored by convention). The dir sits outside `.agents/skills/` so Copilot's scanner never picks it up. Declarative, per-project, zero VCS footprint.
   - **Copilot CLI** — spm copies the resolved skills into a **project-local** directory, `.agents/skills/spm-managed-skills/<name>/`, where Copilot CLI auto-discovers them (`.agents/skills/**/SKILL.md`). That directory is added to the project's `.gitignore` (with an explanatory comment) so the materialized skills stay truly local and are never committed. No user-global state, no `copilot` CLI required.
 
 On a fresh clone, teammates run `spm install` — it rebuilds their own store and re-registers from `ai.lock`. Same model as `node_modules`.
@@ -151,7 +151,7 @@ spm clean                                          # remove generated vendor con
 
 - **Cross-OS**: shells out to the system `git` (no libgit2 build deps); no symlinks; all paths via `std::path`. Runs on Linux, macOS, Windows.
 - **`SPM_HOME`** overrides the store/vendor root (default `~/.spm`) — used by tests.
-- **Vendor adapters**: adding a target means implementing one `Vendor` trait (`src/vendor/`). `claude` assembles a plugin-marketplace layout (`marketplace.json` → `plugin.json` → `skills/<name>/SKILL.md`) outside the repo and points to it; `copilot` copies skills into the gitignored project-local `.agents/skills/spm-managed-skills/`.
+- **Vendor adapters**: adding a target means implementing one `Vendor` trait (`src/vendor/`). `claude` assembles a plugin-marketplace layout (`marketplace.json` → `plugin.json` → `skills/<name>/SKILL.md`) into the gitignored project-local `.spm/claude/` and points to it; `copilot` copies skills into the gitignored project-local `.agents/skills/spm-managed-skills/`. Both keep their materialized files out of VCS via the shared `src/gitignore.rs` helper.
 
 ## Development
 
