@@ -98,8 +98,9 @@ impl Lockfile {
     }
 }
 
-/// A project id is used verbatim as a directory name and as a Copilot
-/// marketplace/plugin name. Restrict it to a safe, separator-free token.
+/// A project id may be used verbatim as a directory name, so restrict it to a
+/// safe, separator-free token to keep untrusted `ai.lock` input from escaping
+/// the intended paths.
 pub fn validate_project_id(id: &str) -> Result<()> {
     let ok = !id.is_empty()
         && id != "."

@@ -1,26 +1,25 @@
 # spm — skill package manager
 
 Declare AI skills as git dependencies in `ai.json`, and `spm` wires them into your
-AI tool (Claude Code and GitHub Copilot CLI) **without ever copying skills into
-your repo**. No symlinks in the project, no fragile `.gitignore` rules.
+AI tool (Claude Code and GitHub Copilot CLI) **without ever committing skills to
+your repo**. Anything spm materializes into the working tree is gitignored — no
+symlinks, no skills under version control.
 
 ## How it works
 
 ```
 ai.json ──resolve──▶ ai.lock ──fetch──▶ ~/.spm/store/<repo>@<sha>   (global cache, one clone per commit)
                                               │
-                                              └─project──▶ ~/.spm/vendors/<target>/<project>/   (assembled marketplace)
-                                                                 │
-                                                                 └─register─▶ vendor picks it up (see below)
+                                              └─project──▶ materialized where the vendor expects it (see below)
 ```
 
 - **`ai.json`** — you author it, commit it. Declares target vendors + skill deps.
 - **`ai.lock`** — generated, commit it. Pins every version selector to an immutable commit SHA → reproducible installs.
 - **Global store** (`~/.spm/store`) — each repo@commit fetched once, shared across all projects.
-- **Vendor projection** (`~/.spm/vendors`) — a self-contained plugin marketplace assembled outside your repo. Both vendors require skills to physically live inside a plugin dir, so spm copies them **here**, never into your project tree.
+- **Vendor projection** — spm copies the store's skills into wherever each vendor loads them from. Nothing spm generates is committed to your repo.
 - **Registration** differs per vendor:
-  - **Claude** — spm writes a pointer to the marketplace into `.claude/settings.local.json` (gitignored by convention). Declarative, per-project, zero VCS footprint.
-  - **Copilot CLI** — spm shells out to `copilot plugin marketplace add` + `copilot plugin install`. Copilot marketplaces/plugins are **user-global** (no project-local config), so registration is global. spm names the registration by a **stable, path-independent project id** stored in `ai.lock` (`spm-xxxxxxxx`), so a moved or re-cloned checkout re-registers the *same* entry instead of leaving a duplicate. Orphaned registrations (whose local dir no longer exists) are pruned automatically on each `spm install`/`clean`. Requires the `copilot` CLI on PATH.
+  - **Claude** — spm assembles a self-contained plugin marketplace under `~/.spm/vendors/claude/<project>/` (outside your repo) and writes a pointer to it into `.claude/settings.local.json` (gitignored by convention). Declarative, per-project, zero VCS footprint.
+  - **Copilot CLI** — spm copies the resolved skills into a **project-local** directory, `.agents/skills/spm-managed-skills/<name>/`, where Copilot CLI auto-discovers them (`.agents/skills/**/SKILL.md`). That directory is added to the project's `.gitignore` (with an explanatory comment) so the materialized skills stay truly local and are never committed. No user-global state, no `copilot` CLI required.
 
 On a fresh clone, teammates run `spm install` — it rebuilds their own store and re-registers from `ai.lock`. Same model as `node_modules`.
 
@@ -85,7 +84,7 @@ instead of hanging on a prompt (helpers and ssh-agent still work).
 ## Installation
 
 `spm` ships as a single self-contained binary (needs the system `git` on `PATH`
-at runtime, plus the `copilot` CLI if you target `copilot`).
+at runtime).
 
 **From npm (recommended)** — the zero-setup path on every platform. It puts `spm`
 on your `PATH` with no manual steps:
@@ -152,7 +151,7 @@ spm clean                                          # remove generated vendor con
 
 - **Cross-OS**: shells out to the system `git` (no libgit2 build deps); no symlinks; all paths via `std::path`. Runs on Linux, macOS, Windows.
 - **`SPM_HOME`** overrides the store/vendor root (default `~/.spm`) — used by tests.
-- **Vendor adapters**: adding a target means implementing one `Vendor` trait (`src/vendor/`). Both `claude` and `copilot` assemble the same plugin-marketplace layout (`marketplace.json` → `plugin.json` → `skills/<name>/SKILL.md`); they differ only in how the marketplace is registered.
+- **Vendor adapters**: adding a target means implementing one `Vendor` trait (`src/vendor/`). `claude` assembles a plugin-marketplace layout (`marketplace.json` → `plugin.json` → `skills/<name>/SKILL.md`) outside the repo and points to it; `copilot` copies skills into the gitignored project-local `.agents/skills/spm-managed-skills/`.
 
 ## Development
 
