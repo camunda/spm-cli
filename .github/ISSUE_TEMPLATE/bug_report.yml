@@ -13,7 +13,7 @@ body:
     attributes:
       label: Summary
       description: One or two sentences describing what is wrong.
-      placeholder: Voting on a skill returns 500 when the user is not signed in.
+      placeholder: "`spm install` fails with an SSH auth error on a private git skill dependency."
     validations:
       required: true
 
@@ -21,10 +21,10 @@ body:
     id: reproduce
     attributes:
       label: Steps to reproduce
-      description: Exact, numbered steps. Assume the reader has never seen the app.
+      description: Exact, numbered steps. Assume the reader has never seen the tool.
       placeholder: |
-        1. Go to /skills
-        2. Click the upvote arrow on any skill while logged out
+        1. Add a private git dependency to ai.json
+        2. Run `spm install`
         3. Observe the error
     validations:
       required: true
@@ -34,8 +34,8 @@ body:
     attributes:
       label: Expected vs actual behavior
       placeholder: |
-        Expected: prompt to sign in, no error.
-        Actual: 500 response, toast "Something went wrong".
+        Expected: skill resolved and materialized, exit code 0.
+        Actual: `spm` exits non-zero with "authentication failed".
     validations:
       required: true
 
@@ -45,10 +45,11 @@ body:
       label: Environment
       description: Where it happened. Include the commit SHA if you know it.
       value: |
+        - spm version (`spm --version`):
         - Commit / branch:
-        - Browser + OS:
-        - Node version:
-        - Local or deployed:
+        - OS + arch:
+        - Rust / cargo version (`cargo --version`):
+        - git version (`git --version`):
     validations:
       required: false
 
@@ -56,10 +57,10 @@ body:
     id: relevant-files
     attributes:
       label: Relevant files / paths
-      description: Files, routes, or components you suspect are involved. Speeds up any fixer, human or agent.
+      description: Files or modules you suspect are involved. Speeds up any fixer, human or agent.
       placeholder: |
-        - src/app/actions/votes.ts
-        - src/components/vote-button.tsx
+        - src/git.rs
+        - src/resolver.rs
     validations:
       required: false
 
@@ -78,8 +79,8 @@ body:
       label: Acceptance criteria
       description: Checkbox list defining "fixed". A fixer treats these as the definition of done.
       placeholder: |
-        - [ ] Voting while logged out no longer errors
-        - [ ] Logged-out user is prompted to sign in
-        - [ ] Regression test added
+        - [ ] `spm install` succeeds for the private git dependency
+        - [ ] A clear, actionable error is shown when auth genuinely fails
+        - [ ] Regression test added in tests/cli.rs
     validations:
       required: true

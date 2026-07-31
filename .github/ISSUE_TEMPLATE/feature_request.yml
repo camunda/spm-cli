@@ -13,7 +13,7 @@ body:
     attributes:
       label: Problem / user story
       description: What need does this serve? Prefer "As a <user> I want <goal> so that <reason>".
-      placeholder: As a viewer I want to filter skills by tag so that I can find relevant ones fast.
+      placeholder: As a user I want `spm` to support skills from a subdirectory of a git repo so that I can vendor a single skill from a monorepo.
     validations:
       required: true
 
@@ -43,11 +43,11 @@ body:
     id: affected-areas
     attributes:
       label: Affected areas
-      description: Files, routes, components, DB models likely to change.
+      description: Files or modules likely to change.
       placeholder: |
-        - src/app/skills/[...slug]/page.tsx
-        - prisma/schema.prisma (Skill.tags)
-        - src/components/tag-filter.tsx (new)
+        - src/cli.rs (new flag / command)
+        - src/manifest.rs (ai.json field)
+        - schema/ai.schema.json (schema update)
     validations:
       required: false
 
@@ -57,9 +57,9 @@ body:
       label: Acceptance criteria
       description: Testable checkboxes defining "done".
       placeholder: |
-        - [ ] Tag filter UI on /skills
-        - [ ] Filtering updates the list without full reload
-        - [ ] Empty-state handled
-        - [ ] Tests cover filter logic
+        - [ ] New subdirectory field accepted in ai.json and validated by the schema
+        - [ ] Only the named subdirectory is materialized for each target
+        - [ ] Empty / missing subdirectory handled with a clear error
+        - [ ] Tests in tests/cli.rs cover the new behavior
     validations:
       required: true

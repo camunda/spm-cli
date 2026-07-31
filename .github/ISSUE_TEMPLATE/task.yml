@@ -13,7 +13,7 @@ body:
     attributes:
       label: Goal
       description: A single sentence stating the outcome.
-      placeholder: Add rate limiting to the GitHub scraper so it respects the API quota.
+      placeholder: Add a `--frozen` flag to `spm install` that fails if ai.lock would change.
     validations:
       required: true
 
@@ -23,9 +23,9 @@ body:
       label: Context
       description: Links to code, docs, related issues/PRs, and any background needed to understand the task.
       placeholder: |
-        - Scraper lives in src/lib/scraper.ts
+        - install command lives in src/cli.rs
+        - lockfile model in src/lockfile.rs
         - Related: #42
-        - Octokit throttling docs: https://...
     validations:
       required: true
 
@@ -35,8 +35,9 @@ body:
       label: Files to touch
       description: Explicit paths. Lets an agent skip searching. Mark new files as (new).
       placeholder: |
-        - src/lib/scraper.ts
-        - src/lib/rate-limit.ts (new)
+        - src/cli.rs
+        - src/lockfile.rs
+        - tests/cli.rs (new coverage)
     validations:
       required: false
 
@@ -69,10 +70,9 @@ body:
       label: Verification
       description: Exact commands and manual checks to prove the work. An implementer must run these before closing.
       placeholder: |
-        - [ ] `npm run lint` passes
-        - [ ] `npm test` (Vitest) passes
-        - [ ] `npm run test:e2e` (Playwright) passes if UI changed
-        - [ ] Manual: describe what to click / which route to hit
+        - [ ] `make check` passes (fmt-check + clippy + test)
+        - [ ] `cargo test --all` passes
+        - [ ] Manual: run `spm <command>` and describe the expected output
     validations:
       required: true
 
@@ -82,7 +82,7 @@ body:
       label: Constraints / do-not-touch
       description: What must NOT change. Guards against unwanted edits.
       placeholder: |
-        - Do not modify the Prisma schema
-        - Keep the public API of src/lib/scraper.ts unchanged
+        - Do not change the ai.lock file format
+        - Keep the existing `spm install` behavior unchanged when the flag is absent
     validations:
       required: false
