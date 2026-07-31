@@ -12,9 +12,16 @@ use std::path::Path;
 /// of skills (its immediate subdirectories carry `SKILL.md`), suggest the
 /// concrete `spm add … --path <sub>` invocations instead of a bare warning.
 ///
-/// `subpath` is the original `--path` from the manifest (if any); it is used to
-/// build the suggested `--path` values so they are copy-pasteable.
-pub fn warn_if_not_loadable(name: &str, git: &str, subpath: Option<&str>, content: &Path) {
+/// `subpath` is the original `--path` from the manifest (if any) and `reference`
+/// is the locked selector (`tag:…`/`branch:…`/`commit:…`); both are used to
+/// build fully copy-pasteable suggestions.
+pub fn warn_if_not_loadable(
+    name: &str,
+    git: &str,
+    reference: &str,
+    subpath: Option<&str>,
+    content: &Path,
+) {
     if content.join("SKILL.md").exists() {
         return;
     }
@@ -25,6 +32,7 @@ pub fn warn_if_not_loadable(name: &str, git: &str, subpath: Option<&str>, conten
         return;
     }
 
+    let selector = selector_flag(reference);
     let plural = if subskills.len() == 1 { "" } else { "s" };
     eprintln!(
         "warning: skill `{name}` has no SKILL.md at its root, but its directory contains {} skill{plural}.",
@@ -36,7 +44,17 @@ pub fn warn_if_not_loadable(name: &str, git: &str, subpath: Option<&str>, conten
     );
     for sub in &subskills {
         let path = join_subpath(subpath, sub);
-        eprintln!("    spm add {git} --path {path} --name {sub}");
+        eprintln!("    spm add {git} {selector} --path {path} --name {sub}");
+    }
+}
+
+/// Render a locked `reference` (`tag:v1`, `branch:main`, `commit:<sha>`) back
+/// into the CLI selector flag (`--tag v1`, …) so suggestions are runnable. Falls
+/// back to the raw reference if it is not in the expected `kind:value` shape.
+fn selector_flag(reference: &str) -> String {
+    match reference.split_once(':') {
+        Some((kind @ ("tag" | "branch" | "commit"), value)) => format!("--{kind} {value}"),
+        _ => reference.to_string(),
     }
 }
 
@@ -66,7 +84,7 @@ fn join_subpath(parent: Option<&str>, child: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::join_subpath;
+    use super::{join_subpath, selector_flag};
 
     #[test]
     fn join_subpath_combines_with_forward_slash() {
@@ -77,5 +95,17 @@ mod tests {
         assert_eq!(join_subpath(Some("skills/"), "migrate"), "skills/migrate");
         assert_eq!(join_subpath(None, "greet"), "greet");
         assert_eq!(join_subpath(Some(""), "greet"), "greet");
+    }
+
+    #[test]
+    fn selector_flag_renders_runnable_flags() {
+        assert_eq!(selector_flag("tag:v1.2.0"), "--tag v1.2.0");
+        assert_eq!(selector_flag("branch:main"), "--branch main");
+        assert_eq!(
+            selector_flag("commit:0123456789abcdef0123456789abcdef01234567"),
+            "--commit 0123456789abcdef0123456789abcdef01234567"
+        );
+        // Unexpected shapes fall back to the raw reference rather than panicking.
+        assert_eq!(selector_flag("weird"), "weird");
     }
 }

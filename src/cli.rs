@@ -264,6 +264,7 @@ fn sync(root: &Path, force_refresh: bool, only: Option<&str>) -> Result<usize> {
         crate::skillcheck::warn_if_not_loadable(
             name,
             &locked.git,
+            &locked.reference,
             locked.path.as_deref(),
             &ensured.path,
         );

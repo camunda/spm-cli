@@ -503,14 +503,15 @@ fn container_path_warns_once_and_suggests_subskills() {
         1,
         "warning must be emitted once, not per-vendor: {err}"
     );
-    // Sorted, copy-pasteable suggestions for each discovered sub-skill.
+    // Sorted, copy-pasteable suggestions for each discovered sub-skill — and
+    // they must carry the version selector so they run as-is.
     assert!(
-        err.contains("--path pack/alpha --name alpha"),
-        "should suggest alpha: {err}"
+        err.contains("--branch main --path pack/alpha --name alpha"),
+        "should suggest a runnable alpha command with selector: {err}"
     );
     assert!(
-        err.contains("--path pack/beta --name beta"),
-        "should suggest beta: {err}"
+        err.contains("--branch main --path pack/beta --name beta"),
+        "should suggest a runnable beta command with selector: {err}"
     );
 }
 
