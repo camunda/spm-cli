@@ -120,6 +120,22 @@ Before starting any planned task, first check whether an issue or PR already exi
 
 Only work on a task once it is tracked and claimed as in progress — never in parallel with an untracked, unclaimed, or already-in-progress item.
 
+### Auto-close issues on merge with closing keywords
+
+To make a merged PR automatically close its tracked issue, the PR body (or a
+commit message) **must** use a GitHub closing keyword followed by the issue
+number: `Closes #N`, `Fixes #N`, or `Resolves #N` (also their `close`/`closed`,
+`fix`/`fixed`, `resolve`/`resolved` variants).
+
+- **`Refs #N` / `Ref #N` / `See #N` do not close anything** — they only create a
+  reference link. A PR that says `Refs #16` will merge without closing #16, and
+  the issue must then be closed by hand.
+- Reserve `Refs #N` for deliberate link-only references (e.g. a partial step
+  toward a larger tracking issue that should stay open).
+- If a PR merged without auto-closing its issue because it used a non-closing
+  keyword (or omitted the reference entirely), close the issue manually with a
+  comment pointing at the merged PR.
+
 ## Automated Verification Over Human Review Gates
 
 When a property can be verified deterministically and programmatically, encode it as an automated gate — e.g. type-check or CI job — instead of a required human review or approval. Pull a human in for judgement and to be alerted on failure, not to hand-verify what a machine can prove.
