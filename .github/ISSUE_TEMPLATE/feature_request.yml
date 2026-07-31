@@ -1,0 +1,65 @@
+name: ✨ Feature Request
+description: Propose new functionality or an improvement.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the problem and the desired outcome. Clear scope and acceptance criteria let a human or AI agent implement this correctly.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / user story
+      description: What need does this serve? Prefer "As a <user> I want <goal> so that <reason>".
+      placeholder: As a viewer I want to filter skills by tag so that I can find relevant ones fast.
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: What you think should be built. Rough is fine.
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: Bound the work. Prevents scope creep for any implementer, human or agent.
+      placeholder: |
+        In scope:
+        -
+
+        Out of scope:
+        -
+    validations:
+      required: true
+
+  - type: textarea
+    id: affected-areas
+    attributes:
+      label: Affected areas
+      description: Files, routes, components, DB models likely to change.
+      placeholder: |
+        - src/app/skills/[...slug]/page.tsx
+        - prisma/schema.prisma (Skill.tags)
+        - src/components/tag-filter.tsx (new)
+    validations:
+      required: false
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Testable checkboxes defining "done".
+      placeholder: |
+        - [ ] Tag filter UI on /skills
+        - [ ] Filtering updates the list without full reload
+        - [ ] Empty-state handled
+        - [ ] Tests cover filter logic
+    validations:
+      required: true

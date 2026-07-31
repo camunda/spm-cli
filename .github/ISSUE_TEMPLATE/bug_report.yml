@@ -1,0 +1,85 @@
+name: 🐛 Bug Report
+description: Report something that is broken or behaving incorrectly.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Fill in every section — precise details let a human or an AI agent fix this without guessing.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One or two sentences describing what is wrong.
+      placeholder: Voting on a skill returns 500 when the user is not signed in.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Exact, numbered steps. Assume the reader has never seen the app.
+      placeholder: |
+        1. Go to /skills
+        2. Click the upvote arrow on any skill while logged out
+        3. Observe the error
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-actual
+    attributes:
+      label: Expected vs actual behavior
+      placeholder: |
+        Expected: prompt to sign in, no error.
+        Actual: 500 response, toast "Something went wrong".
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Where it happened. Include the commit SHA if you know it.
+      value: |
+        - Commit / branch:
+        - Browser + OS:
+        - Node version:
+        - Local or deployed:
+    validations:
+      required: false
+
+  - type: textarea
+    id: relevant-files
+    attributes:
+      label: Relevant files / paths
+      description: Files, routes, or components you suspect are involved. Speeds up any fixer, human or agent.
+      placeholder: |
+        - src/app/actions/votes.ts
+        - src/components/vote-button.tsx
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / screenshots
+      description: Error output, stack traces, or screenshots. Paste text in code blocks.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Checkbox list defining "fixed". A fixer treats these as the definition of done.
+      placeholder: |
+        - [ ] Voting while logged out no longer errors
+        - [ ] Logged-out user is prompted to sign in
+        - [ ] Regression test added
+    validations:
+      required: true

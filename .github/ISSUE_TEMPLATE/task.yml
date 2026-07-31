@@ -1,0 +1,88 @@
+name: 🤖 Dev Task (agent-ready)
+description: A well-scoped engineering task, structured for a human or AI agent to pick up and execute.
+title: "[Task]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This template is optimized for autonomous execution. The more precise each field, the less an implementer has to guess. Leave a field blank only if it genuinely does not apply.
+
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: A single sentence stating the outcome.
+      placeholder: Add rate limiting to the GitHub scraper so it respects the API quota.
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Links to code, docs, related issues/PRs, and any background needed to understand the task.
+      placeholder: |
+        - Scraper lives in src/lib/scraper.ts
+        - Related: #42
+        - Octokit throttling docs: https://...
+    validations:
+      required: true
+
+  - type: textarea
+    id: files
+    attributes:
+      label: Files to touch
+      description: Explicit paths. Lets an agent skip searching. Mark new files as (new).
+      placeholder: |
+        - src/lib/scraper.ts
+        - src/lib/rate-limit.ts (new)
+    validations:
+      required: false
+
+  - type: textarea
+    id: plan
+    attributes:
+      label: Suggested plan
+      description: Optional step-by-step approach. An agent may refine it.
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: false
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Objective, testable checkboxes. This is the definition of done.
+      placeholder: |
+        - [ ]
+        - [ ]
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification
+      description: Exact commands and manual checks to prove the work. An implementer must run these before closing.
+      placeholder: |
+        - [ ] `npm run lint` passes
+        - [ ] `npm test` (Vitest) passes
+        - [ ] `npm run test:e2e` (Playwright) passes if UI changed
+        - [ ] Manual: describe what to click / which route to hit
+    validations:
+      required: true
+
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints / do-not-touch
+      description: What must NOT change. Guards against unwanted edits.
+      placeholder: |
+        - Do not modify the Prisma schema
+        - Keep the public API of src/lib/scraper.ts unchanged
+    validations:
+      required: false
