@@ -1,0 +1,86 @@
+name: 🐛 Bug Report
+description: Report something that is broken or behaving incorrectly.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Fill in every section — precise details let a human or an AI agent fix this without guessing.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One or two sentences describing what is wrong.
+      placeholder: "`spm install` fails with an SSH auth error on a private git skill dependency."
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Exact, numbered steps. Assume the reader has never seen the tool.
+      placeholder: |
+        1. Add a private git dependency to ai.json
+        2. Run `spm install`
+        3. Observe the error
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-actual
+    attributes:
+      label: Expected vs actual behavior
+      placeholder: |
+        Expected: skill resolved and materialized, exit code 0.
+        Actual: `spm` exits non-zero with "authentication failed".
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Where it happened. Include the commit SHA if you know it.
+      value: |
+        - spm version (`spm --version`):
+        - Commit / branch:
+        - OS + arch:
+        - Rust / cargo version (`cargo --version`):
+        - git version (`git --version`):
+    validations:
+      required: false
+
+  - type: textarea
+    id: relevant-files
+    attributes:
+      label: Relevant files / paths
+      description: Files or modules you suspect are involved. Speeds up any fixer, human or agent.
+      placeholder: |
+        - src/git.rs
+        - src/resolver.rs
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / screenshots
+      description: Error output, stack traces, or screenshots. Paste text in code blocks.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Checkbox list defining "fixed". A fixer treats these as the definition of done.
+      placeholder: |
+        - [ ] `spm install` succeeds for the private git dependency
+        - [ ] A clear, actionable error is shown when auth genuinely fails
+        - [ ] Regression test added in tests/cli.rs
+    validations:
+      required: true

@@ -1,0 +1,88 @@
+name: 🤖 Dev Task (agent-ready)
+description: A well-scoped engineering task, structured for a human or AI agent to pick up and execute.
+title: "[Task]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This template is optimized for autonomous execution. The more precise each field, the less an implementer has to guess. Leave a field blank only if it genuinely does not apply.
+
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: A single sentence stating the outcome.
+      placeholder: Add a `--frozen` flag to `spm install` that fails if ai.lock would change.
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Links to code, docs, related issues/PRs, and any background needed to understand the task.
+      placeholder: |
+        - install command lives in src/cli.rs
+        - lockfile model in src/lockfile.rs
+        - Related: #42
+    validations:
+      required: true
+
+  - type: textarea
+    id: files
+    attributes:
+      label: Files to touch
+      description: Explicit paths. Lets an agent skip searching. Mark new files as (new).
+      placeholder: |
+        - src/cli.rs
+        - src/lockfile.rs
+        - tests/cli.rs (new coverage)
+    validations:
+      required: false
+
+  - type: textarea
+    id: plan
+    attributes:
+      label: Suggested plan
+      description: Optional step-by-step approach. An agent may refine it.
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: false
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Objective, testable checkboxes. This is the definition of done.
+      placeholder: |
+        - [ ]
+        - [ ]
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification
+      description: Exact commands and manual checks to prove the work. An implementer must run these before closing.
+      placeholder: |
+        - [ ] `make check` passes (fmt-check + lint + test)
+        - [ ] `cargo test --all` passes
+        - [ ] Manual: run `spm <command>` and describe the expected output
+    validations:
+      required: true
+
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints / do-not-touch
+      description: What must NOT change. Guards against unwanted edits.
+      placeholder: |
+        - Do not change the ai.lock file format
+        - Keep the existing `spm install` behavior unchanged when the flag is absent
+    validations:
+      required: false
