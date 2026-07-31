@@ -159,8 +159,10 @@ jobs:
        (github.event_name == 'workflow_dispatch' && inputs.notes_tag != ''))
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # full history + tags so --include-commits can list non-PR commits
       - name: Update release notes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ (github.event_name == 'push' && github.ref_name) || inputs.notes_tag }}
-        run: scripts/update-release-notes.sh "$TAG" --repo "$GITHUB_REPOSITORY"
+        run: scripts/update-release-notes.sh "$TAG" --repo "$GITHUB_REPOSITORY" --include-commits

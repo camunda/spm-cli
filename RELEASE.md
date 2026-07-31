@@ -132,8 +132,19 @@ drift.
   scripts/update-release-notes.sh vX.Y.Z --dry-run  # preview only, don't modify
   ```
 
-  Optional grouping: add a `.github/release.yml` with `changelog` categories and
-  the generated notes are grouped by label automatically.
+- **Grouping** (optional): add a `.github/release.yml` with `changelog`
+  categories and the generated PR list is grouped by label automatically.
+
+- **`--include-commits`**: GitHub's notes list only *merged PRs*. Commits pushed
+  directly to `main` (no PR) are omitted — most visible on the first tag, whose
+  early history predates the PR workflow. Passing `--include-commits` appends a
+  **Commits without a pull request** section for those, deduped against the PRs
+  already listed. The `release-notes` job enables this by default (with a full
+  `fetch-depth: 0` checkout); it's a no-op when every commit came through a PR.
+
+  ```bash
+  scripts/update-release-notes.sh v0.1.0 --include-commits --dry-run
+  ```
 
 ## Dry runs
 
