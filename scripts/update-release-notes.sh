@@ -77,16 +77,26 @@ append_orphan_commits() {
   # Determine the commit range. Prefer an explicit --previous-tag; else the
   # nearest ancestor tag; else (first tag) everything reachable from TAG.
   local range base
-  if [ -n "$PREV_TAG" ] && git rev-parse -q --verify "refs/tags/$PREV_TAG^{commit}" >/dev/null 2>&1; then
-    range="$PREV_TAG..$TAG"
+  if [ -n "$PREV_TAG" ]; then
+    if git rev-parse -q --verify "refs/tags/$PREV_TAG^{commit}" >/dev/null 2>&1; then
+      range="$PREV_TAG..$TAG"
+    else
+      # The PR-based notes still honor --previous-tag (server-side), so warn that
+      # the commits section is computed from a different base to avoid surprise.
+      log "warn: --previous-tag '$PREV_TAG' not found locally; deriving the commits range from the nearest ancestor tag instead"
+      base="$(git describe --tags --abbrev=0 "$TAG^" 2>/dev/null || true)"
+      if [ -n "$base" ]; then range="$base..$TAG"; else range="$TAG"; fi
+    fi
   else
     base="$(git describe --tags --abbrev=0 "$TAG^" 2>/dev/null || true)"
     if [ -n "$base" ]; then range="$base..$TAG"; else range="$TAG"; fi
   fi
 
   # PR numbers already covered by GitHub's notes, so we don't list them twice.
+  # `|| true` keeps `set -o pipefail` from aborting when grep finds no PRs (e.g.
+  # a first release with no merged PRs) — an empty set is a valid result here.
   local listed
-  listed=" $(printf '%s\n' "$notes" | grep -oE 'pull/[0-9]+' | grep -oE '[0-9]+' | sort -u | tr '\n' ' ')"
+  listed=" $(printf '%s\n' "$notes" | { grep -oE 'pull/[0-9]+' || true; } | { grep -oE '[0-9]+' || true; } | sort -u | tr '\n' ' ')"
 
   local orphans="" sha subject n
   while read -r sha subject; do
@@ -131,15 +141,18 @@ INCLUDE_COMMITS=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo)
-      REPO="${2:-}"
+      [ $# -ge 2 ] && [ -n "$2" ] || die "option '$1' requires a value (see --help)"
+      REPO="$2"
       shift 2
       ;;
     --previous-tag)
-      PREV_TAG="${2:-}"
+      [ $# -ge 2 ] && [ -n "$2" ] || die "option '$1' requires a value (see --help)"
+      PREV_TAG="$2"
       shift 2
       ;;
     --target)
-      TARGET="${2:-}"
+      [ $# -ge 2 ] && [ -n "$2" ] || die "option '$1' requires a value (see --help)"
+      TARGET="$2"
       shift 2
       ;;
     --include-commits)
