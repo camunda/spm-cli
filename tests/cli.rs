@@ -93,6 +93,19 @@ impl Sandbox {
         self.git(&["commit", "-qm", "add pack"]);
     }
 
+    /// Add, on `main`, a `linked/` skill dir whose `SKILL.md` is a **symlink**
+    /// (to a sibling regular file). Since `copy_tree` skips symlinks, the
+    /// materialized skill ends up with no `SKILL.md`, so spm must still warn.
+    #[cfg(unix)]
+    fn add_symlinked_skill(&self) {
+        let dir = self.skill_repo.join("linked");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("real.md"), "---\nname: linked\n---\n").unwrap();
+        std::os::unix::fs::symlink("real.md", dir.join("SKILL.md")).unwrap();
+        self.git(&["add", "-A"]);
+        self.git(&["commit", "-qm", "add symlinked skill"]);
+    }
+
     fn skill_url(&self) -> String {
         format!("file://{}", self.skill_repo.display())
     }
@@ -544,4 +557,37 @@ fn missing_skill_md_without_subskills_warns_once_generically() {
         !err.contains("Did you mean"),
         "must not offer sub-skill suggestions when there are none: {err}"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_skill_md_still_warns() {
+    let sb = Sandbox::new();
+    sb.add_symlinked_skill();
+    sb.ok(&["init", "--target", "copilot"]);
+
+    // `linked/SKILL.md` is a symlink, which copy_tree skips — so the vendor dir
+    // ends up with no SKILL.md. The check must not be fooled into silence by the
+    // symlink resolving to a file in the store.
+    let out = sb.spm(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--path",
+        "linked",
+        "--name",
+        "linked",
+    ]);
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("has no SKILL.md at its root"),
+        "symlinked SKILL.md must still warn: {err}"
+    );
+    // And nothing landed in the materialized dir root.
+    assert!(!sb
+        .project
+        .join(".agents/skills/spm-managed-skills/linked/SKILL.md")
+        .exists());
 }

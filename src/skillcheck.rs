@@ -22,7 +22,7 @@ pub fn warn_if_not_loadable(
     subpath: Option<&str>,
     content: &Path,
 ) {
-    if content.join("SKILL.md").is_file() {
+    if is_regular_file(&content.join("SKILL.md")) {
         return;
     }
 
@@ -64,13 +64,23 @@ fn child_skills(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = match std::fs::read_dir(dir) {
         Ok(entries) => entries
             .flatten()
-            .filter(|e| e.path().join("SKILL.md").is_file())
+            .filter(|e| is_regular_file(&e.path().join("SKILL.md")))
             .filter_map(|e| e.file_name().into_string().ok())
             .collect(),
         Err(_) => Vec::new(),
     };
     names.sort();
     names
+}
+
+/// True only for a real regular file — **not** a symlink (even one that resolves
+/// to a file). This mirrors `fsutil::copy_tree`, which skips symlinks: a
+/// symlinked `SKILL.md` is never copied into the vendor dir, so treating it as
+/// present here would wrongly suppress the "agents may ignore it" warning.
+fn is_regular_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_file())
+        .unwrap_or(false)
 }
 
 /// Join an optional parent subpath with a child directory name using forward
