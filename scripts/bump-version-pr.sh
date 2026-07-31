@@ -51,8 +51,17 @@ log "creating branch $branch off $base_branch"
 git checkout -b "$branch"
 
 git add Cargo.toml Cargo.lock
-git commit -q -m "chore(release): bump version to $new" \
-  -m "Prepare the next development version. The crate version in Cargo.toml is the single source of truth for crates.io, the npm packages, and the GitHub Release."
+
+# Build the commit message and hard-wrap the body at 72 columns before handing it
+# to git. commitlint (@commitlint/config-conventional) enforces body-max-line-length
+# of 100 on every PR, so wrapping here keeps generated bump commits under the limit
+# categorically — no single body line can exceed the fold width.
+commit_subject="chore(release): bump version to $new"
+commit_body="Prepare the next development version. The crate version in Cargo.toml is the single source of truth for crates.io, the npm packages, and the GitHub Release."
+{
+  printf '%s\n\n' "$commit_subject"
+  printf '%s\n' "$commit_body" | fold -s -w 72 | sed 's/[[:space:]]*$//'
+} | git commit -q -F -
 
 log "pushing $branch to origin"
 git push -u origin "$branch"
