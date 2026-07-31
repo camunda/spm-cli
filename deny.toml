@@ -1,0 +1,38 @@
+# deny.toml — cargo-deny configuration
+# Docs: https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# The targets to check against (empty = all platforms).
+targets = []
+
+[advisories]
+# Deny crates with known security vulnerabilities from the RustSec advisory database.
+version = 2
+ignore = []
+
+[licenses]
+version = 2
+# Deny any crate that does not match the allow list below.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "MPL-2.0",
+]
+
+[bans]
+# Warn on multiple versions of the same crate (prefer deduplication but don't hard-fail).
+multiple-versions = "warn"
+# Deny wildcard dependencies (e.g. `foo = "*"`).
+wildcards = "deny"
+
+[sources]
+# Only allow crates from crates.io; reject patched or git-sourced crates in CI.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
