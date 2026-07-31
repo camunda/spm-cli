@@ -12,6 +12,10 @@ on:
         description: "Build + package npm without publishing (npm publish --dry-run)"
         type: boolean
         default: true
+      notes_tag:
+        description: "Only (re)generate the GitHub Release notes for this tag, then stop (e.g. v0.1.1)"
+        type: string
+        default: ""
 
 permissions:
   contents: write
@@ -19,6 +23,9 @@ permissions:
 jobs:
   build:
     name: ${{ matrix.target }}
+    # Skip the (expensive) cross-compile + npm path when the run is only a
+    # manual "regenerate the release notes for this tag" request.
+    if: github.event_name == 'push' || inputs.notes_tag == ''
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -131,3 +138,29 @@ jobs:
           echo "::group::publish npm/dist/@camunda8/spm"
           publish "npm/dist/@camunda8/spm"
           echo "::endgroup::"
+
+  # Regenerates the GitHub Release description ("What's Changed") from the PRs
+  # that make up the release, using GitHub's own generate-notes engine (see
+  # scripts/update-release-notes.sh). Runs after `build` so the release —
+  # created by the build job when it attaches binaries — already exists, then
+  # overwrites its body. Also reachable via workflow_dispatch with `notes_tag`
+  # to backfill the notes for an already-published tag without rebuilding.
+  release-notes:
+    name: release notes
+    needs: [build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # edit the GitHub Release
+    # Run after a successful tag build, OR standalone for a notes-only dispatch.
+    if: |
+      always() &&
+      ((github.event_name == 'push' && needs.build.result == 'success') ||
+       (github.event_name == 'workflow_dispatch' && inputs.notes_tag != ''))
+    steps:
+      - uses: actions/checkout@v5
+      - name: Update release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ (github.event_name == 'push' && github.ref_name) || inputs.notes_tag }}
+        run: scripts/update-release-notes.sh "$TAG" --repo "$GITHUB_REPOSITORY"

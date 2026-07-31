@@ -105,10 +105,35 @@ issue; the summary:
 The tag push fans out to:
 
 - **`release.yml`** → builds the 5 target binaries, attaches them to the GitHub
-  Release, then the `npm` job packages and publishes all six npm packages.
+  Release, then the `npm` job packages and publishes all six npm packages, and
+  finally the `release-notes` job fills in the release description (see below).
 - **`publish.yml`** → publishes the `spm-cli` crate to crates.io.
 
 Both verify the tag equals the `Cargo.toml` version before publishing.
+
+## Release notes ("What's Changed")
+
+The GitHub Release description is generated from the PRs/commits in the release
+by [`scripts/update-release-notes.sh`](scripts/update-release-notes.sh), which
+delegates to GitHub's own `releases/generate-notes` API — the same engine as the
+"Generate release notes" button — so the body is the canonical
+`* <PR title> by @author in <url>` list with no locally-maintained formatting to
+drift.
+
+- **Automatic**: the `release-notes` job in `release.yml` runs after `build` on
+  every tag and writes the notes onto the just-created release.
+- **Backfill / regenerate**: Actions → **release** → *Run workflow* with
+  `notes_tag: vX.Y.Z`. This skips the build/npm path and only (re)writes the
+  notes for that already-published tag.
+- **Locally** (needs an authenticated `gh`):
+
+  ```bash
+  scripts/update-release-notes.sh vX.Y.Z            # write notes onto the release
+  scripts/update-release-notes.sh vX.Y.Z --dry-run  # preview only, don't modify
+  ```
+
+  Optional grouping: add a `.github/release.yml` with `changelog` categories and
+  the generated notes are grouped by label automatically.
 
 ## Dry runs
 
