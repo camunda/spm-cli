@@ -11,8 +11,9 @@ pub struct MaterializedSkill {
     pub path: PathBuf,
 }
 
-/// A target tool (Claude, Copilot, ...) that can be taught to auto-load skills
-/// from the store without copying them into the project tree.
+/// A target tool (Claude, Copilot, ...) that materializes skills from the
+/// global fetch cache into a project-local, gitignored directory where the tool
+/// discovers them — never into a user-global vendor location.
 pub trait Vendor {
     #[allow(dead_code)] // part of the adapter contract; not all call sites use it yet
     fn name(&self) -> &'static str;

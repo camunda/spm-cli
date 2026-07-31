@@ -15,13 +15,13 @@ ai.json ──resolve──▶ ai.lock ──fetch──▶ ~/.spm/store/<repo>@
 
 - **`ai.json`** — you author it, commit it. Declares target vendors + skill deps.
 - **`ai.lock`** — generated, commit it. Pins every version selector to an immutable commit SHA → reproducible installs.
-- **Global store** (`~/.spm/store`) — each repo@commit fetched once, shared across all projects.
-- **Vendor projection** — spm copies the store's skills into wherever each vendor loads them from. Nothing spm generates is committed to your repo.
+- **Global store** (`~/.spm/store`) — a **fetch cache only**: each repo@commit is cloned once and shared across all projects. Nothing is *registered* or *materialized* here — it exists purely so repeated installs don't re-clone.
+- **Vendor projection** — spm copies the store's skills into a **project-local** directory wherever each vendor loads them from. Nothing spm generates is committed to your repo, and nothing is written into a user-global vendor location.
 - **Registration** differs per vendor:
   - **Claude** — spm assembles a self-contained plugin marketplace in the **project-local**, gitignored `.spm/claude/` dir and writes a pointer to it into `.claude/settings.local.json` (gitignored by convention). The dir sits outside `.agents/skills/` so Copilot's scanner never picks it up. Declarative, per-project, zero VCS footprint.
   - **Copilot CLI** — spm copies the resolved skills into a **project-local** directory, `.agents/skills/spm-managed-skills/<name>/`, where Copilot CLI auto-discovers them (`.agents/skills/**/SKILL.md`). That directory is added to the project's `.gitignore` (with an explanatory comment) so the materialized skills stay truly local and are never committed. No user-global state, no `copilot` CLI required.
 
-On a fresh clone, teammates run `spm install` — it rebuilds their own store and re-registers from `ai.lock`. Same model as `node_modules`.
+On a fresh clone, teammates run `spm install` — it repopulates their own fetch cache and re-materializes the project-local skills from `ai.lock`. Same model as `node_modules`.
 
 ## ai.json
 
@@ -150,7 +150,7 @@ spm clean                                          # remove generated vendor con
 ## Design notes
 
 - **Cross-OS**: shells out to the system `git` (no libgit2 build deps); no symlinks; all paths via `std::path`. Runs on Linux, macOS, Windows.
-- **`SPM_HOME`** overrides the store/vendor root (default `~/.spm`) — used by tests.
+- **`SPM_HOME`** overrides the store root (default `~/.spm`, holding only the fetch cache) — used by tests. Vendor output is always project-local and is not affected by `SPM_HOME`.
 - **Vendor adapters**: adding a target means implementing one `Vendor` trait (`src/vendor/`). `claude` assembles a plugin-marketplace layout (`marketplace.json` → `plugin.json` → `skills/<name>/SKILL.md`) into the gitignored project-local `.spm/claude/` and points to it; `copilot` copies skills into the gitignored project-local `.agents/skills/spm-managed-skills/`. Both keep their materialized files out of VCS via the shared `src/gitignore.rs` helper.
 
 ## Development

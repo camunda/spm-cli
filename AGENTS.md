@@ -38,7 +38,7 @@ generated source to regenerate.
 | `src/resolver.rs` | Resolves a skill spec (tag/branch/commit) to an immutable commit SHA + store key. |
 | `src/store.rs` | Manages the global store (`~/.spm/store/<repo>@<sha>`) — one clone per commit, shared across projects. |
 | `src/git.rs` | Thin wrapper over the system `git` binary (no libgit2); handles SSH/HTTPS and non-interactive auth. |
-| `src/paths.rs` | Resolves store/vendor roots; honors the `SPM_HOME` override. |
+| `src/paths.rs` | Resolves the store (fetch-cache) root; honors the `SPM_HOME` override. Vendor output is project-local, not under this root. |
 | `src/fsutil.rs` | Safe recursive copy (skips `.git`, does not follow symlinks to avoid exfiltration). |
 | `src/jsonutil.rs` | Merge-patches user-owned JSON config without clobbering user keys. |
 | `src/vendor/mod.rs` | The `Vendor` trait + `for_target` dispatch — the extension point for new targets. |
