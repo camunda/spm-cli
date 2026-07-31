@@ -32,7 +32,8 @@ multiple-versions = "warn"
 wildcards = "deny"
 
 [sources]
-# Only allow crates from crates.io; reject patched or git-sourced crates in CI.
+# Only allow crates from crates.io; reject crates from unknown registries or
+# git sources in CI. (Local `path` dependencies are not governed by these keys.)
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]

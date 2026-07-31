@@ -21,6 +21,13 @@ jobs:
     name: cargo audit
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # rustsec/audit-check writes check results and, on scheduled runs, opens
+    # issues for new advisories. Declare the permissions explicitly so the job
+    # behaves consistently regardless of the repo/org default GITHUB_TOKEN scope.
+    permissions:
+      checks: write
+      contents: read
+      issues: write
     steps:
       - uses: actions/checkout@v5
       - uses: rustsec/audit-check@v2
@@ -34,3 +41,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          # The action's default Docker image ships an older Cargo that cannot
+          # read the v4 Cargo.lock this repo commits. Update to a toolchain that
+          # understands the current lockfile format before running cargo-deny.
+          rust-version: stable
