@@ -22,7 +22,7 @@ pub fn warn_if_not_loadable(
     subpath: Option<&str>,
     content: &Path,
 ) {
-    if content.join("SKILL.md").exists() {
+    if content.join("SKILL.md").is_file() {
         return;
     }
 
@@ -75,9 +75,14 @@ fn child_skills(dir: &Path) -> Vec<String> {
 
 /// Join an optional parent subpath with a child directory name using forward
 /// slashes (matching the manifest `--path` convention on every platform).
+/// Windows-style `\` separators in the parent are normalized to `/` so the
+/// suggested commands stay consistent and copy-pasteable everywhere.
 fn join_subpath(parent: Option<&str>, child: &str) -> String {
     match parent {
-        Some(p) if !p.is_empty() => format!("{}/{child}", p.trim_end_matches('/')),
+        Some(p) if !p.is_empty() => {
+            let p = p.replace('\\', "/");
+            format!("{}/{child}", p.trim_end_matches('/'))
+        }
         _ => child.to_string(),
     }
 }
@@ -93,6 +98,7 @@ mod tests {
             "skills/camunda-ds"
         );
         assert_eq!(join_subpath(Some("skills/"), "migrate"), "skills/migrate");
+        assert_eq!(join_subpath(Some("a\\b\\"), "c"), "a/b/c");
         assert_eq!(join_subpath(None, "greet"), "greet");
         assert_eq!(join_subpath(Some(""), "greet"), "greet");
     }
