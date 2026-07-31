@@ -7,14 +7,27 @@
 //! each vendor owns.
 
 use anyhow::{Context, Result};
+use std::io::ErrorKind;
 use std::path::Path;
+
+/// Read an existing `.gitignore`, returning `None` when the file simply does
+/// not exist. Any other error (invalid UTF-8, permissions, ...) is surfaced
+/// with context instead of being silently treated as an empty file, which could
+/// otherwise clobber real content.
+fn read_existing(path: &Path) -> Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(s) => Ok(Some(s)),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+    }
+}
 
 /// Ensure `entry` (preceded by an explanatory `comment`) is present in the
 /// project's `.gitignore`, appending the block once. Idempotent: an existing
 /// `entry` line (however authored) is left untouched.
 pub fn ensure(project_root: &Path, comment: &str, entry: &str) -> Result<()> {
     let path = project_root.join(".gitignore");
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let existing = read_existing(&path)?.unwrap_or_default();
     if existing.lines().any(|l| l.trim() == entry) {
         return Ok(());
     }
@@ -41,7 +54,7 @@ pub fn ensure(project_root: &Path, comment: &str, entry: &str) -> Result<()> {
 /// independently — without spm's comment above it — is preserved.
 pub fn remove(project_root: &Path, comment: &str, entry: &str) -> Result<()> {
     let path = project_root.join(".gitignore");
-    let Ok(existing) = std::fs::read_to_string(&path) else {
+    let Some(existing) = read_existing(&path)? else {
         return Ok(());
     };
 
@@ -153,6 +166,29 @@ mod tests {
             "only the user-authored entry remains: {after}"
         );
         assert_eq!(after, format!("{ENTRY}\n"));
+
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    /// A `.gitignore` that can't be decoded as UTF-8 must surface an error
+    /// rather than being silently treated as empty (which would clobber it).
+    #[test]
+    fn ensure_surfaces_read_error_instead_of_clobbering() {
+        let tmp = std::env::temp_dir().join(format!("spm-gi-badutf8-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let gi = tmp.join(".gitignore");
+        // Invalid UTF-8 bytes: read_to_string fails with InvalidData, not NotFound.
+        std::fs::write(&gi, [0xff, 0xfe, 0x00, 0x9f]).unwrap();
+
+        let err = ensure(&tmp, COMMENT, ENTRY);
+        assert!(err.is_err(), "expected a surfaced read error");
+        // The original bytes must be left intact, not overwritten.
+        assert_eq!(std::fs::read(&gi).unwrap(), vec![0xff, 0xfe, 0x00, 0x9f]);
+
+        assert!(
+            remove(&tmp, COMMENT, ENTRY).is_err(),
+            "remove must also error"
+        );
 
         std::fs::remove_dir_all(&tmp).unwrap();
     }
