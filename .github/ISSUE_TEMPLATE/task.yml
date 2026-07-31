@@ -70,7 +70,7 @@ body:
       label: Verification
       description: Exact commands and manual checks to prove the work. An implementer must run these before closing.
       placeholder: |
-        - [ ] `make check` passes (fmt-check + clippy + test)
+        - [ ] `make check` passes (fmt-check + lint + test)
         - [ ] `cargo test --all` passes
         - [ ] Manual: run `spm <command>` and describe the expected output
     validations:
