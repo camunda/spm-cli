@@ -53,12 +53,6 @@ impl Vendor for Claude {
             let dest = skills_dir.join(&s.name);
             fsutil::copy_tree(&s.path, &dest)
                 .with_context(|| format!("copying skill `{}` into plugin", s.name))?;
-            if !dest.join("SKILL.md").exists() {
-                eprintln!(
-                    "warning: skill `{}` has no SKILL.md at its root — Claude may ignore it",
-                    s.name
-                );
-            }
         }
 
         jsonutil::write(

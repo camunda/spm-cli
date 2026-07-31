@@ -47,31 +47,63 @@ impl Sandbox {
             "---\nname: greet\ndescription: Say hello nicely.\n---\nGreet warmly.\n",
         )
         .unwrap();
-        let g = |args: &[&str]| {
-            let ok = Command::new("git")
-                // Pin identity and disable signing so the harness is hermetic
-                // regardless of the developer's global git config.
-                .args([
-                    "-c",
-                    "user.email=t@t",
-                    "-c",
-                    "user.name=t",
-                    "-c",
-                    "commit.gpgsign=false",
-                    "-c",
-                    "tag.gpgSign=false",
-                ])
-                .args(args)
-                .current_dir(&self.skill_repo)
-                .status()
-                .unwrap()
-                .success();
-            assert!(ok, "git {args:?} failed");
-        };
-        g(&["init", "-q", "-b", "main"]);
-        g(&["add", "-A"]);
-        g(&["commit", "-qm", "initial"]);
-        g(&["tag", "-a", "v0.1.0", "-m", "v0.1.0"]);
+        self.git(&["init", "-q", "-b", "main"]);
+        self.git(&["add", "-A"]);
+        self.git(&["commit", "-qm", "initial"]);
+        self.git(&["tag", "-a", "v0.1.0", "-m", "v0.1.0"]);
+    }
+
+    /// Run `git <args>` in the skill repo with a pinned, hermetic identity
+    /// (signing disabled) so the harness is independent of the developer's
+    /// global git config.
+    fn git(&self, args: &[&str]) {
+        let ok = Command::new("git")
+            .args([
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "tag.gpgSign=false",
+            ])
+            .args(args)
+            .current_dir(&self.skill_repo)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?} failed");
+    }
+
+    /// Add, on `main`, a `pack/` directory that is a *container* of skills
+    /// (`pack/alpha/SKILL.md`, `pack/beta/SKILL.md`) with no `SKILL.md` at its
+    /// own root, plus a `bare/` directory with no skill at all. Used to exercise
+    /// the container-detection and generic no-SKILL.md warnings.
+    fn add_skill_pack(&self) {
+        for sub in ["alpha", "beta"] {
+            let dir = self.skill_repo.join("pack").join(sub);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("SKILL.md"), format!("---\nname: {sub}\n---\n")).unwrap();
+        }
+        let bare = self.skill_repo.join("bare");
+        std::fs::create_dir_all(&bare).unwrap();
+        std::fs::write(bare.join("README.md"), "not a skill\n").unwrap();
+        self.git(&["add", "-A"]);
+        self.git(&["commit", "-qm", "add pack"]);
+    }
+
+    /// Add, on `main`, a `linked/` skill dir whose `SKILL.md` is a **symlink**
+    /// (to a sibling regular file). Since `copy_tree` skips symlinks, the
+    /// materialized skill ends up with no `SKILL.md`, so spm must still warn.
+    #[cfg(unix)]
+    fn add_symlinked_skill(&self) {
+        let dir = self.skill_repo.join("linked");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("real.md"), "---\nname: linked\n---\n").unwrap();
+        std::os::unix::fs::symlink("real.md", dir.join("SKILL.md")).unwrap();
+        self.git(&["add", "-A"]);
+        self.git(&["commit", "-qm", "add symlinked skill"]);
     }
 
     fn skill_url(&self) -> String {
@@ -452,4 +484,110 @@ fn uppercase_commit_pin_is_not_refetched() {
     );
     // The lock stores the normalized lowercase SHA.
     assert!(sb.read("ai.lock").contains(&head.to_lowercase()));
+}
+
+#[test]
+fn container_path_warns_once_and_suggests_subskills() {
+    let sb = Sandbox::new();
+    sb.add_skill_pack();
+    sb.ok(&["init", "--target", "claude,copilot"]);
+
+    // `pack/` is a container of skills (alpha, beta), not a skill itself. The add
+    // still succeeds (warning only), but must guide the user to the sub-skills.
+    let out = sb.spm(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--path",
+        "pack",
+        "--name",
+        "pack",
+    ]);
+    assert!(
+        out.status.success(),
+        "add should succeed with a warning: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    // Even with two vendors configured, the check runs once.
+    assert_eq!(
+        err.matches("has no SKILL.md at its root").count(),
+        1,
+        "warning must be emitted once, not per-vendor: {err}"
+    );
+    // Sorted, copy-pasteable suggestions for each discovered sub-skill — and
+    // they must carry the version selector so they run as-is.
+    assert!(
+        err.contains("--branch main --path pack/alpha --name alpha"),
+        "should suggest a runnable alpha command with selector: {err}"
+    );
+    assert!(
+        err.contains("--branch main --path pack/beta --name beta"),
+        "should suggest a runnable beta command with selector: {err}"
+    );
+}
+
+#[test]
+fn missing_skill_md_without_subskills_warns_once_generically() {
+    let sb = Sandbox::new();
+    sb.add_skill_pack();
+    sb.ok(&["init", "--target", "claude,copilot"]);
+
+    // `bare/` has no SKILL.md and no sub-skills: a single generic warning.
+    let out = sb.spm(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--path",
+        "bare",
+        "--name",
+        "bare",
+    ]);
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(
+        err.matches("has no SKILL.md at its root").count(),
+        1,
+        "generic warning must be emitted once: {err}"
+    );
+    assert!(err.contains("agents may ignore it"), "{err}");
+    assert!(
+        !err.contains("Did you mean"),
+        "must not offer sub-skill suggestions when there are none: {err}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_skill_md_still_warns() {
+    let sb = Sandbox::new();
+    sb.add_symlinked_skill();
+    sb.ok(&["init", "--target", "copilot"]);
+
+    // `linked/SKILL.md` is a symlink, which copy_tree skips — so the vendor dir
+    // ends up with no SKILL.md. The check must not be fooled into silence by the
+    // symlink resolving to a file in the store.
+    let out = sb.spm(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--path",
+        "linked",
+        "--name",
+        "linked",
+    ]);
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("has no SKILL.md at its root"),
+        "symlinked SKILL.md must still warn: {err}"
+    );
+    // And nothing landed in the materialized dir root.
+    assert!(!sb
+        .project
+        .join(".agents/skills/spm-managed-skills/linked/SKILL.md")
+        .exists());
 }

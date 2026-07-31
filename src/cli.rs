@@ -259,6 +259,15 @@ fn sync(root: &Path, force_refresh: bool, only: Option<&str>) -> Result<usize> {
             "  {name:<width$}  {}",
             if ensured.fetched { "fetched" } else { "cached" }
         );
+        // Single source of truth for the "is this actually a loadable skill?"
+        // check — run once here rather than per-vendor.
+        crate::skillcheck::warn_if_not_loadable(
+            name,
+            &locked.git,
+            &locked.reference,
+            locked.path.as_deref(),
+            &ensured.path,
+        );
         materialized.push(MaterializedSkill {
             name: name.clone(),
             path: ensured.path,
