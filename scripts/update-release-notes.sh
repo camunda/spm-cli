@@ -220,7 +220,9 @@ if [ "$DRY_RUN" -eq 1 ]; then
 fi
 
 # Persist to a temp file so newlines/markdown survive intact via --notes-file.
-tmp="$(mktemp)"
+# Use an explicit template under $TMPDIR so it's portable across GNU and BSD
+# (macOS) mktemp implementations.
+tmp="$(mktemp "${TMPDIR:-/tmp}/spm-release-notes.XXXXXX")"
 trap 'rm -f "$tmp"' EXIT
 printf '%s\n' "$NOTES" >"$tmp"
 

@@ -147,14 +147,18 @@ jobs:
   # to backfill the notes for an already-published tag without rebuilding.
   release-notes:
     name: release notes
+    needs: [build]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write # edit the GitHub Release
-    # Run on tag pushes, OR standalone for a notes-only dispatch.
+    # Run after a successful tag build (so the release exists and its binaries
+    # are already attached — no race to create it), OR standalone for a
+    # notes-only dispatch, where `build` is skipped.
     if: |
-      github.event_name == 'push' ||
-      (github.event_name == 'workflow_dispatch' && inputs.notes_tag != '')
+      always() &&
+      ((github.event_name == 'push' && needs.build.result == 'success') ||
+       (github.event_name == 'workflow_dispatch' && inputs.notes_tag != ''))
     steps:
       - uses: actions/checkout@v5
         with:
