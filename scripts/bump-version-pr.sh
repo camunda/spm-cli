@@ -44,8 +44,7 @@ git checkout -b "$branch"
 
 git add Cargo.toml Cargo.lock
 git commit -q -m "chore(release): bump version to $new" \
-  -m "Prepare the next development version. The crate version in Cargo.toml is the single source of truth for crates.io, the npm packages, and the GitHub Release." \
-  -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+  -m "Prepare the next development version. The crate version in Cargo.toml is the single source of truth for crates.io, the npm packages, and the GitHub Release."
 
 log "pushing $branch to origin"
 git push -u origin "$branch"

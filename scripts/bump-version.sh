@@ -97,7 +97,9 @@ perl -0pi -e '
 check="$(read_pkg_version)"
 [ "$check" = "$new" ] || die "failed to update Cargo.toml (still reads '$check')"
 
-# Keep Cargo.lock's own spm-cli entry in sync (offline; no network needed).
+# Keep Cargo.lock's own spm-cli entry in sync. Try `--offline` first (fast, and
+# spm-cli is a local package so no network is needed in the common case); fall
+# back to a normal `cargo update` if the registry index isn't already cached.
 CARGO="${CARGO:-cargo}"
 log "syncing Cargo.lock"
 "$CARGO" update -p spm-cli --precise "$new" --offline >/dev/null 2>&1 \
