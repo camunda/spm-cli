@@ -103,15 +103,9 @@ impl Sandbox {
         std::fs::read_to_string(self.project.join(rel)).unwrap()
     }
 
-    /// The single generated marketplace/instruction dir for a vendor.
-    fn vendor_dir(&self, vendor: &str) -> PathBuf {
-        let parent = self.spm_home.join("vendors").join(vendor);
-        std::fs::read_dir(&parent)
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path()
+    /// The generated Claude marketplace dir, now project-local (gitignored).
+    fn claude_market_dir(&self) -> PathBuf {
+        self.project.join(".spm/claude")
     }
 }
 
@@ -145,7 +139,7 @@ fn claude_add_resolves_tag_to_commit_and_wires_marketplace() {
     );
 
     // Skill physically copied into the plugin dir.
-    let skill_md = sb.vendor_dir("claude").join("plugin/skills/greet/SKILL.md");
+    let skill_md = sb.claude_market_dir().join("plugin/skills/greet/SKILL.md");
     assert!(skill_md.exists(), "missing {}", skill_md.display());
 
     // Project pointer written to the gitignored local settings file.
@@ -153,7 +147,15 @@ fn claude_add_resolves_tag_to_commit_and_wires_marketplace() {
     assert!(settings.contains("\"spm@spm\": true"), "{settings}");
     assert!(settings.contains("extraKnownMarketplaces"), "{settings}");
 
-    // Nothing leaked into the project tree beyond ai.json/ai.lock/.claude.
+    // The project-local marketplace dir is gitignored (with an explanatory
+    // comment) so the copied skills are never committed.
+    let gitignore = sb.read(".gitignore");
+    assert!(gitignore.contains(".spm/"), "{gitignore}");
+    assert!(gitignore.contains("spm-managed Claude"), "{gitignore}");
+
+    // Nothing landed in the global vendors area.
+    assert!(!sb.spm_home.join("vendors").exists());
+    // Nothing leaked into the project tree beyond ai.json/ai.lock/.claude/.spm.
     assert!(!sb.project.join("skills").exists());
 }
 
@@ -196,7 +198,7 @@ fn remove_prunes_skill() {
     sb.ok(&["remove", "greet"]);
 
     assert!(!sb.read("ai.json").contains("greet"));
-    let skills_dir = sb.vendor_dir("claude").join("plugin/skills");
+    let skills_dir = sb.claude_market_dir().join("plugin/skills");
     assert!(std::fs::read_dir(&skills_dir).unwrap().next().is_none());
 }
 
@@ -221,13 +223,17 @@ fn clean_removes_generated_config() {
 
     let settings = sb.read(".claude/settings.local.json");
     assert!(!settings.contains("spm@spm"), "{settings}");
+    // The project-local marketplace dir is removed after clean.
     assert!(
-        !sb.spm_home
-            .join("vendors/claude")
-            .read_dir()
-            .is_ok_and(|mut d| d.next().is_some()),
-        "vendor dir should be empty after clean"
+        !sb.claude_market_dir().exists(),
+        "marketplace dir should be gone after clean"
     );
+    // The gitignore block spm added is removed too.
+    let gitignore = sb.project.join(".gitignore");
+    if gitignore.exists() {
+        let gi = std::fs::read_to_string(&gitignore).unwrap();
+        assert!(!gi.contains(".spm/"), "{gi}");
+    }
 }
 
 #[test]
@@ -237,7 +243,7 @@ fn multi_target_wires_both_vendors() {
     sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
 
     assert!(sb
-        .vendor_dir("claude")
+        .claude_market_dir()
         .join("plugin/skills/greet/SKILL.md")
         .exists());
     assert!(sb

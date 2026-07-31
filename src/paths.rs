@@ -15,20 +15,3 @@ pub fn spm_home() -> Result<PathBuf> {
 pub fn store_dir() -> Result<PathBuf> {
     Ok(spm_home()?.join("store"))
 }
-
-/// Where generated vendor config lives (outside the project tree).
-pub fn vendors_dir() -> Result<PathBuf> {
-    Ok(spm_home()?.join("vendors"))
-}
-
-/// Per-project generated dir for a vendor: `~/.spm/vendors/<vendor>/<project-key>`.
-/// The key is the sanitized absolute project path (machine-specific, which is why
-/// the pointer into it is never committed).
-pub fn vendor_project_dir(vendor: &str, project_root: &std::path::Path) -> Result<PathBuf> {
-    let key: String = project_root
-        .to_string_lossy()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect();
-    Ok(vendors_dir()?.join(vendor).join(key.trim_matches('_')))
-}

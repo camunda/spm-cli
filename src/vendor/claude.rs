@@ -1,5 +1,5 @@
 use super::{MaterializedSkill, Vendor};
-use crate::{fsutil, jsonutil, paths};
+use crate::{fsutil, gitignore, jsonutil};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -7,6 +7,17 @@ use std::path::{Path, PathBuf};
 /// Name used for both the generated marketplace and the single wrapper plugin.
 /// Skills end up invocable as `/spm:<skill-name>`.
 const MARKETPLACE: &str = "spm";
+
+/// Project-local (gitignored) directory holding the generated Claude
+/// marketplace. Deliberately **outside** `.agents/skills/` so Copilot's
+/// `.agents/skills/**/SKILL.md` scanner never discovers these marketplace
+/// skills.
+const MANAGED_DIR: [&str; 2] = [".spm", "claude"];
+
+/// `.gitignore` block that keeps the whole project-local spm dir out of VCS.
+const GITIGNORE_ENTRY: &str = ".spm/";
+const GITIGNORE_COMMENT: &str =
+    "# spm-managed Claude marketplace — materialized locally by `spm`, not committed.";
 
 pub struct Claude;
 
@@ -16,9 +27,10 @@ impl Vendor for Claude {
     }
 
     /// Claude can only load skills that physically sit inside a plugin dir, so we
-    /// assemble a self-contained marketplace in `~/.spm/vendors/claude/<project>/`
-    /// (outside the repo) and register it via the project's gitignored
-    /// `.claude/settings.local.json`. Nothing lands in the project tree.
+    /// assemble a self-contained marketplace in the project-local, gitignored
+    /// `.spm/claude/` dir and register it via the project's gitignored
+    /// `.claude/settings.local.json`. The materialized skills stay truly local
+    /// and are never committed.
     // Claude registration is per-project (a pointer in the repo's gitignored
     // settings.local.json), so the marketplace name can stay fixed and the
     // stable project_id is unused here.
@@ -28,7 +40,7 @@ impl Vendor for Claude {
         _project_id: &str,
         skills: &[MaterializedSkill],
     ) -> Result<()> {
-        let market_dir = paths::vendor_project_dir("claude", project_root)?;
+        let market_dir = managed_dir(project_root);
         // Rebuild from scratch so removed skills disappear.
         if market_dir.exists() {
             std::fs::remove_dir_all(&market_dir)?;
@@ -63,23 +75,31 @@ impl Vendor for Claude {
         )?;
 
         patch_settings(project_root, &market_dir, skills)?;
+        gitignore::ensure(project_root, GITIGNORE_COMMENT, GITIGNORE_ENTRY)?;
         Ok(())
     }
 
     fn clean(&self, project_root: &Path, _project_id: &str) -> Result<()> {
-        let market_dir = paths::vendor_project_dir("claude", project_root)?;
+        let market_dir = managed_dir(project_root);
         if market_dir.exists() {
             std::fs::remove_dir_all(&market_dir)?;
         }
         let path = settings_path(project_root);
-        if !path.exists() {
-            return Ok(());
+        if path.exists() {
+            let mut root = jsonutil::read_object(&path)?;
+            jsonutil::remove_nested(&mut root, "extraKnownMarketplaces", MARKETPLACE);
+            jsonutil::remove_nested(&mut root, "enabledPlugins", &plugin_key());
+            jsonutil::write(&path, &root)?;
         }
-        let mut root = jsonutil::read_object(&path)?;
-        jsonutil::remove_nested(&mut root, "extraKnownMarketplaces", MARKETPLACE);
-        jsonutil::remove_nested(&mut root, "enabledPlugins", &plugin_key());
-        jsonutil::write(&path, &root)
+        gitignore::remove(project_root, GITIGNORE_COMMENT, GITIGNORE_ENTRY)
     }
+}
+
+/// Absolute path of the project-local generated marketplace dir.
+fn managed_dir(project_root: &Path) -> PathBuf {
+    MANAGED_DIR
+        .iter()
+        .fold(project_root.to_path_buf(), |p, seg| p.join(seg))
 }
 
 /// Merge spm's marketplace + enabled-plugin entries into settings.local.json,

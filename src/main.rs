@@ -1,6 +1,7 @@
 mod cli;
 mod fsutil;
 mod git;
+mod gitignore;
 mod jsonutil;
 mod lockfile;
 mod manifest;
