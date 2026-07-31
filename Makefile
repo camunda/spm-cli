@@ -6,7 +6,7 @@ PREFIX  ?= /usr/local
 BINDIR  ?= $(PREFIX)/bin
 
 .DEFAULT_GOAL := build
-.PHONY: build release test fmt fmt-check lint check run install uninstall clean
+.PHONY: build release test fmt fmt-check lint check run install uninstall clean bump bump-pr
 
 ## build:      debug build
 build:
@@ -51,6 +51,14 @@ uninstall:
 ## clean:      remove build artifacts
 clean:
 	$(CARGO) clean
+
+## bump:       bump crate version in Cargo.toml + Cargo.lock (PART=patch|minor|major or VERSION=X.Y.Z)
+bump:
+	@CARGO="$(CARGO)" scripts/bump-version.sh $(if $(VERSION),$(VERSION),$(or $(PART),patch))
+
+## bump-pr:    bump the version on a new branch and open a release PR (needs gh)
+bump-pr:
+	@CARGO="$(CARGO)" scripts/bump-version-pr.sh $(if $(VERSION),$(VERSION),$(or $(PART),patch))
 
 ## help:       list targets
 help:
