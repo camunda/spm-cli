@@ -8,6 +8,7 @@ mod manifest;
 mod paths;
 mod resolver;
 mod schema;
+mod skillcheck;
 mod store;
 mod vendor;
 
