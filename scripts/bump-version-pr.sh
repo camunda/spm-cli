@@ -32,7 +32,15 @@ if [ -n "$(git status --porcelain)" ]; then
   die "working tree is not clean — commit or stash changes first"
 fi
 
-base_branch="$(git rev-parse --abbrev-ref HEAD)"
+# The bump PR must target the protected default branch so it flows through CI and
+# the merge queue. Default to `main` (overridable via BASE=) and require that we
+# are on it, so the bump is taken off — and the PR targets — the intended base.
+base_branch="${BASE:-main}"
+current_branch="$(git rev-parse --abbrev-ref HEAD)"
+[ "$current_branch" != "HEAD" ] || die "detached HEAD — check out $base_branch first"
+if [ "$current_branch" != "$base_branch" ]; then
+  die "must be run from '$base_branch' (currently on '$current_branch'); check it out or set BASE=<branch>"
+fi
 
 # Perform the actual version bump; capture the resulting version.
 new="$(CARGO="${CARGO:-cargo}" "$ROOT/scripts/bump-version.sh" "${1:-patch}")"

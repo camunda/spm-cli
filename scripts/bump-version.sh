@@ -47,12 +47,12 @@ read_pkg_version() {
 current="$(read_pkg_version)"
 [ -n "$current" ] || die "could not read [package].version from Cargo.toml"
 
-case "$current" in
-  [0-9]*.[0-9]*.[0-9]*) ;;
-  *) die "current version '$current' is not X.Y.Z semver" ;;
-esac
-
 IFS='.' read -r cur_major cur_minor cur_patch <<<"$current"
+for n in "$cur_major" "$cur_minor" "$cur_patch"; do
+  case "$n" in
+    '' | *[!0-9]*) die "current version '$current' is not X.Y.Z semver (digits only)" ;;
+  esac
+done
 
 part="${1:-patch}"
 case "$part" in
@@ -82,16 +82,18 @@ is_greater || die "target version '$new' is not greater than current '$current' 
 
 log "bumping $current -> $new"
 
-# Update only the first `version =` inside the [package] section. A state flag
-# ensures we never touch a `version =` in another section.
-perl -0pi -e '
-  s{
-    (^\[package\][^\[]*?          # the [package] section body (up to the next [)
-     ^version\s*=\s*")            # the version key
-    [^"]*                          # old value
-    (")
-  }{${1}'"$new"'${2}}mxs;
-' "$CARGO_TOML"
+# Update only the first `version =` inside the [package] section, using the same
+# section-aware state machine as read_pkg_version (robust against arrays or other
+# `[...]` inside the section, and never touching a `version =` in another table).
+tmp="$(mktemp)"
+awk -v newver="$new" '
+  /^\[package\]/ { p = 1; print; next }
+  /^\[/          { p = 0 }
+  p && !done && /^version[[:space:]]*=/ {
+    sub(/=.*/, "= \"" newver "\""); done = 1
+  }
+  { print }
+' "$CARGO_TOML" >"$tmp" && mv "$tmp" "$CARGO_TOML"
 
 # Confirm the edit actually landed.
 check="$(read_pkg_version)"
