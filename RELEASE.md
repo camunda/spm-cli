@@ -73,14 +73,28 @@ issue; the summary:
 ## Cutting a release
 
 1. Update the changelog / confirm `main` is green.
-2. Bump the version (this drives all three channels):
+2. Bump the version (this drives all three channels). Use the helper — it edits
+   `Cargo.toml` and refreshes `Cargo.lock`'s entry for you:
 
    ```bash
-   # edit `version` in Cargo.toml, then refresh the lockfile entry:
-   cargo update -p spm-cli --precise X.Y.Z   # or edit Cargo.lock's spm-cli entry
+   make bump                 # bump the patch component (default)
+   make bump PART=minor      # or minor / major
+   make bump VERSION=X.Y.Z   # or an exact version
    git add Cargo.toml Cargo.lock
    git commit -m "chore(release): vX.Y.Z"    # Conventional Commits (CI enforces it)
    ```
+
+   `main` is protected, so land the bump via a PR. `make bump-pr` automates that
+   — it bumps on a `chore/bump-vX.Y.Z` branch, pushes, and opens the PR with
+   `gh` (same `PART=`/`VERSION=` options). Prefer it over pushing to `main`:
+
+   ```bash
+   make bump-pr              # patch bump → branch → PR (needs gh, clean tree)
+   ```
+
+   Under the hood this runs `scripts/bump-version.sh`; the equivalent manual
+   steps are editing `version` in `Cargo.toml` and
+   `cargo update -p spm-cli --precise X.Y.Z`.
 3. Tag and push (the tag is what triggers publishing):
 
    ```bash

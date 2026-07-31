@@ -157,6 +157,12 @@ spm clean                                          # remove generated vendor con
 
 `make check` runs the full CI gate locally (`fmt-check` + `clippy` + `test`).
 
+To cut a release, bump the crate version (the single source of truth for
+crates.io, npm, and the GitHub Release) with `make bump` — `PART=patch|minor|major`
+(default `patch`) or `VERSION=X.Y.Z`. Since `main` is protected, `make bump-pr`
+does the bump on a branch and opens the PR for you. See [`RELEASE.md`](RELEASE.md)
+for the full procedure.
+
 A **pre-commit hook** (fmt + clippy) installs itself automatically via
 [`cargo-husky`](https://github.com/rhysd/cargo-husky) — just run `cargo test`
 (or `cargo build`) once after cloning and the hook lands in `.git/hooks`. The
