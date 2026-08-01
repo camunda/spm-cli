@@ -144,8 +144,51 @@ spm remove <name>                                  # drop a skill
 spm update [name]                                  # re-resolve branches/tags to latest
 spm install                                        # rebuild from ai.lock (after clone)
 spm list                                           # show skills + pinned commits
+spm status                                         # check skills are materialized in this checkout
 spm clean                                          # remove generated vendor config
 ```
+
+## Worktrees & fresh clones
+
+spm materializes skills into **gitignored** project-local dirs (`.spm/claude/`,
+`.agents/skills/spm-managed-skills/`). Git **worktrees** have their own working
+tree and don't share those untracked files, so — exactly like `node_modules` —
+**each checkout needs its own `spm install`**:
+
+```bash
+git worktree add ../feature -b feature
+cd ../feature && spm install         # materialize this worktree's skills
+```
+
+Skipping this is the usual reason an agent doesn't see a declared skill in a new
+worktree or a fresh clone. `spm status` tells you at a glance and **exits
+non-zero** when anything is missing, so it works in scripts too:
+
+```bash
+spm status
+# [claude]  0/1 installed  .../.spm/claude/plugin/skills
+#   reviewer  MISSING
+# error: some declared skills are not materialized in this checkout — run `spm install` here
+```
+
+To install automatically on every branch checkout and new worktree, add a
+`post-checkout` git hook (worktrees share the repo's `.git/hooks`):
+
+```sh
+# .git/hooks/post-checkout   — then: chmod +x .git/hooks/post-checkout
+#!/bin/sh
+# Re-materialize spm skills so Claude/Copilot always see the declared set.
+[ -f ai.lock ] && command -v spm >/dev/null 2>&1 && spm install >/dev/null 2>&1
+exit 0
+```
+
+> **Claude note:** discovery is snapshotted at session start, and Claude Code
+> resolves a marketplace's relative path against the repository's **main**
+> checkout — so run `spm install` in the worktree, then start (or
+> `/reload-plugins` in) the Claude session from that same worktree.
+
+To see what each harness actually loaded: `claude plugin list` /
+`claude plugin marketplace list` for Claude; `copilot skill list` for Copilot.
 
 ## Design notes
 

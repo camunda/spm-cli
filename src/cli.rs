@@ -46,6 +46,8 @@ enum Command {
     Install,
     /// List declared skills and their locked commits.
     List,
+    /// Show which declared skills are materialized in this checkout.
+    Status,
     /// Remove all generated vendor config for this project.
     Clean,
 }
@@ -80,6 +82,7 @@ pub fn run() -> Result<()> {
             Ok(())
         }
         Command::List => list(&root),
+        Command::Status => status(&root),
         Command::Clean => clean(&root),
     }
 }
@@ -179,6 +182,62 @@ fn list(root: &Path) -> Result<()> {
             .unwrap_or_else(|| "not installed".into());
         println!("{name:<24} {}  ({pinned})", spec.git);
     }
+    Ok(())
+}
+
+/// Show, per target, which declared skills are materialized in the current
+/// checkout. Because spm materializes into gitignored dirs, a fresh clone or a
+/// new git worktree sees nothing until `spm install` runs inside it — this
+/// command surfaces exactly that, and exits non-zero when anything is missing so
+/// it doubles as an automated gate.
+fn status(root: &Path) -> Result<()> {
+    let manifest = Manifest::load(root)?;
+    let lock = Lockfile::load_or_default(root)?;
+    let expected: Vec<String> = lock.skills.keys().cloned().collect();
+
+    println!("project: {}", root.display());
+    println!("targets: {}", manifest.targets.join(", "));
+    if expected.is_empty() {
+        println!("no skills locked yet — add skills, then run `spm install`");
+    }
+
+    let width = expected.iter().map(String::len).max().unwrap_or(0);
+    let mut incomplete = false;
+
+    for target in &manifest.targets {
+        let vendor = vendor::for_target(target)?;
+        let st = vendor.status(root, &expected)?;
+        println!(
+            "\n[{target}]  {}/{} installed  {}",
+            st.present.len(),
+            expected.len(),
+            st.location.display()
+        );
+        for name in &expected {
+            let missing = st.missing.iter().any(|m| m == name);
+            if missing {
+                incomplete = true;
+            }
+            println!(
+                "  {name:<width$}  {}",
+                if missing { "MISSING" } else { "ok" }
+            );
+        }
+        for s in &st.stale {
+            println!("  {s:<width$}  stale (not in ai.lock)");
+        }
+        for note in &st.notes {
+            incomplete = true;
+            println!("  ! {note}");
+        }
+    }
+
+    if incomplete {
+        bail!(
+            "some declared skills are not materialized in this checkout — run `spm install` here"
+        );
+    }
+    println!("\nall declared skills are materialized in this checkout");
     Ok(())
 }
 

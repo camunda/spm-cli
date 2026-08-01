@@ -591,3 +591,83 @@ fn symlinked_skill_md_still_warns() {
         .join(".agents/skills/spm-managed-skills/linked/SKILL.md")
         .exists());
 }
+
+#[test]
+fn status_reports_materialized_skills() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude,copilot"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+
+    // With everything installed, `spm status` succeeds and reports the skill as
+    // present for both targets — no MISSING markers.
+    let out = sb.ok(&["status"]);
+    assert!(out.contains("greet"), "{out}");
+    assert!(out.contains("claude"), "{out}");
+    assert!(out.contains("copilot"), "{out}");
+    assert!(!out.contains("MISSING"), "nothing should be missing: {out}");
+}
+
+#[test]
+fn status_flags_uninstalled_worktree() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+
+    // Simulate a fresh worktree/clone: ai.json + ai.lock are committed and
+    // present, but the gitignored materialized skills are absent.
+    std::fs::remove_dir_all(sb.project.join(".agents")).unwrap();
+
+    let out = sb.spm(&["status"]);
+    assert!(
+        !out.status.success(),
+        "status must fail when declared skills are not materialized here"
+    );
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        text.contains("MISSING"),
+        "should mark greet MISSING: {text}"
+    );
+    assert!(
+        text.contains("spm install"),
+        "should tell the user to run `spm install` here: {text}"
+    );
+}
+
+#[test]
+fn status_flags_claude_pointer_to_other_checkout() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+
+    // Rewrite the settings pointer to a different absolute path, mimicking a
+    // worktree that inherited the main checkout's registration (issue #28).
+    let sp = sb.project.join(".claude/settings.local.json");
+    let real = sb.claude_market_dir().to_string_lossy().into_owned();
+    let text = std::fs::read_to_string(&sp)
+        .unwrap()
+        .replace(&real, "/tmp/some-other-checkout/.spm/claude");
+    std::fs::write(&sp, text).unwrap();
+
+    let out = sb.spm(&["status"]);
+    assert!(
+        !out.status.success(),
+        "status must fail when the Claude marketplace points at another checkout"
+    );
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        text.contains("some-other-checkout"),
+        "should surface the mismatched registered path: {text}"
+    );
+    assert!(
+        text.contains("spm install"),
+        "should tell the user to run `spm install` here: {text}"
+    );
+}
