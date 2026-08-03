@@ -182,10 +182,17 @@ To install automatically on every branch checkout and new worktree, add a
 exit 0
 ```
 
-> **Claude note:** discovery is snapshotted at session start, and Claude Code
-> resolves a marketplace's relative path against the repository's **main**
-> checkout — so run `spm install` in the worktree, then start (or
-> `/reload-plugins` in) the Claude session from that same worktree.
+> **Claude note:** `spm install` writes the *absolute* path of the current
+> checkout's `.spm/claude/` into that checkout's `.claude/settings.local.json`.
+> Since that file is gitignored, a new worktree either has no registration at all
+> or — if it was copied over — one still pointing at the checkout it came from.
+> Either way, run `spm install` inside the worktree and start (or
+> `/reload-plugins` in) the Claude session from that same worktree; discovery is
+> snapshotted at session start. `spm status` reports a stale pointer explicitly:
+>
+> ```
+>   ! .claude/settings.local.json marketplace points at /repo/.spm/claude, not this checkout (/repo-feature/.spm/claude)
+> ```
 
 To see what each harness actually loaded: `claude plugin list` /
 `claude plugin marketplace list` for Claude; `copilot skill list` for Copilot.

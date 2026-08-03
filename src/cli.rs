@@ -197,8 +197,20 @@ fn status(root: &Path) -> Result<()> {
 
     println!("project: {}", root.display());
     println!("targets: {}", manifest.targets.join(", "));
+
+    // Nothing locked: either nothing is declared (a clean, correct state) or
+    // ai.json declares skills that were never resolved into ai.lock (a real
+    // problem). Both cases have nothing per-target to inspect, so report and
+    // return instead of falling through to a misleading "all materialized".
     if expected.is_empty() {
-        println!("no skills locked yet — add skills, then run `spm install`");
+        if manifest.skills.is_empty() {
+            println!("\nno skills declared — add one with `spm add <git-url>`");
+            return Ok(());
+        }
+        bail!(
+            "ai.json declares {} skill(s) but ai.lock has none — run `spm install` here",
+            manifest.skills.len()
+        );
     }
 
     let width = expected.iter().map(String::len).max().unwrap_or(0);

@@ -638,6 +638,43 @@ fn status_flags_uninstalled_worktree() {
 }
 
 #[test]
+fn status_succeeds_when_no_skills_are_declared() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+
+    let out = sb.ok(&["status"]);
+    assert!(out.contains("no skills declared"), "{out}");
+    assert!(
+        !out.contains("all declared skills are materialized"),
+        "must not claim materialization when nothing is declared: {out}"
+    );
+}
+
+#[test]
+fn status_fails_when_declared_skills_are_not_locked() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+
+    // ai.json still declares `greet`, but ai.lock is gone — resolution never
+    // happened here, so status must not report a green "all materialized".
+    std::fs::remove_file(sb.project.join("ai.lock")).unwrap();
+
+    let out = sb.spm(&["status"]);
+    assert!(
+        !out.status.success(),
+        "status must fail when ai.json declares skills that ai.lock does not"
+    );
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains("ai.lock has none"), "{text}");
+    assert!(text.contains("spm install"), "{text}");
+}
+
+#[test]
 fn status_flags_claude_pointer_to_other_checkout() {
     let sb = Sandbox::new();
     sb.ok(&["init", "--target", "claude"]);
@@ -645,12 +682,19 @@ fn status_flags_claude_pointer_to_other_checkout() {
 
     // Rewrite the settings pointer to a different absolute path, mimicking a
     // worktree that inherited the main checkout's registration (issue #28).
+    // Mutate the JSON structurally: a textual replace would not match on Windows,
+    // where the serialized path has its backslashes JSON-escaped.
     let sp = sb.project.join(".claude/settings.local.json");
-    let real = sb.claude_market_dir().to_string_lossy().into_owned();
-    let text = std::fs::read_to_string(&sp)
-        .unwrap()
-        .replace(&real, "/tmp/some-other-checkout/.spm/claude");
-    std::fs::write(&sp, text).unwrap();
+    let other = sb
+        .root
+        .join("some-other-checkout")
+        .join(".spm")
+        .join("claude");
+    let mut settings: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+    settings["extraKnownMarketplaces"]["spm"]["source"]["path"] =
+        serde_json::Value::String(other.to_string_lossy().into_owned());
+    std::fs::write(&sp, serde_json::to_string_pretty(&settings).unwrap()).unwrap();
 
     let out = sb.spm(&["status"]);
     assert!(
