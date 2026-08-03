@@ -67,6 +67,10 @@ impl Vendor for Copilot {
         }
         gitignore::remove(project_root, GITIGNORE_COMMENT, GITIGNORE_ENTRY)
     }
+
+    fn status(&self, project_root: &Path, expected: &[String]) -> Result<super::VendorStatus> {
+        Ok(super::classify(&managed_dir(project_root), expected))
+    }
 }
 
 /// Absolute path of the project-local managed skills directory.

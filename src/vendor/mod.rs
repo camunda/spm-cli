@@ -11,6 +11,58 @@ pub struct MaterializedSkill {
     pub path: PathBuf,
 }
 
+/// A per-target snapshot of what is materialized in the *current* checkout vs.
+/// what `ai.lock` declares. Powers `spm status` and, in particular, the
+/// "fresh worktree/clone not installed here" diagnostic: because spm materializes
+/// skills into gitignored dirs, a new git worktree sees nothing until
+/// `spm install` runs inside it.
+pub struct VendorStatus {
+    /// Where this vendor materializes skills in the project (project-local).
+    pub location: PathBuf,
+    /// Declared skills that are present on disk in this checkout.
+    pub present: Vec<String>,
+    /// Declared skills that are missing here (e.g. an uninstalled worktree).
+    pub missing: Vec<String>,
+    /// Materialized skills that are no longer declared in `ai.lock` (stale).
+    pub stale: Vec<String>,
+    /// Extra human-readable notes (e.g. a registration pointer problem).
+    pub notes: Vec<String>,
+}
+
+/// Compare the declared (`expected`) skill names against the subdirectories
+/// actually materialized under `skills_dir`. Shared by the vendor adapters,
+/// whose skills all live one directory deep under a vendor-specific root.
+pub fn classify(skills_dir: &Path, expected: &[String]) -> VendorStatus {
+    let (mut present, mut missing) = (Vec::new(), Vec::new());
+    for name in expected {
+        if skills_dir.join(name).is_dir() {
+            present.push(name.clone());
+        } else {
+            missing.push(name.clone());
+        }
+    }
+    let mut stale = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(skills_dir) {
+        for e in entries.flatten() {
+            if e.path().is_dir() {
+                if let Ok(n) = e.file_name().into_string() {
+                    if !expected.iter().any(|x| x == &n) {
+                        stale.push(n);
+                    }
+                }
+            }
+        }
+    }
+    stale.sort();
+    VendorStatus {
+        location: skills_dir.to_path_buf(),
+        present,
+        missing,
+        stale,
+        notes: Vec::new(),
+    }
+}
+
 /// A target tool (Claude, Copilot, ...) that materializes skills from the
 /// global fetch cache into a project-local, gitignored directory where the tool
 /// discovers them — never into a user-global vendor location.
@@ -29,6 +81,10 @@ pub trait Vendor {
 
     /// Remove everything this vendor generated for this project.
     fn clean(&self, project_root: &Path, project_id: &str) -> Result<()>;
+
+    /// Report what this vendor has materialized in the current checkout,
+    /// compared against the declared `expected` skill names (from `ai.lock`).
+    fn status(&self, project_root: &Path, expected: &[String]) -> Result<VendorStatus>;
 }
 
 pub fn for_target(target: &str) -> Result<Box<dyn Vendor>> {

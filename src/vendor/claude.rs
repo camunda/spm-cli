@@ -87,6 +87,40 @@ impl Vendor for Claude {
         }
         gitignore::remove(project_root, GITIGNORE_COMMENT, GITIGNORE_ENTRY)
     }
+
+    fn status(&self, project_root: &Path, expected: &[String]) -> Result<super::VendorStatus> {
+        let market_dir = managed_dir(project_root);
+        let skills_dir = market_dir.join("plugin").join("skills");
+        let mut st = super::classify(&skills_dir, expected);
+        // Diagnose the settings.local.json marketplace pointer. A fresh worktree
+        // may have inherited the main checkout's absolute path (issue #28), so
+        // flag when it is missing or points at a different checkout's dir.
+        if !expected.is_empty() {
+            match registered_marketplace_path(project_root) {
+                None => st
+                    .notes
+                    .push("no spm marketplace registered in .claude/settings.local.json".into()),
+                Some(p) if Path::new(&p) != market_dir => st.notes.push(format!(
+                    ".claude/settings.local.json marketplace points at {p}, not this checkout ({})",
+                    market_dir.display()
+                )),
+                Some(_) => {}
+            }
+        }
+        Ok(st)
+    }
+}
+
+/// Read the directory path spm registered for its marketplace in
+/// `.claude/settings.local.json`, if present.
+fn registered_marketplace_path(project_root: &Path) -> Option<String> {
+    let root = jsonutil::read_object(&settings_path(project_root)).ok()?;
+    root.get("extraKnownMarketplaces")?
+        .get(MARKETPLACE)?
+        .get("source")?
+        .get("path")?
+        .as_str()
+        .map(str::to_owned)
 }
 
 /// Absolute path of the project-local generated marketplace dir.
