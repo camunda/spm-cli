@@ -715,3 +715,153 @@ fn status_flags_claude_pointer_to_other_checkout() {
         "should tell the user to run `spm install` here: {text}"
     );
 }
+
+#[test]
+fn add_all_expands_container_into_one_entry_per_subskill() {
+    let sb = Sandbox::new();
+    sb.add_skill_pack();
+    sb.ok(&["init", "--target", "claude,copilot"]);
+
+    // `--all` over the `pack/` container adds every sub-skill in one shot, each
+    // as its own manifest entry keyed by the subdirectory name.
+    let out = sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--path",
+        "pack",
+        "--all",
+    ]);
+    assert!(out.contains("alpha") && out.contains("beta"), "{out}");
+
+    // ai.json gained one derived entry per sub-skill, each pinned under its own
+    // path — and no bare `pack` container entry.
+    let manifest: serde_json::Value = serde_json::from_str(&sb.read("ai.json")).unwrap();
+    let skills = &manifest["skills"];
+    assert_eq!(skills["alpha"]["path"], "pack/alpha", "{manifest}");
+    assert_eq!(skills["beta"]["path"], "pack/beta", "{manifest}");
+    assert_eq!(skills["alpha"]["branch"], "main", "{manifest}");
+    assert!(
+        skills.get("pack").is_none(),
+        "no container entry: {manifest}"
+    );
+
+    // Both sub-skills are materialized for both vendors, with their SKILL.md.
+    for name in ["alpha", "beta"] {
+        assert!(
+            sb.claude_market_dir()
+                .join(format!("plugin/skills/{name}/SKILL.md"))
+                .exists(),
+            "claude missing {name}"
+        );
+        assert!(
+            sb.project
+                .join(format!(".agents/skills/spm-managed-skills/{name}/SKILL.md"))
+                .exists(),
+            "copilot missing {name}"
+        );
+    }
+}
+
+#[test]
+fn add_all_on_non_container_path_errors() {
+    let sb = Sandbox::new();
+    sb.add_skill_pack();
+    sb.ok(&["init", "--target", "copilot"]);
+
+    // `bare/` has no SKILL.md and no sub-skills: `--all` has nothing to add and
+    // must fail loudly rather than silently create zero entries.
+    let out = sb.spm(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--path",
+        "bare",
+        "--all",
+    ]);
+    assert!(
+        !out.status.success(),
+        "add --all on a non-container must fail"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("not a container of skills"),
+        "should explain the path is not a container: {err}"
+    );
+    // Nothing was written to the manifest.
+    assert!(
+        !sb.read("ai.json").contains("bare"),
+        "no entry should be created on failure"
+    );
+}
+
+#[test]
+fn add_all_rejects_name_flag() {
+    let sb = Sandbox::new();
+    sb.add_skill_pack();
+    sb.ok(&["init", "--target", "copilot"]);
+
+    // `--name` names a single skill; with `--all` names are derived per
+    // sub-skill, so combining them is a usage error caught by the CLI parser.
+    let out = sb.spm(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--path",
+        "pack",
+        "--all",
+        "--name",
+        "whatever",
+    ]);
+    assert!(!out.status.success(), "--all with --name must be rejected");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("cannot be used with") || err.contains("conflicts"),
+        "should report the --all/--name conflict: {err}"
+    );
+}
+
+#[test]
+fn add_all_rejects_collision_with_existing_skill() {
+    let sb = Sandbox::new();
+    sb.add_skill_pack();
+    sb.ok(&["init", "--target", "copilot"]);
+
+    // Pre-declare a skill named `alpha` (a name the container also yields).
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--path",
+        "pack/alpha",
+        "--name",
+        "alpha",
+    ]);
+
+    let out = sb.spm(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--path",
+        "pack",
+        "--all",
+    ]);
+    assert!(
+        !out.status.success(),
+        "colliding sub-skill name must abort the whole batch"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("already exists"), "{err}");
+
+    // The pre-existing `beta` was NOT partially added — the batch is atomic.
+    assert!(
+        !sb.read("ai.json").contains("beta"),
+        "no partial insertion on collision: {}",
+        sb.read("ai.json")
+    );
+}

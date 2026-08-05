@@ -34,6 +34,11 @@ enum Command {
         /// Local name for the skill (defaults to the repo name).
         #[arg(long)]
         name: Option<String>,
+        /// Treat the target directory as a container and add every skill inside
+        /// it (each immediate subdirectory with a SKILL.md), rather than one
+        /// skill. Incompatible with --name (names are derived per sub-skill).
+        #[arg(long, conflicts_with = "name")]
+        all: bool,
     },
     /// Remove a skill dependency.
     Remove { name: String },
@@ -73,7 +78,8 @@ pub fn run() -> Result<()> {
             version,
             path,
             name,
-        } => add(&root, git, version, path, name),
+            all,
+        } => add(&root, git, version, path, name, all),
         Command::Remove { name } => remove(&root, &name),
         Command::Update { name } => update(&root, name),
         Command::Install => {
@@ -125,25 +131,99 @@ fn add(
     version: VersionArg,
     path: Option<String>,
     name: Option<String>,
+    all: bool,
 ) -> Result<()> {
     let mut manifest = Manifest::load(root)?;
-    let name = name.unwrap_or_else(|| default_name(&git));
-    crate::manifest::validate_skill_name(&name)?;
     if let Some(sub) = &path {
         crate::manifest::validate_subpath(sub)?;
     }
-    let spec = SkillSpec {
-        git,
+    if all {
+        add_all(root, &mut manifest, git, version, path)?;
+    } else {
+        let name = name.unwrap_or_else(|| default_name(&git));
+        crate::manifest::validate_skill_name(&name)?;
+        let spec = SkillSpec {
+            git,
+            tag: version.tag,
+            branch: version.branch,
+            commit: version.commit,
+            path,
+        };
+        spec.version()?; // validate exactly one selector
+        manifest.skills.insert(name.clone(), spec);
+        manifest.save(root)?;
+        sync(root, false, None)?;
+        println!("added {name}");
+    }
+    Ok(())
+}
+
+/// `spm add --all`: treat `path` as a *container* and add every skill inside it
+/// (each immediate subdirectory carrying a `SKILL.md`) as its own manifest entry,
+/// keyed by the subdirectory name. This is the one-shot equivalent of the
+/// per-sub-skill `spm add … --path <sub> --name <sub>` commands that the
+/// container warning suggests — so it enumerates sub-skills through the same
+/// `skillcheck::child_skills` source of truth, guaranteeing the two never drift.
+fn add_all(
+    root: &Path,
+    manifest: &mut Manifest,
+    git: String,
+    version: VersionArg,
+    path: Option<String>,
+) -> Result<()> {
+    // Version selector is validated once for the container; every derived entry
+    // reuses it verbatim.
+    let container = SkillSpec {
+        git: git.clone(),
         tag: version.tag,
         branch: version.branch,
         commit: version.commit,
-        path,
+        path: path.clone(),
     };
-    spec.version()?; // validate exactly one selector
-    manifest.skills.insert(name.clone(), spec);
+    container.version()?;
+
+    // Fetch the container into the store so we can enumerate its sub-skills.
+    let locked =
+        resolver::resolve(&container).context("resolving container to enumerate skills")?;
+    let ensured = store::ensure(&locked).context("fetching container to enumerate skills")?;
+    let subs = crate::skillcheck::child_skills(&ensured.path);
+    if subs.is_empty() {
+        bail!(
+            "--path `{}` is not a container of skills (no immediate subdirectory has a SKILL.md). \
+             Drop --all to add it as a single skill.",
+            path.as_deref().unwrap_or(".")
+        );
+    }
+
+    // Reject the whole batch on the first collision so the manifest is never
+    // left half-populated.
+    for sub in &subs {
+        crate::manifest::validate_skill_name(sub)?;
+        if manifest.skills.contains_key(sub) {
+            bail!(
+                "a skill named `{sub}` already exists in {}; \
+                 remove or rename it before adding this container with --all",
+                Manifest::path_in(root).display()
+            );
+        }
+    }
+
+    for sub in &subs {
+        let subpath = crate::skillcheck::join_subpath(path.as_deref(), sub);
+        manifest.skills.insert(
+            sub.clone(),
+            SkillSpec {
+                git: git.clone(),
+                tag: container.tag.clone(),
+                branch: container.branch.clone(),
+                commit: container.commit.clone(),
+                path: Some(subpath),
+            },
+        );
+    }
     manifest.save(root)?;
     sync(root, false, None)?;
-    println!("added {name}");
+    println!("added {} skill(s): {}", subs.len(), subs.join(", "));
     Ok(())
 }
 
