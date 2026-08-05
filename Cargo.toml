@@ -1,6 +1,6 @@
 [package]
 name = "spm-cli"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.97"
 description = "Skill package manager — declare AI skills in ai.json, materialize them for Claude/Copilot without polluting your repo."
