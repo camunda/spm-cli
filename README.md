@@ -66,6 +66,19 @@ Version selectors (exactly one per skill):
 
 `path` (optional) selects a subdirectory — for monorepos holding many skills.
 
+To pull in **every** skill under a directory at once (each immediate
+subdirectory that has its own `SKILL.md`), add `--all` instead of naming them
+one by one:
+
+```bash
+spm add https://github.com/org/repo --tag v1.0.0 --path skills --all
+```
+
+Each sub-skill becomes its own `ai.json` entry, keyed by its directory name
+(`--all` cannot be combined with `--name`). This is the one-shot equivalent of
+the per-skill `spm add … --path <sub> --name <sub>` commands spm suggests when
+you point `--path` at a container of skills.
+
 ### Repo URLs (HTTPS & SSH)
 
 `git` accepts any URL the system `git` understands:
@@ -139,7 +152,7 @@ make install PREFIX=~/.local  # or a custom prefix
 ```bash
 spm init [--target claude|copilot ...]             # scaffold ai.json (repeatable / comma-separated)
 spm add <git> (--tag|--branch|--commit <v>) \      # add + install a skill
-        [--path <subdir>] [--name <local-name>]
+        [--path <subdir>] [--name <local-name>] [--all]  # --all: add every skill under --path
 spm remove <name>                                  # drop a skill
 spm update [name]                                  # re-resolve branches/tags to latest
 spm install                                        # rebuild from ai.lock (after clone)

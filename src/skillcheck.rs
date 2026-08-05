@@ -60,7 +60,12 @@ fn selector_flag(reference: &str) -> String {
 
 /// Names of immediate subdirectories of `dir` that contain a `SKILL.md`,
 /// sorted for deterministic output.
-fn child_skills(dir: &Path) -> Vec<String> {
+///
+/// This is the single source of truth for "what are the sub-skills of this
+/// container?": both the no-SKILL.md suggestion above and `spm add --all` (which
+/// materializes every sub-skill at once) enumerate them the same way, so the two
+/// can never disagree about which directories count as skills.
+pub(crate) fn child_skills(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = match std::fs::read_dir(dir) {
         Ok(entries) => entries
             .flatten()
@@ -87,7 +92,7 @@ fn is_regular_file(path: &Path) -> bool {
 /// slashes (matching the manifest `--path` convention on every platform).
 /// Windows-style `\` separators in the parent are normalized to `/` so the
 /// suggested commands stay consistent and copy-pasteable everywhere.
-fn join_subpath(parent: Option<&str>, child: &str) -> String {
+pub(crate) fn join_subpath(parent: Option<&str>, child: &str) -> String {
     match parent {
         Some(p) if !p.is_empty() => {
             let p = p.replace('\\', "/");
