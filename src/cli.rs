@@ -172,9 +172,11 @@ fn add(
         add_all(root, &mut manifest, git, version, path)?;
     } else {
         let name = name.unwrap_or_else(|| {
+            // Prefer the `--path` basename, but fall back to the git URL when the
+            // path yields nothing usable as a skill name (e.g. `.`, `foo/.`, ``).
             path.as_deref()
                 .map(default_name)
-                .filter(|n| !n.is_empty())
+                .filter(|n| crate::manifest::validate_skill_name(n).is_ok())
                 .unwrap_or_else(|| default_name(&git))
         });
         crate::manifest::validate_skill_name(&name)?;
@@ -598,5 +600,18 @@ mod tests {
         assert_eq!(default_name("skills/camunda-feel"), "camunda-feel");
         assert_eq!(default_name("skills/camunda-feel/"), "camunda-feel");
         assert_eq!(default_name("camunda-feel"), "camunda-feel");
+    }
+
+    #[test]
+    fn default_name_dot_paths_are_not_valid_names() {
+        // `--path .` / `foo/.` yield "." — `add` must reject this as a name and
+        // fall back to the git URL basename instead of erroring.
+        for p in [".", "foo/.", ""] {
+            let derived = default_name(p);
+            assert!(
+                crate::manifest::validate_skill_name(&derived).is_err(),
+                "expected `{derived}` (from `{p}`) to be an invalid skill name"
+            );
+        }
     }
 }
