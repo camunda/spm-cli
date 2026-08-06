@@ -153,7 +153,7 @@ fn prune(yes: bool) -> Result<()> {
         return Ok(());
     }
     println!(
-        "store holds {} cached repo(s) (~{}) in {}",
+        "store holds {} cached checkout(s) (~{}) in {}",
         stats.entries,
         human_size(stats.bytes),
         dir.display()
@@ -164,7 +164,7 @@ fn prune(yes: bool) -> Result<()> {
     }
     store::remove_all()?;
     println!(
-        "pruned {} cached repo(s), freed ~{}",
+        "pruned {} cached checkout(s), freed ~{}",
         stats.entries,
         human_size(stats.bytes)
     );

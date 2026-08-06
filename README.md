@@ -160,7 +160,7 @@ spm install                                        # rebuild from ai.lock (after
 spm list                                           # show skills + pinned commits
 spm status                                         # check skills are materialized in this checkout
 spm clean                                          # remove generated vendor config
-spm prune [--yes]                                  # wipe the global fetch cache (~/.spm/store)
+spm prune [--yes]                                  # wipe the global fetch cache ($SPM_HOME/store, default ~/.spm/store)
 ```
 
 ## Worktrees & fresh clones

@@ -56,14 +56,20 @@ pub fn ensure(locked: &LockedSkill) -> Result<Ensured> {
 
 /// A snapshot of what the global store holds, for `spm prune` to report.
 pub struct StoreStats {
-    /// Number of top-level cached entries (one per (repo, commit) key).
+    /// Number of cached checkouts (one directory per (repo, commit) key).
     pub entries: usize,
-    /// Total bytes on disk across all entries.
+    /// Approximate bytes on disk across all checkouts: the sum of file sizes,
+    /// excluding directory metadata and filesystem block/overhead — hence the
+    /// `~` the CLI prints in front of it.
     pub bytes: u64,
 }
 
 /// Inspect the global store without modifying it. A missing store reads as
 /// empty rather than an error, so `prune` on a never-populated home is a no-op.
+///
+/// Counts only directory entries: the store layout is one directory per
+/// (repo, commit) key, so stray non-directory files (e.g. a macOS `.DS_Store`)
+/// are ignored rather than inflating the reported checkout count.
 pub fn stats() -> Result<StoreStats> {
     let dir = paths::store_dir()?;
     if !dir.exists() {
@@ -76,6 +82,11 @@ pub fn stats() -> Result<StoreStats> {
     let mut bytes = 0;
     for entry in std::fs::read_dir(&dir)? {
         let entry = entry?;
+        // `file_type` from a read_dir entry does not follow symlinks, so a
+        // symlink is never miscounted as a checkout directory.
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
         entries += 1;
         bytes += dir_size(&entry.path())?;
     }

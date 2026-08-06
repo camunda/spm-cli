@@ -1276,6 +1276,20 @@ fn prune_wipes_the_global_store() {
 }
 
 #[test]
+fn prune_ignores_stray_non_directory_entries() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    // A stray file at the store root (e.g. a macOS `.DS_Store`) must not be
+    // counted as a cached checkout — only the one real checkout directory is.
+    std::fs::write(sb.spm_home.join("store").join(".DS_Store"), b"junk").unwrap();
+
+    let out = sb.ok(&["prune", "--yes"]);
+    assert!(out.contains("1 cached checkout"), "{out}");
+    assert_eq!(sb.store_entries(), 0);
+}
+
+#[test]
 fn prune_empty_store_is_a_noop() {
     let sb = Sandbox::new();
     let out = sb.ok(&["prune", "--yes"]);
