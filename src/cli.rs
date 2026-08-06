@@ -107,14 +107,24 @@ fn clean(root: &Path) -> Result<()> {
 }
 
 fn init(root: &Path, targets: Vec<String>) -> Result<()> {
-    if Manifest::exists(root) {
-        bail!("{} already exists", Manifest::path_in(root).display());
-    }
+    // Validate --target before anything else so typos are caught regardless of
+    // whether the project is already initialized — otherwise the idempotent
+    // early-return below would silently accept a bogus target in scripts.
     if targets.is_empty() {
         bail!("at least one --target is required");
     }
     for target in &targets {
         vendor::for_target(target)?; // validate targets early
+    }
+    // Re-running `spm init` in an already-initialized project is a harmless
+    // no-op, not an error: leave the existing manifest untouched and tell the
+    // user rather than failing the command.
+    if Manifest::exists(root) {
+        println!(
+            "{} already exists — leaving it untouched",
+            Manifest::path_in(root).display()
+        );
+        return Ok(());
     }
     let manifest = Manifest {
         targets,
