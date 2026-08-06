@@ -154,17 +154,23 @@ fn prune(yes: bool) -> Result<()> {
         println!("store is empty — nothing to prune ({})", dir.display());
         return Ok(());
     }
-    let stats = store::stats()?;
-    println!(
-        "store holds {} cached checkout(s) (~{}) in {}",
-        stats.entries,
-        human_size(stats.bytes),
-        dir.display()
-    );
-    if !yes && !confirm("Remove everything from the store?")? {
-        println!("aborted — nothing removed");
-        return Ok(());
+    if !yes {
+        // Show the checkout count (a cheap shallow read) in the prompt, but
+        // defer the recursive size walk until after confirmation — answering
+        // `n` on a large store should be instant, not pay for a full du.
+        println!(
+            "store holds {} cached checkout(s) in {}",
+            store::checkout_count()?,
+            dir.display()
+        );
+        if !confirm("Remove everything from the store?")? {
+            println!("aborted — nothing removed");
+            return Ok(());
+        }
     }
+    // Size only now — once we know we're deleting — so `freed ~X` stays
+    // accurate without slowing down an abort.
+    let stats = store::stats()?;
     store::remove_all()?;
     println!(
         "pruned {} cached checkout(s), freed ~{}",

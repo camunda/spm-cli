@@ -175,7 +175,19 @@ impl Sandbox {
     fn store_entries(&self) -> usize {
         let dir = self.spm_home.join("store");
         match std::fs::read_dir(&dir) {
-            Ok(rd) => rd.count(),
+            Ok(rd) => {
+                // `ReadDir` yields `Result<DirEntry>`; unwrap each so a
+                // mid-iteration error panics loudly instead of being silently
+                // tallied (as bare `count()` would).
+                let mut n = 0;
+                for entry in rd {
+                    entry.unwrap_or_else(|err| {
+                        panic!("reading store entry in {}: {err}", dir.display())
+                    });
+                    n += 1;
+                }
+                n
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
             Err(e) => panic!("reading store dir {}: {e}", dir.display()),
         }

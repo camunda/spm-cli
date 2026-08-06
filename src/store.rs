@@ -67,9 +67,11 @@ pub struct StoreStats {
 /// Inspect the global store without modifying it. A missing store reads as
 /// empty rather than an error, so `prune` on a never-populated home is a no-op.
 ///
-/// Counts only directory entries: the store layout is one directory per
-/// (repo, commit) key, so stray non-directory files (e.g. a macOS `.DS_Store`)
-/// are ignored rather than inflating the reported checkout count.
+/// `entries` counts only directory entries — the store layout is one directory
+/// per (repo, commit) key, so stray non-directory files (e.g. a macOS
+/// `.DS_Store`) must not inflate the checkout count. `bytes` sizes *every*
+/// entry though, strays included: `prune` removes the whole store, so the
+/// reported freed size must account for what it actually deletes.
 pub fn stats() -> Result<StoreStats> {
     let dir = paths::store_dir()?;
     if !dir.exists() {
@@ -84,10 +86,9 @@ pub fn stats() -> Result<StoreStats> {
         let entry = entry?;
         // `file_type` from a read_dir entry does not follow symlinks, so a
         // symlink is never miscounted as a checkout directory.
-        if !entry.file_type()?.is_dir() {
-            continue;
+        if entry.file_type()?.is_dir() {
+            entries += 1;
         }
-        entries += 1;
         bytes += dir_size(&entry.path())?;
     }
     Ok(StoreStats { entries, bytes })
@@ -105,6 +106,26 @@ pub fn is_empty() -> Result<bool> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
         Err(e) => Err(e.into()),
     }
+}
+
+/// Cheap count of cached checkouts: a single shallow read of the store root,
+/// with no recursive size walk. Lets `prune`'s confirmation prompt show useful
+/// context without paying the full `stats()` cost when the user may abort.
+pub fn checkout_count() -> Result<usize> {
+    let dir = paths::store_dir()?;
+    let mut n = 0;
+    match std::fs::read_dir(&dir) {
+        Ok(rd) => {
+            for entry in rd {
+                if entry?.file_type()?.is_dir() {
+                    n += 1;
+                }
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    Ok(n)
 }
 
 /// Remove the entire global store. Safe to run at any time: `ensure` re-creates
