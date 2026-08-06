@@ -65,7 +65,10 @@ impl Vendor for Copilot {
         if dir.exists() {
             std::fs::remove_dir_all(&dir).with_context(|| format!("removing {}", dir.display()))?;
         }
-        gitignore::remove(project_root, GITIGNORE_COMMENT, GITIGNORE_ENTRY)
+        // `.gitignore` is intentionally left untouched: the entry spm added is
+        // harmless once the materialized dir is gone, and rewriting a
+        // user-owned file on `clean` risks clobbering their content.
+        Ok(())
     }
 
     fn status(&self, project_root: &Path, expected: &[String]) -> Result<super::VendorStatus> {
@@ -90,7 +93,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ensure_and_remove_gitignore_roundtrip() {
+    fn ensure_gitignored_appends_block() {
         let tmp = std::env::temp_dir().join(format!("spm-gi-copilot-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         let gi = tmp.join(".gitignore");
@@ -100,11 +103,7 @@ mod tests {
         let after = std::fs::read_to_string(&gi).unwrap();
         assert!(after.contains(GITIGNORE_ENTRY), "{after}");
         assert!(after.contains(GITIGNORE_COMMENT), "{after}");
-
-        gitignore::remove(&tmp, GITIGNORE_COMMENT, GITIGNORE_ENTRY).unwrap();
-        let cleaned = std::fs::read_to_string(&gi).unwrap();
-        assert!(!cleaned.contains(GITIGNORE_ENTRY), "{cleaned}");
-        assert_eq!(cleaned, "target/\n");
+        assert!(after.starts_with("target/\n"), "{after}");
 
         std::fs::remove_dir_all(&tmp).unwrap();
     }
