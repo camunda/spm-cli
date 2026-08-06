@@ -302,6 +302,20 @@ fn init_is_idempotent_and_preserves_manifest() {
         before,
         "init must not touch the manifest"
     );
+
+    // A bogus target is still rejected even when the project is already
+    // initialized — the idempotent early-return must not swallow typos.
+    let bad = sb.spm(&["init", "--target", "nonsense"]);
+    assert!(
+        !bad.status.success(),
+        "bogus target must fail even when ai.json exists"
+    );
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("unknown target"));
+    assert_eq!(
+        sb.read("ai.json"),
+        before,
+        "rejected init must not touch the manifest"
+    );
 }
 
 #[test]
