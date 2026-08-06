@@ -574,8 +574,11 @@ fn sync(root: &Path, force_refresh: bool, only: Option<&str>) -> Result<usize> {
 /// Derive a skill name from a repo URL. Handles https, `ssh://`, and scp-style
 /// (`git@host:org/repo.git`) forms by splitting on both `/` and the scp `:`.
 fn default_name(git: &str) -> String {
-    git.trim_end_matches('/')
-        .rsplit(['/', ':'])
+    // Split on `\` too: a `file://` URL to a Windows path (or a `--path` on
+    // Windows) uses backslash separators, and the basename must not keep them
+    // or it fails `validate_skill_name`.
+    git.trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\', ':'])
         .next()
         .unwrap_or(git)
         .trim_end_matches(".git")
@@ -600,6 +603,13 @@ mod tests {
         assert_eq!(default_name("skills/camunda-feel"), "camunda-feel");
         assert_eq!(default_name("skills/camunda-feel/"), "camunda-feel");
         assert_eq!(default_name("camunda-feel"), "camunda-feel");
+    }
+
+    #[test]
+    fn default_name_handles_windows_separators() {
+        assert_eq!(default_name(r"C:\Users\me\skill"), "skill");
+        assert_eq!(default_name(r"file://C:\tmp\repo\"), "repo");
+        assert_eq!(default_name(r"pack\alpha"), "alpha");
     }
 
     #[test]
