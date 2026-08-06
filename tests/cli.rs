@@ -825,6 +825,54 @@ fn add_all_expands_container_into_one_entry_per_subskill() {
 }
 
 #[test]
+fn add_all_rejects_collision_without_force_but_force_overwrites() {
+    let sb = Sandbox::new();
+    sb.add_skill_pack();
+    sb.ok(&["init", "--target", "claude"]);
+
+    // Seed `alpha` as a standalone entry so the container batch collides on it.
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "alpha"]);
+
+    // Without --force the whole batch is rejected on the collision.
+    let out = sb.spm(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--path",
+        "pack",
+        "--all",
+    ]);
+    assert!(!out.status.success(), "colliding --all must fail");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("already exists"), "{err}");
+    assert!(err.contains("--force"), "should suggest --force: {err}");
+
+    // With --force the batch overwrites the colliding entry and completes.
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--path",
+        "pack",
+        "--all",
+        "--force",
+    ]);
+    let manifest: serde_json::Value = serde_json::from_str(&sb.read("ai.json")).unwrap();
+    // `alpha` is now the container-derived entry (pinned under its subpath),
+    // not the original standalone tag.
+    assert_eq!(
+        manifest["skills"]["alpha"]["path"], "pack/alpha",
+        "{manifest}"
+    );
+    assert_eq!(
+        manifest["skills"]["beta"]["path"], "pack/beta",
+        "{manifest}"
+    );
+}
+
+#[test]
 fn add_all_on_non_container_path_errors() {
     let sb = Sandbox::new();
     sb.add_skill_pack();
