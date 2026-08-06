@@ -171,7 +171,14 @@ fn add(
     if all {
         add_all(root, &mut manifest, git, version, path)?;
     } else {
-        let name = name.unwrap_or_else(|| default_name(&git));
+        let name = name.unwrap_or_else(|| {
+            // Prefer the `--path` basename, but fall back to the git URL when the
+            // path yields nothing usable as a skill name (e.g. `.`, `foo/.`, ``).
+            path.as_deref()
+                .map(default_name)
+                .filter(|n| crate::manifest::validate_skill_name(n).is_ok())
+                .unwrap_or_else(|| default_name(&git))
+        });
         crate::manifest::validate_skill_name(&name)?;
         let spec = SkillSpec {
             git,
@@ -567,8 +574,11 @@ fn sync(root: &Path, force_refresh: bool, only: Option<&str>) -> Result<usize> {
 /// Derive a skill name from a repo URL. Handles https, `ssh://`, and scp-style
 /// (`git@host:org/repo.git`) forms by splitting on both `/` and the scp `:`.
 fn default_name(git: &str) -> String {
-    git.trim_end_matches('/')
-        .rsplit(['/', ':'])
+    // Split on `\` too: a `file://` URL to a Windows path (or a `--path` on
+    // Windows) uses backslash separators, and the basename must not keep them
+    // or it fails `validate_skill_name`.
+    git.trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\', ':'])
         .next()
         .unwrap_or(git)
         .trim_end_matches(".git")
@@ -586,5 +596,32 @@ mod tests {
         assert_eq!(default_name("git@github.com:org/repo.git"), "repo");
         assert_eq!(default_name("ssh://git@host/org/repo.git"), "repo");
         assert_eq!(default_name("git@host:repo.git"), "repo");
+    }
+
+    #[test]
+    fn default_name_handles_subpaths() {
+        assert_eq!(default_name("skills/camunda-feel"), "camunda-feel");
+        assert_eq!(default_name("skills/camunda-feel/"), "camunda-feel");
+        assert_eq!(default_name("camunda-feel"), "camunda-feel");
+    }
+
+    #[test]
+    fn default_name_handles_windows_separators() {
+        assert_eq!(default_name(r"C:\Users\me\skill"), "skill");
+        assert_eq!(default_name(r"file://C:\tmp\repo\"), "repo");
+        assert_eq!(default_name(r"pack\alpha"), "alpha");
+    }
+
+    #[test]
+    fn default_name_dot_paths_are_not_valid_names() {
+        // `--path .` / `foo/.` yield "." — `add` must reject this as a name and
+        // fall back to the git URL basename instead of erroring.
+        for p in [".", "foo/.", ""] {
+            let derived = default_name(p);
+            assert!(
+                crate::manifest::validate_skill_name(&derived).is_err(),
+                "expected `{derived}` (from `{p}`) to be an invalid skill name"
+            );
+        }
     }
 }

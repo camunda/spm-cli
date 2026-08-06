@@ -250,6 +250,50 @@ fn copilot_add_materializes_project_local_skills() {
 }
 
 #[test]
+fn add_without_name_keys_manifest_by_path_basename() {
+    let sb = Sandbox::new();
+    sb.add_skill_pack();
+    sb.ok(&["init", "--target", "claude"]);
+
+    // No `--name`: the manifest key must come from the `--path` basename
+    // (`alpha`), not the git URL basename (`skill`).
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--path",
+        "pack/alpha",
+    ]);
+
+    let manifest = sb.read("ai.json");
+    assert!(
+        manifest.contains("\"alpha\""),
+        "manifest should be keyed by path basename `alpha`: {manifest}"
+    );
+    assert!(
+        !manifest.contains("\"skill\""),
+        "manifest must not be keyed by the git URL basename `skill`: {manifest}"
+    );
+}
+
+#[test]
+fn add_with_dot_path_falls_back_to_git_url_basename() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+
+    // `--path .` yields "." which is not a valid skill name, so the default
+    // must fall back to the git URL basename (`skill`) instead of erroring.
+    sb.ok(&["add", &sb.skill_url(), "--branch", "main", "--path", "."]);
+
+    let manifest = sb.read("ai.json");
+    assert!(
+        manifest.contains("\"skill\""),
+        "manifest should fall back to git URL basename `skill`: {manifest}"
+    );
+}
+
+#[test]
 fn remove_prunes_skill() {
     let sb = Sandbox::new();
     sb.ok(&["init", "--target", "claude"]);
