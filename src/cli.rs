@@ -171,7 +171,12 @@ fn add(
     if all {
         add_all(root, &mut manifest, git, version, path)?;
     } else {
-        let name = name.unwrap_or_else(|| default_name(&git));
+        let name = name.unwrap_or_else(|| {
+            path.as_deref()
+                .map(default_name)
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| default_name(&git))
+        });
         crate::manifest::validate_skill_name(&name)?;
         let spec = SkillSpec {
             git,
@@ -586,5 +591,12 @@ mod tests {
         assert_eq!(default_name("git@github.com:org/repo.git"), "repo");
         assert_eq!(default_name("ssh://git@host/org/repo.git"), "repo");
         assert_eq!(default_name("git@host:repo.git"), "repo");
+    }
+
+    #[test]
+    fn default_name_handles_subpaths() {
+        assert_eq!(default_name("skills/camunda-feel"), "camunda-feel");
+        assert_eq!(default_name("skills/camunda-feel/"), "camunda-feel");
+        assert_eq!(default_name("camunda-feel"), "camunda-feel");
     }
 }
