@@ -189,10 +189,8 @@ fn confirm(question: &str) -> Result<bool> {
     io::stdout().flush()?;
     let mut line = String::new();
     io::stdin().lock().read_line(&mut line)?;
-    Ok(matches!(
-        line.trim().to_ascii_lowercase().as_str(),
-        "y" | "yes"
-    ))
+    let answer = line.trim();
+    Ok(answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes"))
 }
 
 /// Human-readable byte size using binary (1024) units.
