@@ -1,6 +1,6 @@
 use crate::{git, lockfile::LockedSkill, paths};
 use anyhow::{bail, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Outcome of ensuring a skill is in the store.
 pub struct Ensured {
@@ -52,4 +52,59 @@ pub fn ensure(locked: &LockedSkill) -> Result<Ensured> {
         path: content_canon,
         fetched,
     })
+}
+
+/// A snapshot of what the global store holds, for `spm prune` to report.
+pub struct StoreStats {
+    /// Number of top-level cached entries (one per (repo, commit) key).
+    pub entries: usize,
+    /// Total bytes on disk across all entries.
+    pub bytes: u64,
+}
+
+/// Inspect the global store without modifying it. A missing store reads as
+/// empty rather than an error, so `prune` on a never-populated home is a no-op.
+pub fn stats() -> Result<StoreStats> {
+    let dir = paths::store_dir()?;
+    if !dir.exists() {
+        return Ok(StoreStats {
+            entries: 0,
+            bytes: 0,
+        });
+    }
+    let mut entries = 0;
+    let mut bytes = 0;
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        entries += 1;
+        bytes += dir_size(&entry.path())?;
+    }
+    Ok(StoreStats { entries, bytes })
+}
+
+/// Remove the entire global store. Safe to run at any time: `ensure` re-creates
+/// and re-fetches keys on demand, so the only cost of pruning is re-downloading
+/// whatever a later `install` needs.
+pub fn remove_all() -> Result<()> {
+    let dir = paths::store_dir()?;
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir)?;
+    }
+    Ok(())
+}
+
+/// Recursive on-disk size of `path`. Uses `symlink_metadata` so symlinks are
+/// counted as their own (tiny) size and never followed — avoids both double
+/// counting and traversal cycles.
+fn dir_size(path: &Path) -> Result<u64> {
+    let meta = std::fs::symlink_metadata(path)?;
+    if meta.file_type().is_dir() {
+        let mut total = 0;
+        for entry in std::fs::read_dir(path)? {
+            total += dir_size(&entry?.path())?;
+        }
+        Ok(total)
+    } else {
+        Ok(meta.len())
+    }
 }
