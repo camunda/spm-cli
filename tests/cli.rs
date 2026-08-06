@@ -168,11 +168,16 @@ impl Sandbox {
     }
 
     /// Number of top-level entries in the sandboxed global store. A missing
-    /// store reads as empty — the state after a `prune`.
+    /// store reads as empty — the state after a `prune`. Any other error (an
+    /// unreadable path, or a non-directory where the store should be) is a real
+    /// harness fault and panics loudly rather than masquerading as an empty
+    /// store and letting an assertion pass on a misleading `0`.
     fn store_entries(&self) -> usize {
-        match std::fs::read_dir(self.spm_home.join("store")) {
+        let dir = self.spm_home.join("store");
+        match std::fs::read_dir(&dir) {
             Ok(rd) => rd.count(),
-            Err(_) => 0,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(e) => panic!("reading store dir {}: {e}", dir.display()),
         }
     }
 }
