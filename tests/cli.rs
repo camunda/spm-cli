@@ -869,6 +869,54 @@ fn add_all_expands_container_into_one_entry_per_subskill() {
 }
 
 #[test]
+fn add_all_rejects_collision_without_force_but_force_overwrites() {
+    let sb = Sandbox::new();
+    sb.add_skill_pack();
+    sb.ok(&["init", "--target", "claude"]);
+
+    // Seed `alpha` as a standalone entry so the container batch collides on it.
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "alpha"]);
+
+    // Without --force the whole batch is rejected on the collision.
+    let out = sb.spm(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--path",
+        "pack",
+        "--all",
+    ]);
+    assert!(!out.status.success(), "colliding --all must fail");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("already exists"), "{err}");
+    assert!(err.contains("--force"), "should suggest --force: {err}");
+
+    // With --force the batch overwrites the colliding entry and completes.
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--path",
+        "pack",
+        "--all",
+        "--force",
+    ]);
+    let manifest: serde_json::Value = serde_json::from_str(&sb.read("ai.json")).unwrap();
+    // `alpha` is now the container-derived entry (pinned under its subpath),
+    // not the original standalone tag.
+    assert_eq!(
+        manifest["skills"]["alpha"]["path"], "pack/alpha",
+        "{manifest}"
+    );
+    assert_eq!(
+        manifest["skills"]["beta"]["path"], "pack/beta",
+        "{manifest}"
+    );
+}
+
+#[test]
 fn add_all_on_non_container_path_errors() {
     let sb = Sandbox::new();
     sb.add_skill_pack();
@@ -898,6 +946,88 @@ fn add_all_on_non_container_path_errors() {
     assert!(
         !sb.read("ai.json").contains("bare"),
         "no entry should be created on failure"
+    );
+}
+
+#[test]
+fn add_rejects_duplicate_name_without_force() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let before = sb.read("ai.json");
+
+    // Re-adding the same name must fail loudly rather than silently clobber the
+    // existing entry.
+    let out = sb.spm(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--name",
+        "greet",
+    ]);
+    assert!(!out.status.success(), "duplicate add must fail");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("already exists"), "{err}");
+    assert!(
+        err.contains("--force"),
+        "error should mention --force: {err}"
+    );
+    assert!(
+        err.contains("--name"),
+        "error should mention renaming with --name: {err}"
+    );
+    assert_eq!(
+        sb.read("ai.json"),
+        before,
+        "a rejected add must not touch the manifest"
+    );
+}
+
+#[test]
+fn add_force_overwrites_existing_name() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+
+    // --force re-pins the same name to a different selector.
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--name",
+        "greet",
+        "--force",
+    ]);
+    let manifest = sb.read("ai.json");
+    assert!(manifest.contains("\"branch\""), "{manifest}");
+    assert!(
+        !manifest.contains("v0.1.0"),
+        "old selector should be gone: {manifest}"
+    );
+}
+
+#[test]
+fn load_rejects_duplicate_skill_keys() {
+    let sb = Sandbox::new();
+    // Hand-written manifest with two entries under the same skill name. A plain
+    // map would silently keep the last; spm must reject it instead of dropping
+    // the first without warning.
+    std::fs::write(
+        sb.project.join("ai.json"),
+        r#"{"targets":["claude"],"skills":{
+            "greet":{"git":"https://example.com/a.git","tag":"v1"},
+            "greet":{"git":"https://example.com/b.git","tag":"v2"}
+        }}"#,
+    )
+    .unwrap();
+    let out = sb.spm(&["install"]);
+    assert!(!out.status.success(), "duplicate keys must be rejected");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("duplicate skill name `greet`"),
+        "should name the duplicate: {err}"
     );
 }
 

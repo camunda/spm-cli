@@ -39,6 +39,10 @@ enum Command {
         /// skill. Incompatible with --name (names are derived per sub-skill).
         #[arg(long, conflicts_with = "name")]
         all: bool,
+        /// Overwrite existing skill(s) of the same name instead of erroring.
+        /// Applies to both a single add and --all.
+        #[arg(long)]
+        force: bool,
     },
     /// Manage the target vendors declared in ai.json.
     Target {
@@ -97,7 +101,8 @@ pub fn run() -> Result<()> {
             path,
             name,
             all,
-        } => add(&root, git, version, path, name, all),
+            force,
+        } => add(&root, git, version, path, name, all, force),
         Command::Target { command } => match command {
             TargetCommand::Add { vendors } => target_add(&root, vendors),
         },
@@ -163,13 +168,14 @@ fn add(
     path: Option<String>,
     name: Option<String>,
     all: bool,
+    force: bool,
 ) -> Result<()> {
     let mut manifest = Manifest::load(root)?;
     if let Some(sub) = &path {
         crate::manifest::validate_subpath(sub)?;
     }
     if all {
-        add_all(root, &mut manifest, git, version, path)?;
+        add_all(root, &mut manifest, git, version, path, force)?;
     } else {
         let name = name.unwrap_or_else(|| {
             // Prefer the `--path` basename, but fall back to the git URL when the
@@ -180,6 +186,17 @@ fn add(
                 .unwrap_or_else(|| default_name(&git))
         });
         crate::manifest::validate_skill_name(&name)?;
+        // Never clobber an existing entry silently: adding a name that already
+        // exists is an error unless the user opts in with --force (e.g. to
+        // re-pin a version).
+        if !force && manifest.skills.contains_key(&name) {
+            bail!(
+                "a skill named `{name}` already exists in {}; either give this one \
+                 a different name with `--name <other>`, pass --force to overwrite \
+                 the existing entry, or `spm remove {name}` first",
+                Manifest::path_in(root).display()
+            );
+        }
         let spec = SkillSpec {
             git,
             tag: version.tag,
@@ -208,6 +225,7 @@ fn add_all(
     git: String,
     version: VersionArg,
     path: Option<String>,
+    force: bool,
 ) -> Result<()> {
     // Version selector is validated once for the container; every derived entry
     // reuses it verbatim.
@@ -234,13 +252,14 @@ fn add_all(
     }
 
     // Reject the whole batch on the first collision so the manifest is never
-    // left half-populated.
+    // left half-populated — unless --force opts into overwriting existing
+    // entries. Name validation still runs regardless.
     for sub in &subs {
         crate::manifest::validate_skill_name(sub)?;
-        if manifest.skills.contains_key(sub) {
+        if !force && manifest.skills.contains_key(sub) {
             bail!(
-                "a skill named `{sub}` already exists in {}; \
-                 remove or rename it before adding this container with --all",
+                "a skill named `{sub}` already exists in {}; either pass --force to \
+                 overwrite the existing entries, or `spm remove {sub}` first",
                 Manifest::path_in(root).display()
             );
         }
