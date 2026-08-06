@@ -93,6 +93,20 @@ pub fn stats() -> Result<StoreStats> {
     Ok(StoreStats { entries, bytes })
 }
 
+/// Whether the store holds nothing to prune: the directory is absent or has no
+/// entries at all. Deliberately distinct from `stats().entries == 0`, which
+/// ignores stray non-checkout files (e.g. a macOS `.DS_Store`) — `prune` still
+/// wants to remove those to honor its "everything under the store" contract, so
+/// the "nothing to prune" gate must consider a stray-only store non-empty.
+pub fn is_empty() -> Result<bool> {
+    let dir = paths::store_dir()?;
+    match std::fs::read_dir(&dir) {
+        Ok(mut rd) => Ok(rd.next().is_none()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Remove the entire global store. Safe to run at any time: `ensure` re-creates
 /// and re-fetches keys on demand, so the only cost of pruning is re-downloading
 /// whatever a later `install` needs.

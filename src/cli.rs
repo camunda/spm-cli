@@ -141,17 +141,20 @@ fn clean(root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// `spm prune`: wipe the whole global store (`~/.spm/store`). Unlike `clean`
-/// (project-local vendor config), this is global and shared across every
-/// project, so it always confirms first unless `--yes` is passed. The store is
-/// a pure cache — anything removed re-fetches on the next `install`.
+/// `spm prune`: wipe the whole global store (`$SPM_HOME/store`, default
+/// `~/.spm/store`). Unlike `clean` (project-local vendor config), this is global
+/// and shared across every project, so it always confirms first unless `--yes`
+/// is passed. The store is a pure cache — anything removed re-fetches on the
+/// next `install`.
 fn prune(yes: bool) -> Result<()> {
     let dir = paths::store_dir()?;
-    let stats = store::stats()?;
-    if stats.entries == 0 {
+    // Gate on total emptiness, not the checkout count: a store holding only
+    // stray files still has something to remove, and prune removes everything.
+    if store::is_empty()? {
         println!("store is empty — nothing to prune ({})", dir.display());
         return Ok(());
     }
+    let stats = store::stats()?;
     println!(
         "store holds {} cached checkout(s) (~{}) in {}",
         stats.entries,

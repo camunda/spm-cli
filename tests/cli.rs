@@ -1295,6 +1295,25 @@ fn prune_ignores_stray_non_directory_entries() {
 }
 
 #[test]
+fn prune_removes_a_store_holding_only_stray_files() {
+    let sb = Sandbox::new();
+    // A store root with no checkout directories, only a stray file. prune must
+    // NOT report it as empty, and must remove the file (honors "everything").
+    let store = sb.spm_home.join("store");
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(store.join(".DS_Store"), b"junk").unwrap();
+
+    let out = sb.ok(&["prune", "--yes"]);
+    assert!(!out.contains("nothing to prune"), "{out}");
+    assert!(out.contains("pruned"), "{out}");
+    assert!(
+        !store.join(".DS_Store").exists(),
+        "stray file must be removed"
+    );
+    assert_eq!(sb.store_entries(), 0);
+}
+
+#[test]
 fn prune_empty_store_is_a_noop() {
     let sb = Sandbox::new();
     let out = sb.ok(&["prune", "--yes"]);
