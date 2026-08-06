@@ -10,8 +10,45 @@ pub const MANIFEST_FILE: &str = "ai.json";
 pub struct Manifest {
     /// Target vendors, e.g. `["claude", "copilot"]`.
     pub targets: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_unique_skills")]
     pub skills: BTreeMap<String, SkillSpec>,
+}
+
+/// Deserialize the `skills` map while rejecting duplicate names. A plain
+/// `BTreeMap` (or `serde_json::Value`) silently collapses repeated JSON object
+/// keys to last-wins, which would drop an earlier skill without warning. We see
+/// both entries only by streaming the map ourselves — so `Manifest::load` must
+/// deserialize from the raw text, not from an already-collapsed `Value`.
+fn deserialize_unique_skills<'de, D>(d: D) -> Result<BTreeMap<String, SkillSpec>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{self, MapAccess, Visitor};
+    struct SkillsVisitor;
+    impl<'de> Visitor<'de> for SkillsVisitor {
+        type Value = BTreeMap<String, SkillSpec>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a map of unique skill names")
+        }
+        fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+        where
+            M: MapAccess<'de>,
+        {
+            let mut out = BTreeMap::new();
+            while let Some((name, spec)) = map.next_entry::<String, SkillSpec>()? {
+                if out.contains_key(&name) {
+                    return Err(de::Error::custom(format!(
+                        "duplicate skill name `{name}` in the `skills` map; \
+                         each skill name may appear only once — remove or rename \
+                         one of the `{name}` entries"
+                    )));
+                }
+                out.insert(name, spec);
+            }
+            Ok(out)
+        }
+    }
+    d.deserialize_map(SkillsVisitor)
 }
 
 /// A single skill dependency. Exactly one of tag/branch/commit selects the version.
@@ -115,8 +152,12 @@ impl Manifest {
         let value: serde_json::Value =
             serde_json::from_str(&text).with_context(|| format!("parsing {}", p.display()))?;
         crate::schema::validate(&value).with_context(|| format!("in {}", p.display()))?;
+        // Deserialize from the raw text (not `value`): the intermediate
+        // `serde_json::Value` above has already collapsed any duplicate object
+        // keys, so duplicate skill names are only detectable by streaming the
+        // original bytes through `deserialize_unique_skills`.
         let manifest: Self =
-            serde_json::from_value(value).with_context(|| format!("parsing {}", p.display()))?;
+            serde_json::from_str(&text).with_context(|| format!("parsing {}", p.display()))?;
         for (name, spec) in &manifest.skills {
             validate_skill_name(name).with_context(|| format!("in {}", p.display()))?;
             if let Some(sub) = &spec.path {
