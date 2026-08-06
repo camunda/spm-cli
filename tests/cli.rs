@@ -120,6 +120,33 @@ impl Sandbox {
             .unwrap()
     }
 
+    /// Run `spm <args>` feeding `input` on stdin — drives the interactive
+    /// target picker (a plain line read, so piped input works without a tty).
+    fn spm_stdin(&self, args: &[&str], input: &str) -> std::process::Output {
+        use std::io::Write;
+        let mut child = Command::new(env!("CARGO_BIN_EXE_spm"))
+            .args(args)
+            .current_dir(&self.project)
+            .env("SPM_HOME", &self.spm_home)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        // Tolerate ONLY BrokenPipe: a command that short-circuits before reading
+        // stdin (e.g. "all targets already configured") closes the pipe first.
+        // Any other write error is a real harness failure and must surface, not
+        // be masked.
+        if let Err(e) = child.stdin.take().unwrap().write_all(input.as_bytes()) {
+            assert_eq!(
+                e.kind(),
+                std::io::ErrorKind::BrokenPipe,
+                "unexpected stdin write error: {e}"
+            );
+        }
+        child.wait_with_output().unwrap()
+    }
+
     /// Run `spm`, asserting success and returning stdout.
     fn ok(&self, args: &[&str]) -> String {
         let out = self.spm(args);
@@ -897,4 +924,151 @@ fn add_all_rejects_collision_with_existing_skill() {
         "no partial insertion on collision: {}",
         sb.read("ai.json")
     );
+}
+
+#[test]
+fn target_add_appends_vendor_and_materializes_existing_skills() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+
+    // Add copilot after the fact via an explicit vendor argument.
+    let out = sb.ok(&["target", "add", "copilot"]);
+    assert!(out.contains("added target(s): copilot"), "{out}");
+
+    // ai.json now declares both targets, in insertion order.
+    let manifest = sb.read("ai.json");
+    assert!(manifest.contains("\"claude\""), "{manifest}");
+    assert!(manifest.contains("\"copilot\""), "{manifest}");
+
+    // The already-declared skill is materialized into the newly-added vendor
+    // without a separate `spm install`.
+    let skill_md = sb
+        .project
+        .join(".agents/skills/spm-managed-skills/greet/SKILL.md");
+    assert!(skill_md.exists(), "missing {}", skill_md.display());
+}
+
+#[test]
+fn target_add_splits_comma_separated_vendors_into_multiple_tokens() {
+    let sb = Sandbox::new();
+    // Only two vendors exist and `init` forces at least one, so at most one is
+    // ever unconfigured — a single call can't *add* two. Instead prove the
+    // `value_delimiter` split by passing BOTH vendors as one comma-separated
+    // argument against a copilot-seeded manifest: the arg must parse into two
+    // distinct tokens, so `claude` is added and `copilot` is recognized as
+    // already-configured (a skip). A no-split parse would treat the whole string
+    // as one unknown vendor and error instead.
+    sb.ok(&["init", "--target", "copilot"]);
+    let out = sb.ok(&["target", "add", "claude,copilot"]);
+    assert!(out.contains("added target(s): claude"), "{out}");
+    assert!(
+        out.contains("`copilot` already configured"),
+        "second comma-separated token must be parsed and skipped: {out}"
+    );
+    let manifest = sb.read("ai.json");
+    assert!(manifest.contains("\"claude\""), "{manifest}");
+    // copilot present exactly once — the skip must not duplicate it.
+    assert_eq!(manifest.matches("\"copilot\"").count(), 1, "{manifest}");
+}
+
+#[test]
+fn target_add_accepts_repeated_vendor_arguments() {
+    let sb = Sandbox::new();
+    // The space-separated (repeatable positional) form parses the same way as the
+    // comma form: each token is validated independently.
+    sb.ok(&["init", "--target", "copilot"]);
+    let out = sb.ok(&["target", "add", "claude", "copilot"]);
+    assert!(out.contains("added target(s): claude"), "{out}");
+    assert!(out.contains("`copilot` already configured"), "{out}");
+}
+
+#[test]
+fn target_add_already_configured_is_a_skip_not_an_error() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+
+    // Re-adding claude succeeds (exit 0) and reports the skip.
+    let out = sb.spm(&["target", "add", "claude"]);
+    assert!(
+        out.status.success(),
+        "re-adding a configured target must succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("already configured"), "{stdout}");
+    assert!(stdout.contains("no new targets added"), "{stdout}");
+
+    // ai.json still lists claude exactly once.
+    assert_eq!(
+        sb.read("ai.json").matches("\"claude\"").count(),
+        1,
+        "target must not be duplicated"
+    );
+}
+
+#[test]
+fn target_add_rejects_unknown_vendor() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    let out = sb.spm(&["target", "add", "bogus"]);
+    assert!(!out.status.success(), "unknown vendor must be rejected");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("unknown target"), "{err}");
+    // The manifest is untouched when validation fails.
+    assert!(
+        !sb.read("ai.json").contains("bogus"),
+        "{}",
+        sb.read("ai.json")
+    );
+}
+
+#[test]
+fn target_add_interactive_picks_unconfigured_vendor_from_list() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+
+    // No vendor arg → interactive numbered picker over the unconfigured vendors
+    // (here just `copilot`, option 1). Piped stdin drives it.
+    let out = sb.spm_stdin(&["target", "add"], "1\n");
+    assert!(
+        out.status.success(),
+        "interactive add failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("1) copilot"),
+        "picker must list copilot: {stdout}"
+    );
+    assert!(stdout.contains("added target(s): copilot"), "{stdout}");
+    assert!(sb.read("ai.json").contains("\"copilot\""));
+}
+
+#[test]
+fn target_add_interactive_reports_when_all_configured() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude,copilot"]);
+
+    // Every supported vendor is already configured: nothing to pick, and the
+    // command short-circuits with a message (no stdin consumed).
+    let out = sb.spm_stdin(&["target", "add"], "");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("all supported targets already configured"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn target_add_interactive_rejects_out_of_range_selection() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    let out = sb.spm_stdin(&["target", "add"], "9\n");
+    assert!(!out.status.success(), "out-of-range pick must fail");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("invalid selection"), "{err}");
+    // Manifest unchanged on a bad pick.
+    assert!(!sb.read("ai.json").contains("copilot"));
 }

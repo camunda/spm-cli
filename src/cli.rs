@@ -2,7 +2,7 @@ use crate::lockfile::Lockfile;
 use crate::manifest::{Manifest, SkillSpec};
 use crate::vendor::{self, MaterializedSkill};
 use crate::{resolver, store};
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -40,6 +40,11 @@ enum Command {
         #[arg(long, conflicts_with = "name")]
         all: bool,
     },
+    /// Manage the target vendors declared in ai.json.
+    Target {
+        #[command(subcommand)]
+        command: TargetCommand,
+    },
     /// Remove a skill dependency.
     Remove { name: String },
     /// Re-resolve branches/tags to latest commits.
@@ -55,6 +60,19 @@ enum Command {
     Status,
     /// Remove all generated vendor config for this project.
     Clean,
+}
+
+#[derive(Subcommand)]
+enum TargetCommand {
+    /// Add one or more target vendors to ai.json (and materialize skills for
+    /// them). With no vendor given, pick interactively from the vendors not yet
+    /// configured.
+    Add {
+        /// Vendor(s) to add: claude and/or copilot. Repeatable or
+        /// comma-separated. Omit to choose interactively.
+        #[arg(value_delimiter = ',')]
+        vendors: Vec<String>,
+    },
 }
 
 #[derive(Args)]
@@ -80,6 +98,9 @@ pub fn run() -> Result<()> {
             name,
             all,
         } => add(&root, git, version, path, name, all),
+        Command::Target { command } => match command {
+            TargetCommand::Add { vendors } => target_add(&root, vendors),
+        },
         Command::Remove { name } => remove(&root, &name),
         Command::Update { name } => update(&root, name),
         Command::Install => {
@@ -235,6 +256,104 @@ fn add_all(
     sync(root, false, None)?;
     println!("added {} skill(s): {}", subs.len(), subs.join(", "));
     Ok(())
+}
+
+/// `spm target add [vendors...]`: append target vendors to an existing ai.json
+/// and materialize skills for them. Explicit `vendors` are validated and added
+/// verbatim; with none given, the vendors *not yet configured* are offered as an
+/// interactive numbered picker. Adding an already-configured target is a skip,
+/// not an error, so the command is safe to re-run.
+fn target_add(root: &Path, vendors: Vec<String>) -> Result<()> {
+    let mut manifest = Manifest::load(root)?;
+
+    let requested = if vendors.is_empty() {
+        let available: Vec<&str> = vendor::ALL_TARGETS
+            .iter()
+            .copied()
+            .filter(|t| !manifest.targets.iter().any(|cur| cur == t))
+            .collect();
+        if available.is_empty() {
+            println!(
+                "all supported targets already configured: {}",
+                manifest.targets.join(", ")
+            );
+            return Ok(());
+        }
+        prompt_targets(&available)?
+    } else {
+        // Validate every explicitly-requested vendor up front so a typo aborts
+        // before the manifest is touched.
+        for v in &vendors {
+            vendor::for_target(v)?;
+        }
+        vendors
+    };
+
+    let mut added = Vec::new();
+    for v in requested {
+        if manifest.targets.iter().any(|cur| cur == &v) {
+            println!("target `{v}` already configured — skipping");
+            continue;
+        }
+        manifest.targets.push(v.clone());
+        added.push(v);
+    }
+
+    if added.is_empty() {
+        println!("no new targets added");
+        return Ok(());
+    }
+
+    manifest.save(root)?;
+    // Materialize existing skills into the newly-added vendor(s).
+    sync(root, false, None)?;
+    println!("added target(s): {}", added.join(", "));
+    Ok(())
+}
+
+/// Interactive numbered picker over the vendors not yet configured. Reads a
+/// comma-separated list of 1-based indices (or `all`) from stdin — a plain line
+/// read, not a raw-terminal TUI, so it stays portable across Windows and Unix
+/// shells and is drivable from tests with piped input.
+fn prompt_targets(available: &[&str]) -> Result<Vec<String>> {
+    use std::io::{self, BufRead, Write};
+
+    println!("Select target(s) to add:");
+    for (i, t) in available.iter().enumerate() {
+        println!("  {}) {t}", i + 1);
+    }
+    print!("Enter numbers (comma-separated), or `all`: ");
+    io::stdout().flush()?;
+
+    let mut line = String::new();
+    io::stdin().lock().read_line(&mut line)?;
+    let line = line.trim();
+    if line.is_empty() {
+        bail!("no target selected");
+    }
+    if line.eq_ignore_ascii_case("all") {
+        return Ok(available.iter().map(|s| s.to_string()).collect());
+    }
+
+    // Preserve the user's typed order while dropping duplicate picks.
+    let mut chosen = Vec::new();
+    for tok in line.split(',') {
+        let tok = tok.trim();
+        let n: usize = tok
+            .parse()
+            .map_err(|_| anyhow!("invalid selection `{tok}`: enter numbers from the list"))?;
+        let vendor = available
+            .get(
+                n.checked_sub(1)
+                    .ok_or_else(|| anyhow!("invalid selection `{tok}`: numbers start at 1"))?,
+            )
+            .ok_or_else(|| anyhow!("invalid selection `{tok}`: no such option"))?
+            .to_string();
+        if !chosen.contains(&vendor) {
+            chosen.push(vendor);
+        }
+    }
+    Ok(chosen)
 }
 
 fn remove(root: &Path, name: &str) -> Result<()> {
