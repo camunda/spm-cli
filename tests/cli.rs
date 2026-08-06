@@ -133,10 +133,17 @@ impl Sandbox {
             .stderr(std::process::Stdio::piped())
             .spawn()
             .unwrap();
-        // Ignore write errors: a command that short-circuits before reading
-        // stdin (e.g. "all targets already configured") closes the pipe first,
-        // which is a BrokenPipe here, not a test failure.
-        let _ = child.stdin.take().unwrap().write_all(input.as_bytes());
+        // Tolerate ONLY BrokenPipe: a command that short-circuits before reading
+        // stdin (e.g. "all targets already configured") closes the pipe first.
+        // Any other write error is a real harness failure and must surface, not
+        // be masked.
+        if let Err(e) = child.stdin.take().unwrap().write_all(input.as_bytes()) {
+            assert_eq!(
+                e.kind(),
+                std::io::ErrorKind::BrokenPipe,
+                "unexpected stdin write error: {e}"
+            );
+        }
         child.wait_with_output().unwrap()
     }
 
