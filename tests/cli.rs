@@ -943,16 +943,37 @@ fn target_add_appends_vendor_and_materializes_existing_skills() {
 }
 
 #[test]
-fn target_add_is_comma_separated_and_repeatable() {
+fn target_add_splits_comma_separated_vendors_into_multiple_tokens() {
     let sb = Sandbox::new();
-    // Seed an ai.json with neither default target by initializing copilot, then
-    // add claude; the value_delimiter path is exercised by the multi-form below.
+    // Only two vendors exist and `init` forces at least one, so at most one is
+    // ever unconfigured — a single call can't *add* two. Instead prove the
+    // `value_delimiter` split by passing BOTH vendors as one comma-separated
+    // argument against a copilot-seeded manifest: the arg must parse into two
+    // distinct tokens, so `claude` is added and `copilot` is recognized as
+    // already-configured (a skip). A no-split parse would treat the whole string
+    // as one unknown vendor and error instead.
     sb.ok(&["init", "--target", "copilot"]);
-    let out = sb.ok(&["target", "add", "claude"]);
+    let out = sb.ok(&["target", "add", "claude,copilot"]);
     assert!(out.contains("added target(s): claude"), "{out}");
+    assert!(
+        out.contains("`copilot` already configured"),
+        "second comma-separated token must be parsed and skipped: {out}"
+    );
     let manifest = sb.read("ai.json");
     assert!(manifest.contains("\"claude\""), "{manifest}");
-    assert!(manifest.contains("\"copilot\""), "{manifest}");
+    // copilot present exactly once — the skip must not duplicate it.
+    assert_eq!(manifest.matches("\"copilot\"").count(), 1, "{manifest}");
+}
+
+#[test]
+fn target_add_accepts_repeated_vendor_arguments() {
+    let sb = Sandbox::new();
+    // The space-separated (repeatable positional) form parses the same way as the
+    // comma form: each token is validated independently.
+    sb.ok(&["init", "--target", "copilot"]);
+    let out = sb.ok(&["target", "add", "claude", "copilot"]);
+    assert!(out.contains("added target(s): claude"), "{out}");
+    assert!(out.contains("`copilot` already configured"), "{out}");
 }
 
 #[test]
