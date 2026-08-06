@@ -286,6 +286,25 @@ fn multi_target_wires_both_vendors() {
 }
 
 #[test]
+fn init_is_idempotent_and_preserves_manifest() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    // Mutate the manifest so we can prove the second init leaves it untouched.
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let before = sb.read("ai.json");
+
+    // Re-running init succeeds (no longer an error) with a different target,
+    // and must not overwrite the existing manifest.
+    let out = sb.ok(&["init", "--target", "copilot"]);
+    assert!(out.contains("already exists"), "{out}");
+    assert_eq!(
+        sb.read("ai.json"),
+        before,
+        "init must not touch the manifest"
+    );
+}
+
+#[test]
 fn unknown_target_is_rejected() {
     let sb = Sandbox::new();
     let out = sb.spm(&["init", "--target", "nonsense"]);

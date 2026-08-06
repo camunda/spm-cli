@@ -107,8 +107,15 @@ fn clean(root: &Path) -> Result<()> {
 }
 
 fn init(root: &Path, targets: Vec<String>) -> Result<()> {
+    // Re-running `spm init` in an already-initialized project is a harmless
+    // no-op, not an error: leave the existing manifest untouched and tell the
+    // user rather than failing the command.
     if Manifest::exists(root) {
-        bail!("{} already exists", Manifest::path_in(root).display());
+        println!(
+            "{} already exists — leaving it untouched",
+            Manifest::path_in(root).display()
+        );
+        return Ok(());
     }
     if targets.is_empty() {
         bail!("at least one --target is required");
