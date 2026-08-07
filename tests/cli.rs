@@ -166,6 +166,32 @@ impl Sandbox {
     fn claude_market_dir(&self) -> PathBuf {
         self.project.join(".spm/claude")
     }
+
+    /// Number of top-level entries in the sandboxed global store. A missing
+    /// store reads as empty — the state after a `prune`. Any other error (an
+    /// unreadable path, or a non-directory where the store should be) is a real
+    /// harness fault and panics loudly rather than masquerading as an empty
+    /// store and letting an assertion pass on a misleading `0`.
+    fn store_entries(&self) -> usize {
+        let dir = self.spm_home.join("store");
+        match std::fs::read_dir(&dir) {
+            Ok(rd) => {
+                // `ReadDir` yields `Result<DirEntry>`; unwrap each so a
+                // mid-iteration error panics loudly instead of being silently
+                // tallied (as bare `count()` would).
+                let mut n = 0;
+                for entry in rd {
+                    entry.unwrap_or_else(|err| {
+                        panic!("reading store entry in {}: {err}", dir.display())
+                    });
+                    n += 1;
+                }
+                n
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(e) => panic!("reading store dir {}: {e}", dir.display()),
+        }
+    }
 }
 
 impl Drop for Sandbox {
@@ -1245,4 +1271,99 @@ fn target_add_interactive_rejects_out_of_range_selection() {
     assert!(err.contains("invalid selection"), "{err}");
     // Manifest unchanged on a bad pick.
     assert!(!sb.read("ai.json").contains("copilot"));
+}
+
+#[test]
+fn prune_wipes_the_global_store() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    assert!(sb.store_entries() > 0, "add should populate the store");
+
+    let out = sb.ok(&["prune", "--yes"]);
+    assert!(out.contains("pruned"), "{out}");
+    assert_eq!(sb.store_entries(), 0, "store should be empty after prune");
+
+    // The store is a pure cache: install re-fetches everything on demand.
+    sb.ok(&["install"]);
+    assert!(
+        sb.store_entries() > 0,
+        "install should re-populate the store after a prune"
+    );
+}
+
+#[test]
+fn prune_ignores_stray_non_directory_entries() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    // A stray file at the store root (e.g. a macOS `.DS_Store`) must not be
+    // counted as a cached checkout — only the one real checkout directory is.
+    std::fs::write(sb.spm_home.join("store").join(".DS_Store"), b"junk").unwrap();
+
+    let out = sb.ok(&["prune", "--yes"]);
+    assert!(out.contains("1 cached checkout"), "{out}");
+    assert_eq!(sb.store_entries(), 0);
+}
+
+#[test]
+fn prune_removes_a_store_holding_only_stray_files() {
+    let sb = Sandbox::new();
+    // A store root with no checkout directories, only a stray file. prune must
+    // NOT report it as empty, and must remove the file (honors "everything").
+    let store = sb.spm_home.join("store");
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::write(store.join(".DS_Store"), b"junk").unwrap();
+
+    let out = sb.ok(&["prune", "--yes"]);
+    assert!(!out.contains("nothing to prune"), "{out}");
+    assert!(out.contains("pruned"), "{out}");
+    assert!(
+        !store.join(".DS_Store").exists(),
+        "stray file must be removed"
+    );
+    assert_eq!(sb.store_entries(), 0);
+}
+
+#[test]
+fn prune_empty_store_is_a_noop() {
+    let sb = Sandbox::new();
+    let out = sb.ok(&["prune", "--yes"]);
+    assert!(out.contains("nothing to prune"), "{out}");
+    assert_eq!(sb.store_entries(), 0);
+}
+
+#[test]
+fn prune_prompt_aborts_on_negative_answer() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let before = sb.store_entries();
+    assert!(before > 0);
+
+    let out = sb.spm_stdin(&["prune"], "n\n");
+    assert!(out.status.success(), "abort is a success, not an error");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("aborted"), "{stdout}");
+    assert_eq!(
+        sb.store_entries(),
+        before,
+        "store must be untouched when the user declines"
+    );
+}
+
+#[test]
+fn prune_prompt_removes_on_yes() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    assert!(sb.store_entries() > 0);
+
+    let out = sb.spm_stdin(&["prune"], "y\n");
+    assert!(out.status.success());
+    assert_eq!(
+        sb.store_entries(),
+        0,
+        "store should be empty after a confirmed prune"
+    );
 }

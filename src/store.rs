@@ -1,6 +1,6 @@
 use crate::{git, lockfile::LockedSkill, paths};
 use anyhow::{bail, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Outcome of ensuring a skill is in the store.
 pub struct Ensured {
@@ -52,4 +52,105 @@ pub fn ensure(locked: &LockedSkill) -> Result<Ensured> {
         path: content_canon,
         fetched,
     })
+}
+
+/// A snapshot of what the global store holds, for `spm prune` to report.
+pub struct StoreStats {
+    /// Number of cached checkouts (one directory per (repo, commit) key).
+    pub entries: usize,
+    /// Approximate bytes on disk across all checkouts: the sum of file sizes,
+    /// excluding directory metadata and filesystem block/overhead — hence the
+    /// `~` the CLI prints in front of it.
+    pub bytes: u64,
+}
+
+/// Inspect the global store without modifying it. A missing store reads as
+/// empty rather than an error, so `prune` on a never-populated home is a no-op.
+///
+/// `entries` counts only directory entries — the store layout is one directory
+/// per (repo, commit) key, so stray non-directory files (e.g. a macOS
+/// `.DS_Store`) must not inflate the checkout count. `bytes` sizes *every*
+/// entry though, strays included: `prune` removes the whole store, so the
+/// reported freed size must account for what it actually deletes.
+pub fn stats() -> Result<StoreStats> {
+    let dir = paths::store_dir()?;
+    if !dir.exists() {
+        return Ok(StoreStats {
+            entries: 0,
+            bytes: 0,
+        });
+    }
+    let mut entries = 0;
+    let mut bytes = 0;
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        // `file_type` from a read_dir entry does not follow symlinks, so a
+        // symlink is never miscounted as a checkout directory.
+        if entry.file_type()?.is_dir() {
+            entries += 1;
+        }
+        bytes += dir_size(&entry.path())?;
+    }
+    Ok(StoreStats { entries, bytes })
+}
+
+/// Whether the store holds nothing to prune: the directory is absent or has no
+/// entries at all. Deliberately distinct from `stats().entries == 0`, which
+/// ignores stray non-checkout files (e.g. a macOS `.DS_Store`) — `prune` still
+/// wants to remove those to honor its "everything under the store" contract, so
+/// the "nothing to prune" gate must consider a stray-only store non-empty.
+pub fn is_empty() -> Result<bool> {
+    let dir = paths::store_dir()?;
+    match std::fs::read_dir(&dir) {
+        Ok(mut rd) => Ok(rd.next().is_none()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Cheap count of cached checkouts: a single shallow read of the store root,
+/// with no recursive size walk. Lets `prune`'s confirmation prompt show useful
+/// context without paying the full `stats()` cost when the user may abort.
+pub fn checkout_count() -> Result<usize> {
+    let dir = paths::store_dir()?;
+    let mut n = 0;
+    match std::fs::read_dir(&dir) {
+        Ok(rd) => {
+            for entry in rd {
+                if entry?.file_type()?.is_dir() {
+                    n += 1;
+                }
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    Ok(n)
+}
+
+/// Remove the entire global store. Safe to run at any time: `ensure` re-creates
+/// and re-fetches keys on demand, so the only cost of pruning is re-downloading
+/// whatever a later `install` needs.
+pub fn remove_all() -> Result<()> {
+    let dir = paths::store_dir()?;
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir)?;
+    }
+    Ok(())
+}
+
+/// Recursive on-disk size of `path`. Uses `symlink_metadata` so symlinks are
+/// counted as their own (tiny) size and never followed — avoids both double
+/// counting and traversal cycles.
+fn dir_size(path: &Path) -> Result<u64> {
+    let meta = std::fs::symlink_metadata(path)?;
+    if meta.file_type().is_dir() {
+        let mut total = 0;
+        for entry in std::fs::read_dir(path)? {
+            total += dir_size(&entry?.path())?;
+        }
+        Ok(total)
+    } else {
+        Ok(meta.len())
+    }
 }

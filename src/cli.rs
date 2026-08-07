@@ -1,7 +1,7 @@
 use crate::lockfile::Lockfile;
 use crate::manifest::{Manifest, SkillSpec};
 use crate::vendor::{self, MaterializedSkill};
-use crate::{resolver, store};
+use crate::{paths, resolver, store};
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use std::collections::BTreeMap;
@@ -64,6 +64,14 @@ enum Command {
     Status,
     /// Remove all generated vendor config for this project.
     Clean,
+    /// Remove everything from the global store (fetch cache). Frees disk by
+    /// deleting every cached repo@commit; they re-fetch on demand on the next
+    /// `install`. Prompts for confirmation unless `--yes` is given.
+    Prune {
+        /// Skip the confirmation prompt (for scripts/CI).
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -116,6 +124,7 @@ pub fn run() -> Result<()> {
         Command::List => list(&root),
         Command::Status => status(&root),
         Command::Clean => clean(&root),
+        Command::Prune { yes } => prune(yes),
     }
 }
 
@@ -130,6 +139,73 @@ fn clean(root: &Path) -> Result<()> {
         manifest.targets.join(", ")
     );
     Ok(())
+}
+
+/// `spm prune`: wipe the whole global store (`$SPM_HOME/store`, default
+/// `~/.spm/store`). Unlike `clean` (project-local vendor config), this is global
+/// and shared across every project, so it always confirms first unless `--yes`
+/// is passed. The store is a pure cache — anything removed re-fetches on the
+/// next `install`.
+fn prune(yes: bool) -> Result<()> {
+    let dir = paths::store_dir()?;
+    // Gate on total emptiness, not the checkout count: a store holding only
+    // stray files still has something to remove, and prune removes everything.
+    if store::is_empty()? {
+        println!("store is empty — nothing to prune ({})", dir.display());
+        return Ok(());
+    }
+    if !yes {
+        // Show the checkout count (a cheap shallow read) in the prompt, but
+        // defer the recursive size walk until after confirmation — answering
+        // `n` on a large store should be instant, not pay for a full du.
+        println!(
+            "store holds {} cached checkout(s) in {}",
+            store::checkout_count()?,
+            dir.display()
+        );
+        if !confirm("Remove everything from the store?")? {
+            println!("aborted — nothing removed");
+            return Ok(());
+        }
+    }
+    // Size only now — once we know we're deleting — so `freed ~X` stays
+    // accurate without slowing down an abort.
+    let stats = store::stats()?;
+    store::remove_all()?;
+    println!(
+        "pruned {} cached checkout(s), freed ~{}",
+        stats.entries,
+        human_size(stats.bytes)
+    );
+    Ok(())
+}
+
+/// Ask a yes/no question on stdin, defaulting to no. A plain line read (not a
+/// raw-terminal TUI) so it stays portable and is drivable from tests with piped
+/// input, matching `prompt_targets`.
+fn confirm(question: &str) -> Result<bool> {
+    use std::io::{self, BufRead, Write};
+    print!("{question} [y/N]: ");
+    io::stdout().flush()?;
+    let mut line = String::new();
+    io::stdin().lock().read_line(&mut line)?;
+    let answer = line.trim();
+    Ok(answer.eq_ignore_ascii_case("y") || answer.eq_ignore_ascii_case("yes"))
+}
+
+/// Human-readable byte size using binary (1024) units.
+fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    format!("{size:.1} {}", UNITS[unit])
 }
 
 fn init(root: &Path, targets: Vec<String>) -> Result<()> {
@@ -606,7 +682,17 @@ fn default_name(git: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::default_name;
+    use super::{default_name, human_size};
+
+    #[test]
+    fn human_size_scales_units() {
+        assert_eq!(human_size(0), "0 B");
+        assert_eq!(human_size(512), "512 B");
+        assert_eq!(human_size(1024), "1.0 KiB");
+        assert_eq!(human_size(1536), "1.5 KiB");
+        assert_eq!(human_size(1024 * 1024), "1.0 MiB");
+        assert_eq!(human_size(3 * 1024 * 1024 * 1024), "3.0 GiB");
+    }
 
     #[test]
     fn default_name_handles_url_forms() {
