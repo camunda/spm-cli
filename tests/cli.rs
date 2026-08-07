@@ -357,12 +357,15 @@ fn clean_removes_generated_config() {
         !sb.claude_market_dir().exists(),
         "marketplace dir should be gone after clean"
     );
-    // The gitignore block spm added is removed too.
+    // `.gitignore` is left untouched by clean: the entry spm added stays put
+    // rather than risk clobbering a user-owned file.
     let gitignore = sb.project.join(".gitignore");
-    if gitignore.exists() {
-        let gi = std::fs::read_to_string(&gitignore).unwrap();
-        assert!(!gi.contains(".spm/"), "{gi}");
-    }
+    assert!(
+        gitignore.exists(),
+        ".gitignore must not be removed by clean"
+    );
+    let gi = std::fs::read_to_string(&gitignore).unwrap();
+    assert!(gi.contains(".spm/"), "{gi}");
 }
 
 #[test]
@@ -565,7 +568,7 @@ fn schema_rejects_abbreviated_commit() {
 }
 
 #[test]
-fn copilot_clean_removes_project_local_dir_and_gitignore_entry() {
+fn copilot_clean_removes_project_local_dir_but_keeps_gitignore_entry() {
     let sb = Sandbox::new();
     sb.ok(&["init", "--target", "copilot"]);
     sb.ok(&[
@@ -593,9 +596,9 @@ fn copilot_clean_removes_project_local_dir_and_gitignore_entry() {
         "clean must remove the managed skills dir"
     );
     assert!(
-        !sb.read(".gitignore")
+        sb.read(".gitignore")
             .contains(".agents/skills/spm-managed-skills/"),
-        "clean must drop the gitignore entry"
+        "clean must leave the gitignore entry untouched"
     );
 }
 

@@ -85,7 +85,10 @@ impl Vendor for Claude {
             jsonutil::remove_nested(&mut root, "enabledPlugins", &plugin_key());
             jsonutil::write(&path, &root)?;
         }
-        gitignore::remove(project_root, GITIGNORE_COMMENT, GITIGNORE_ENTRY)
+        // `.gitignore` is intentionally left untouched: the entry spm added is
+        // harmless once the materialized dir is gone, and rewriting a
+        // user-owned file on `clean` risks clobbering their content.
+        Ok(())
     }
 
     fn status(&self, project_root: &Path, expected: &[String]) -> Result<super::VendorStatus> {
