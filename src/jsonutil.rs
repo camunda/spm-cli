@@ -48,3 +48,109 @@ pub fn remove_nested(root: &mut Value, outer: &str, inner: &str) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "spm-jsonutil-test-{name}-{}-{nanos}",
+            std::process::id(),
+        ))
+    }
+
+    #[test]
+    fn read_object_missing_file_is_empty_object() {
+        let dir = scratch("missing");
+        let path = dir.join("nope.json");
+        assert_eq!(read_object(&path).unwrap(), Value::Object(Map::new()));
+    }
+
+    #[test]
+    fn read_object_blank_file_is_empty_object() {
+        let dir = scratch("blank");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("blank.json");
+        std::fs::write(&path, "   \n\t \n").unwrap();
+        assert_eq!(read_object(&path).unwrap(), Value::Object(Map::new()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn read_object_parses_valid_json() {
+        let dir = scratch("valid");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("v.json");
+        std::fs::write(&path, r#"{"a":1}"#).unwrap();
+        let v = read_object(&path).unwrap();
+        assert_eq!(v["a"], 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn read_object_surfaces_parse_error_for_invalid_json() {
+        let dir = scratch("invalid");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bad.json");
+        std::fs::write(&path, "{not json").unwrap();
+        let err = read_object(&path).unwrap_err();
+        assert!(format!("{err:#}").contains("parsing"), "{err:#}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn write_creates_parent_dirs_and_pretty_json() {
+        let dir = scratch("write");
+        let path = dir.join("nested").join("out.json");
+        write(&path, &json!({"k": "v"})).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"k\": \"v\""), "{text}");
+        assert!(text.ends_with('\n'));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn object_mut_creates_then_reuses_nested_object() {
+        let mut root = Value::Object(Map::new());
+        object_mut(&mut root, "outer").insert("a".into(), Value::Bool(true));
+        // Second call must reuse the same nested object, not clobber it.
+        object_mut(&mut root, "outer").insert("b".into(), Value::Bool(false));
+        let outer = root["outer"].as_object().unwrap();
+        assert_eq!(outer.len(), 2);
+    }
+
+    #[test]
+    fn remove_nested_drops_empty_outer_but_keeps_nonempty() {
+        let mut root = json!({
+            "outer": {"a": 1, "b": 2},
+            "solo": {"x": 1}
+        });
+        // Removing one of two keys leaves `outer` present (non-empty).
+        remove_nested(&mut root, "outer", "a");
+        assert_eq!(root["outer"].as_object().unwrap().len(), 1);
+        assert!(root.get("outer").is_some());
+
+        // Removing the last key drops `outer` entirely.
+        remove_nested(&mut root, "solo", "x");
+        assert!(root.get("solo").is_none(), "{root}");
+    }
+
+    #[test]
+    fn remove_nested_is_a_noop_on_missing_outer_or_non_object_root() {
+        let mut root = json!({"other": {"z": 1}});
+        // `outer` key doesn't exist at all: no-op, no panic.
+        remove_nested(&mut root, "outer", "inner");
+        assert_eq!(root, json!({"other": {"z": 1}}));
+
+        // Root is not even an object: still a no-op.
+        let mut not_object = Value::String("hi".into());
+        remove_nested(&mut not_object, "outer", "inner");
+        assert_eq!(not_object, Value::String("hi".into()));
+    }
+}

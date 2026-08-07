@@ -154,3 +154,225 @@ fn dir_size(path: &Path) -> Result<u64> {
         Ok(meta.len())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::paths::SpmHomeGuard;
+    use std::process::Command as StdCommand;
+
+    fn scratch(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "spm-store-test-{name}-{}-{nanos}",
+            std::process::id(),
+        ))
+    }
+
+    /// Point `SPM_HOME` at `home` for the duration of `f`. Holds `ENV_LOCK`
+    /// and restores the previous `SPM_HOME` on the way out — including if `f`
+    /// panics, via `SpmHomeGuard`'s `Drop` impl.
+    fn with_spm_home<T>(home: &Path, f: impl FnOnce() -> T) -> T {
+        let _guard = SpmHomeGuard::set(home);
+        f()
+    }
+
+    /// A never-populated store (no `store/` dir at all) reads as empty across
+    /// every inspection function, rather than erroring.
+    #[test]
+    fn absent_store_reads_as_empty_everywhere() {
+        let home = scratch("absent");
+        std::fs::create_dir_all(&home).unwrap();
+
+        with_spm_home(&home, || {
+            assert!(is_empty().unwrap());
+            assert_eq!(checkout_count().unwrap(), 0);
+            let s = stats().unwrap();
+            assert_eq!(s.entries, 0);
+            assert_eq!(s.bytes, 0);
+            // remove_all on an absent store is a no-op, not an error.
+            remove_all().unwrap();
+        });
+
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// A non-`NotFound` I/O error reading the store dir (here: a plain file
+    /// sitting where a directory is expected) must be surfaced, not swallowed
+    /// as if the store were merely empty.
+    #[test]
+    fn blocked_store_path_surfaces_a_real_error() {
+        let home = scratch("blocked");
+        std::fs::create_dir_all(&home).unwrap();
+        // A regular file named "store" instead of a directory.
+        std::fs::write(home.join("store"), b"not a directory").unwrap();
+
+        with_spm_home(&home, || {
+            assert!(is_empty().is_err(), "expected a real error, not `Ok(true)`");
+            assert!(checkout_count().is_err());
+        });
+
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// Build a throwaway one-commit git repo, returning its HEAD sha.
+    fn make_skill_repo(root: &Path) -> String {
+        std::fs::create_dir_all(root).unwrap();
+        std::fs::write(root.join("SKILL.md"), "---\nname: x\n---\n").unwrap();
+        let run = |args: &[&str]| {
+            assert!(StdCommand::new("git")
+                .args([
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .current_dir(root)
+                .status()
+                .unwrap()
+                .success());
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["add", "-A"]);
+        run(&["commit", "-qm", "initial"]);
+        let out = StdCommand::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// `ensure` re-fetches when the cached checkout exists but is stale (not at
+    /// the pinned commit) — e.g. a prior fetch was interrupted or the checkout
+    /// was externally reset — rather than trusting a mismatched directory.
+    #[test]
+    fn ensure_refetches_a_stale_cached_checkout() {
+        let home = scratch("stale-refetch");
+        std::fs::create_dir_all(&home).unwrap();
+        let src = scratch("stale-refetch-src");
+        let sha = make_skill_repo(&src);
+
+        let locked = LockedSkill {
+            git: format!("file://{}", src.display()),
+            reference: "branch:main".into(),
+            commit: sha.clone(),
+            path: None,
+            store: crate::lockfile::store_key(&format!("file://{}", src.display()), &sha),
+        };
+
+        with_spm_home(&home, || {
+            let first = ensure(&locked).unwrap();
+            assert!(first.fetched);
+
+            // Corrupt the cached checkout so it's no longer recognized as
+            // being at the pinned commit, while the directory still exists.
+            std::fs::remove_dir_all(first.path.join(".git")).unwrap();
+
+            let second = ensure(&locked).unwrap();
+            assert!(second.fetched, "a stale checkout must be re-fetched");
+            assert!(second.path.join(".git").exists());
+        });
+
+        std::fs::remove_dir_all(&home).unwrap();
+        std::fs::remove_dir_all(&src).unwrap();
+    }
+
+    /// `ensure` must reject a locked `path` that doesn't exist in the fetched
+    /// repo (e.g. a stale manifest entry after the upstream repo restructured).
+    #[test]
+    fn ensure_errors_when_locked_path_is_missing() {
+        let home = scratch("missing-path");
+        std::fs::create_dir_all(&home).unwrap();
+        let src = scratch("missing-path-src");
+        let sha = make_skill_repo(&src);
+        let git_url = format!("file://{}", src.display());
+
+        let locked = LockedSkill {
+            git: git_url.clone(),
+            reference: "branch:main".into(),
+            commit: sha.clone(),
+            path: Some("does/not/exist".into()),
+            store: crate::lockfile::store_key(&git_url, &sha),
+        };
+
+        with_spm_home(&home, || {
+            let Err(err) = ensure(&locked) else {
+                panic!("expected an error");
+            };
+            assert!(format!("{err}").contains("not found in"), "{err}");
+        });
+
+        std::fs::remove_dir_all(&home).unwrap();
+        std::fs::remove_dir_all(&src).unwrap();
+    }
+
+    /// Defense in depth: a symlink inside the checkout that resolves outside
+    /// the repo root must be rejected even though the lexical path passed
+    /// schema validation upstream.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_rejects_symlink_escaping_the_checkout() {
+        let home = scratch("symlink-escape");
+        std::fs::create_dir_all(&home).unwrap();
+        let src = scratch("symlink-escape-src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("SKILL.md"), "---\nname: x\n---\n").unwrap();
+        // A symlink that, once checked out into the store, resolves one level
+        // above the repo checkout (i.e. escapes to the store root itself).
+        std::os::unix::fs::symlink("..", src.join("escape")).unwrap();
+        let run = |args: &[&str]| {
+            assert!(StdCommand::new("git")
+                .args([
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .current_dir(&src)
+                .status()
+                .unwrap()
+                .success());
+        };
+        run(&["init", "-q", "-b", "main"]);
+        run(&["add", "-A"]);
+        run(&["commit", "-qm", "initial"]);
+        let out = StdCommand::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(&src)
+            .output()
+            .unwrap();
+        let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let git_url = format!("file://{}", src.display());
+
+        let locked = LockedSkill {
+            git: git_url.clone(),
+            reference: "branch:main".into(),
+            commit: sha.clone(),
+            path: Some("escape".into()),
+            store: crate::lockfile::store_key(&git_url, &sha),
+        };
+
+        with_spm_home(&home, || {
+            let Err(err) = ensure(&locked) else {
+                panic!("expected an error");
+            };
+            assert!(
+                format!("{err}").contains("escapes the repository checkout"),
+                "{err}"
+            );
+        });
+
+        std::fs::remove_dir_all(&home).unwrap();
+        std::fs::remove_dir_all(&src).unwrap();
+    }
+}

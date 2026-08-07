@@ -1356,6 +1356,204 @@ fn prune_prompt_aborts_on_negative_answer() {
 }
 
 #[test]
+fn list_reports_declared_skills_and_pins() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+
+    // No skills declared yet.
+    let out = sb.ok(&["list"]);
+    assert!(out.contains("no skills declared"), "{out}");
+
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let out = sb.ok(&["list"]);
+    assert!(out.contains("greet"), "{out}");
+    assert!(out.contains(&sb.skill_url()), "{out}");
+    assert!(out.contains("tag:v0.1.0"), "{out}");
+}
+
+#[test]
+fn update_with_no_name_refreshes_all_and_with_name_refreshes_one() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--name",
+        "greet",
+    ]);
+
+    // `update` with no name re-resolves every branch/tag skill.
+    let out = sb.ok(&["update"]);
+    assert!(out.contains("updated"), "{out}");
+
+    // `update <name>` refreshes just that one skill; an unknown name is
+    // simply a no-op filter (nothing matches `only`), not an error.
+    let out = sb.ok(&["update", "greet"]);
+    assert!(out.contains("updated"), "{out}");
+    let out = sb.ok(&["update", "does-not-exist"]);
+    assert!(out.contains("updated"), "{out}");
+}
+
+#[test]
+fn remove_unknown_skill_errors() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    let out = sb.spm(&["remove", "nope"]);
+    assert!(!out.status.success(), "removing an unknown skill must fail");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("no skill named `nope`"), "{err}");
+}
+
+#[test]
+fn target_add_interactive_rejects_empty_input() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    // Hitting enter with nothing typed must fail cleanly, not hang or panic.
+    let out = sb.spm_stdin(&["target", "add"], "\n");
+    assert!(!out.status.success(), "empty selection must fail");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("no target selected"), "{err}");
+    assert!(!sb.read("ai.json").contains("copilot"));
+}
+
+#[test]
+fn target_add_interactive_accepts_all() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    // `all` picks every not-yet-configured vendor (here just copilot).
+    let out = sb.spm_stdin(&["target", "add"], "all\n");
+    assert!(
+        out.status.success(),
+        "`all` must be accepted: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("added target(s): copilot"), "{stdout}");
+    assert!(sb.read("ai.json").contains("\"copilot\""));
+}
+
+#[test]
+fn status_flags_stale_materialized_skill_not_in_lock() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+
+    // Drop an extra, undeclared directory into the materialized skills dir —
+    // simulating a skill that was removed from ai.json/ai.lock but whose
+    // on-disk copy was never cleaned up some other way.
+    let stray = sb
+        .project
+        .join(".agents/skills/spm-managed-skills/leftover");
+    std::fs::create_dir_all(&stray).unwrap();
+
+    let out = sb.ok(&["status"]);
+    assert!(
+        out.contains("leftover") && out.contains("stale (not in ai.lock)"),
+        "{out}"
+    );
+}
+
+#[test]
+fn claude_clean_is_a_noop_when_nothing_was_ever_materialized() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+
+    // Nothing was ever `add`ed: clean must succeed without touching anything
+    // that was never created.
+    let out = sb.ok(&["clean"]);
+    assert!(out.contains("cleaned"), "{out}");
+    assert!(!sb.claude_market_dir().exists());
+    assert!(!sb.project.join(".claude/settings.local.json").exists());
+}
+
+#[test]
+fn claude_status_flags_missing_marketplace_registration() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+
+    // Simulate a checkout where the marketplace pointer was never (re-)written
+    // here — e.g. a gitignored settings.local.json that got wiped some other
+    // way — while the materialized plugin dir is left in place.
+    std::fs::remove_file(sb.project.join(".claude/settings.local.json")).unwrap();
+
+    let out = sb.spm(&["status"]);
+    assert!(!out.status.success());
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains("no spm marketplace registered"), "{text}");
+}
+
+#[test]
+fn copilot_second_add_rebuilds_managed_dir_from_scratch() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    assert!(sb
+        .project
+        .join(".agents/skills/spm-managed-skills/greet/SKILL.md")
+        .exists());
+
+    // A second `add` re-runs `sync`, which re-materializes for copilot into a
+    // managed dir that already exists from the first add — exercising the
+    // "rebuild from scratch" removal path, not just first-time creation.
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--name",
+        "greet2",
+    ]);
+    assert!(sb
+        .project
+        .join(".agents/skills/spm-managed-skills/greet/SKILL.md")
+        .exists());
+    assert!(sb
+        .project
+        .join(".agents/skills/spm-managed-skills/greet2/SKILL.md")
+        .exists());
+}
+
+#[test]
+fn add_path_pointing_at_a_plain_file_warns_generically() {
+    let sb = Sandbox::new();
+    // A top-level plain file (not a directory) at the given --path: SKILL.md
+    // can't possibly live "at its root" and there's nothing to recurse into
+    // for sub-skill detection, so `child_skills` must handle `read_dir` on a
+    // non-directory gracefully (empty result, no sub-skill suggestions) rather
+    // than propagating an error from the check itself. The overall `add` still
+    // fails later when it tries to materialize a *file* as a skill directory —
+    // that's expected; what this test guards is the no-SKILL.md warning path.
+    std::fs::write(sb.skill_repo.join("notes.txt"), "not a skill").unwrap();
+    sb.git(&["add", "-A"]);
+    sb.git(&["commit", "-qm", "add plain file"]);
+    sb.ok(&["init", "--target", "copilot"]);
+
+    let out = sb.spm(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--path",
+        "notes.txt",
+        "--name",
+        "notes",
+    ]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("has no SKILL.md at its root"), "{err}");
+    assert!(
+        !err.contains("Did you mean"),
+        "a plain file has no sub-skills to suggest: {err}"
+    );
+}
+
+#[test]
 fn prune_prompt_removes_on_yes() {
     let sb = Sandbox::new();
     sb.ok(&["init", "--target", "claude"]);
