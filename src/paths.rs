@@ -55,10 +55,11 @@ mod tests {
     fn spm_home_honors_custom_env_var() {
         let _guard = ENV_LOCK.lock().unwrap();
         let saved = std::env::var("SPM_HOME").ok();
-        std::env::set_var("SPM_HOME", "/tmp/custom-spm-home-for-test");
+        let custom = std::env::temp_dir().join("custom-spm-home-for-test");
+        std::env::set_var("SPM_HOME", &custom);
 
         let home = spm_home().unwrap();
-        assert_eq!(home, PathBuf::from("/tmp/custom-spm-home-for-test"));
+        assert_eq!(home, custom);
 
         match saved {
             Some(v) => std::env::set_var("SPM_HOME", v),

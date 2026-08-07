@@ -179,10 +179,13 @@ mod tests {
     /// empty, since a freshly-`init`ed-but-never-synced project has none yet.
     #[test]
     fn load_or_default_accepts_missing_id() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         let dir = std::env::temp_dir().join(format!(
-            "spm-lockfile-test-noid-{}-{:?}",
+            "spm-lockfile-test-noid-{}-{nanos}",
             std::process::id(),
-            std::time::SystemTime::now()
         ));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(LOCK_FILE), r#"{"skills":{}}"#).unwrap();

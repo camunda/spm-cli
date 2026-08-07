@@ -162,10 +162,13 @@ mod tests {
     use std::process::Command as StdCommand;
 
     fn scratch(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         std::env::temp_dir().join(format!(
-            "spm-store-test-{name}-{}-{:?}",
+            "spm-store-test-{name}-{}-{nanos}",
             std::process::id(),
-            std::time::SystemTime::now()
         ))
     }
 

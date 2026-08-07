@@ -120,10 +120,13 @@ mod tests {
     }
 
     fn scratch(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         std::env::temp_dir().join(format!(
-            "spm-git-test-{name}-{}-{:?}",
+            "spm-git-test-{name}-{}-{nanos}",
             std::process::id(),
-            std::time::SystemTime::now()
         ))
     }
 

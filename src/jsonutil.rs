@@ -55,10 +55,13 @@ mod tests {
     use serde_json::json;
 
     fn scratch(name: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         std::env::temp_dir().join(format!(
-            "spm-jsonutil-test-{name}-{}-{:?}",
+            "spm-jsonutil-test-{name}-{}-{nanos}",
             std::process::id(),
-            std::time::SystemTime::now()
         ))
     }
 
