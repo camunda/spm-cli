@@ -158,7 +158,7 @@ fn dir_size(path: &Path) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::paths::ENV_LOCK;
+    use crate::paths::SpmHomeGuard;
     use std::process::Command as StdCommand;
 
     fn scratch(name: &str) -> PathBuf {
@@ -172,24 +172,18 @@ mod tests {
         ))
     }
 
-    /// Point `SPM_HOME` at `home` for the duration of `f`, restoring whatever
-    /// was there before. Must be called with `ENV_LOCK` held.
+    /// Point `SPM_HOME` at `home` for the duration of `f`. Holds `ENV_LOCK`
+    /// and restores the previous `SPM_HOME` on the way out — including if `f`
+    /// panics, via `SpmHomeGuard`'s `Drop` impl.
     fn with_spm_home<T>(home: &Path, f: impl FnOnce() -> T) -> T {
-        let saved = std::env::var("SPM_HOME").ok();
-        std::env::set_var("SPM_HOME", home);
-        let result = f();
-        match saved {
-            Some(v) => std::env::set_var("SPM_HOME", v),
-            None => std::env::remove_var("SPM_HOME"),
-        }
-        result
+        let _guard = SpmHomeGuard::set(home);
+        f()
     }
 
     /// A never-populated store (no `store/` dir at all) reads as empty across
     /// every inspection function, rather than erroring.
     #[test]
     fn absent_store_reads_as_empty_everywhere() {
-        let _guard = ENV_LOCK.lock().unwrap();
         let home = scratch("absent");
         std::fs::create_dir_all(&home).unwrap();
 
@@ -211,7 +205,6 @@ mod tests {
     /// as if the store were merely empty.
     #[test]
     fn blocked_store_path_surfaces_a_real_error() {
-        let _guard = ENV_LOCK.lock().unwrap();
         let home = scratch("blocked");
         std::fs::create_dir_all(&home).unwrap();
         // A regular file named "store" instead of a directory.
@@ -261,7 +254,6 @@ mod tests {
     /// was externally reset — rather than trusting a mismatched directory.
     #[test]
     fn ensure_refetches_a_stale_cached_checkout() {
-        let _guard = ENV_LOCK.lock().unwrap();
         let home = scratch("stale-refetch");
         std::fs::create_dir_all(&home).unwrap();
         let src = scratch("stale-refetch-src");
@@ -296,7 +288,6 @@ mod tests {
     /// repo (e.g. a stale manifest entry after the upstream repo restructured).
     #[test]
     fn ensure_errors_when_locked_path_is_missing() {
-        let _guard = ENV_LOCK.lock().unwrap();
         let home = scratch("missing-path");
         std::fs::create_dir_all(&home).unwrap();
         let src = scratch("missing-path-src");
@@ -328,7 +319,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn ensure_rejects_symlink_escaping_the_checkout() {
-        let _guard = ENV_LOCK.lock().unwrap();
         let home = scratch("symlink-escape");
         std::fs::create_dir_all(&home).unwrap();
         let src = scratch("symlink-escape-src");
