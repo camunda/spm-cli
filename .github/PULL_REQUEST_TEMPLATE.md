@@ -5,7 +5,8 @@
   AI-assisted PRs are welcome, but describe the change in your own words.
 -->
 
-Closes #
+<!-- If this PR addresses a tracked issue, replace with: Closes #123 -->
+Closes #<issue_number>
 
 ## Why?
 
@@ -15,7 +16,7 @@ Closes #
 
 <!--
   How a reviewer can confirm this works:
-  - Manual steps: tools to install, scenario to setup, what to expect
+  - Manual steps: tools to install, scenario to set up, what to expect
   - Tests added or updated
   - Anything you couldn't verify yourself, and why
 -->
