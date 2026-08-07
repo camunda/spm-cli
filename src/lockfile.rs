@@ -172,7 +172,64 @@ pub fn store_key(url: &str, sha: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{store_key, validate_store_key};
+    use super::*;
+
+    /// A lockfile with no `id` (the serde default, empty string) must load
+    /// fine — `validate` skips `validate_project_id` entirely when `id` is
+    /// empty, since a freshly-`init`ed-but-never-synced project has none yet.
+    #[test]
+    fn load_or_default_accepts_missing_id() {
+        let dir = std::env::temp_dir().join(format!(
+            "spm-lockfile-test-noid-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(LOCK_FILE), r#"{"skills":{}}"#).unwrap();
+        let lock = Lockfile::load_or_default(&dir).unwrap();
+        assert!(lock.id.is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn validate_commit_rejects_short_or_uppercase_or_non_hex() {
+        assert!(validate_commit(&"a".repeat(40)).is_ok());
+        assert!(validate_commit("abc123").is_err(), "too short");
+        assert!(
+            validate_commit(&"A".repeat(40)).is_err(),
+            "uppercase must be rejected (normalize before validating)"
+        );
+        assert!(
+            validate_commit(&"g".repeat(40)).is_err(),
+            "non-hex chars must be rejected"
+        );
+    }
+
+    /// A lockfile whose `store` key doesn't match what `store_key(git, commit)`
+    /// would derive is untrusted/hand-edited and must be rejected, even when
+    /// the key itself is syntactically a valid single path component (so it
+    /// isn't already caught by `validate_store_key`).
+    #[test]
+    fn validate_rejects_store_key_mismatch() {
+        let sha = "b".repeat(40);
+        let mut skills = BTreeMap::new();
+        skills.insert(
+            "greet".to_string(),
+            LockedSkill {
+                git: "https://example.com/repo.git".into(),
+                reference: "branch:main".into(),
+                commit: sha.clone(),
+                path: None,
+                store: "totally-not-the-derived-key".into(),
+            },
+        );
+        let lock = Lockfile {
+            id: String::new(),
+            skills,
+        };
+        let err = lock.validate().unwrap_err();
+        assert!(format!("{err}").contains("does not match"), "{err}");
+    }
 
     #[test]
     fn store_key_is_bounded_safe_and_stable() {

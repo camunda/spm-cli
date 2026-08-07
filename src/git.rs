@@ -81,3 +81,116 @@ pub fn fetch_commit(url: &str, sha: &str, dest: &Path) -> Result<()> {
         .with_context(|| format!("checking out {sha} in {}", dest.display()))?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::process::Command as StdCommand;
+
+    /// Build a throwaway git repo with one commit, returning (repo dir, HEAD sha).
+    fn make_repo(root: &Path) -> String {
+        std::fs::create_dir_all(root).unwrap();
+        let run = |args: &[&str]| {
+            assert!(StdCommand::new("git")
+                .args([
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .current_dir(root)
+                .status()
+                .unwrap()
+                .success());
+        };
+        run(&["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("f.txt"), "hi").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-qm", "initial"]);
+        let out = StdCommand::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "spm-git-test-{name}-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+        ))
+    }
+
+    /// `ls_remote` against a URL that isn't a git repo at all must surface the
+    /// underlying git failure (exercises `git()`'s bail branch), not panic.
+    #[test]
+    fn ls_remote_surfaces_git_failure_for_bad_url() {
+        let dir = scratch("bad-url");
+        std::fs::create_dir_all(&dir).unwrap();
+        let bogus = format!("file://{}/does-not-exist", dir.display());
+        let err = ls_remote(&bogus, &["refs/heads/main"]).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("git ls-remote") || format!("{err:#}").contains("failed"),
+            "{err:#}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `ls_remote` for a ref that doesn't exist in an otherwise valid repo
+    /// must report "not found", not silently return an empty sha.
+    #[test]
+    fn ls_remote_reports_missing_ref() {
+        let dir = scratch("missing-ref");
+        make_repo(&dir);
+        let url = format!("file://{}", dir.display());
+        let err = ls_remote(&url, &["refs/heads/does-not-exist"]).unwrap_err();
+        assert!(format!("{err}").contains("not found"), "{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `is_at_commit` is false both when there's no `.git` at all and when the
+    /// checkout is at a different commit than requested.
+    #[test]
+    fn is_at_commit_false_cases() {
+        let dir = scratch("is-at-commit");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!is_at_commit(&dir, "deadbeef"), "no .git at all");
+
+        let sha = make_repo(&dir);
+        assert!(is_at_commit(&dir, &sha), "checkout is at HEAD");
+        assert!(
+            !is_at_commit(&dir, "0000000000000000000000000000000000000000"),
+            "different sha must not match"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// When a shallow fetch-by-sha is refused by the server (unknown ref), the
+    /// fallback full `fetch origin` must run — and if the sha still can't be
+    /// found afterwards (here: it never existed), the overall error should
+    /// come from the checkout step, proving the fallback path executed.
+    #[test]
+    fn fetch_commit_falls_back_to_full_fetch_then_reports_checkout_failure() {
+        let src = scratch("fetch-fallback-src");
+        make_repo(&src);
+        let url = format!("file://{}", src.display());
+        let dest = scratch("fetch-fallback-dest");
+
+        let fake_sha = "a".repeat(40);
+        let err = fetch_commit(&url, &fake_sha, &dest).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("checking out"),
+            "expected the failure to surface from the checkout step (proving the \
+             depth-1 fetch failed and the full-fetch fallback ran first): {err:#}"
+        );
+
+        std::fs::remove_dir_all(&src).unwrap();
+        std::fs::remove_dir_all(&dest).unwrap();
+    }
+}

@@ -178,3 +178,74 @@ impl Manifest {
         Self::path_in(dir).exists()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec(git: &str, tag: Option<&str>, branch: Option<&str>, commit: Option<&str>) -> SkillSpec {
+        SkillSpec {
+            git: git.to_string(),
+            tag: tag.map(str::to_string),
+            branch: branch.map(str::to_string),
+            commit: commit.map(str::to_string),
+            path: None,
+        }
+    }
+
+    /// The schema requires exactly one of tag/branch/commit on any manifest
+    /// loaded from disk, but `SkillSpec::version` is also called on
+    /// programmatically-constructed specs (e.g. `add --all`'s container spec)
+    /// where that invariant isn't schema-enforced — so both error arms must be
+    /// checked directly.
+    #[test]
+    fn version_rejects_no_selector() {
+        let s = spec("u", None, None, None);
+        let Err(err) = s.version() else {
+            panic!("expected an error");
+        };
+        assert!(format!("{err}").contains("set one of tag/branch/commit"));
+    }
+
+    #[test]
+    fn version_rejects_multiple_selectors() {
+        let s = spec("u", Some("v1"), Some("main"), None);
+        let Err(err) = s.version() else {
+            panic!("expected an error");
+        };
+        assert!(format!("{err}").contains("set only one of tag/branch/commit"));
+
+        let sha = "a".repeat(40);
+        let all_three = spec("u", Some("v1"), Some("main"), Some(sha.as_str()));
+        assert!(all_three.version().is_err());
+    }
+
+    #[test]
+    fn version_accepts_each_single_selector() {
+        assert!(matches!(
+            spec("u", Some("v1"), None, None).version().unwrap(),
+            Version::Tag(t) if t == "v1"
+        ));
+        assert!(matches!(
+            spec("u", None, Some("main"), None).version().unwrap(),
+            Version::Branch(b) if b == "main"
+        ));
+        let sha = "a".repeat(40);
+        assert!(matches!(
+            spec("u", None, None, Some(&sha)).version().unwrap(),
+            Version::Commit(c) if c == sha
+        ));
+    }
+
+    #[test]
+    fn validate_subpath_rejects_nul_byte() {
+        let err = validate_subpath("foo\0bar").unwrap_err();
+        assert!(format!("{err}").contains("NUL"), "{err}");
+    }
+
+    #[test]
+    fn validate_subpath_accepts_plain_relative_path() {
+        assert!(validate_subpath("skills/greet").is_ok());
+        assert!(validate_subpath(".").is_ok());
+    }
+}

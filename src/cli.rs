@@ -682,7 +682,28 @@ fn default_name(git: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_name, human_size};
+    use super::{default_name, human_size, init};
+
+    /// `clap`'s `--target` always yields at least one element (it defaults to
+    /// `["claude"]` and a comma split never produces zero tokens), so the
+    /// empty-`targets` guard in `init` can't be reached through the CLI parser
+    /// — but the function itself must still reject it defensively when called
+    /// directly (e.g. if a future caller stops going through clap).
+    #[test]
+    fn init_rejects_empty_targets_vec() {
+        let dir = std::env::temp_dir().join(format!(
+            "spm-cli-test-init-empty-targets-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let err = init(&dir, Vec::new()).unwrap_err();
+        assert!(
+            format!("{err}").contains("at least one --target is required"),
+            "{err}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn human_size_scales_units() {

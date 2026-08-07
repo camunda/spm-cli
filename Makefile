@@ -9,7 +9,7 @@ BINDIR  ?= $(PREFIX)/bin
 .PHONY: build release test fmt fmt-check lint check run install uninstall clean bump bump-pr coverage coverage-check
 
 # Minimum line coverage (%). CI fails if `cargo test` drops below this.
-COVERAGE_MIN ?= 90
+COVERAGE_MIN ?= 95
 
 ## build:      debug build
 build:
