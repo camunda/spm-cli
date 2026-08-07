@@ -40,11 +40,11 @@ check: fmt-check lint test
 
 ## coverage:   print a per-file line-coverage report (needs cargo-llvm-cov)
 coverage:
-	$(CARGO) llvm-cov --all --summary-only
+	$(CARGO) llvm-cov --all
 
 ## coverage-check: fail if line coverage drops below COVERAGE_MIN (default 90%)
 coverage-check:
-	$(CARGO) llvm-cov --all --summary-only --fail-under-lines $(COVERAGE_MIN)
+	$(CARGO) llvm-cov --all --fail-under-lines $(COVERAGE_MIN)
 
 ## run:        run spm, e.g. `make run ARGS="list"`
 run:
