@@ -6,7 +6,10 @@ PREFIX  ?= /usr/local
 BINDIR  ?= $(PREFIX)/bin
 
 .DEFAULT_GOAL := build
-.PHONY: build release test fmt fmt-check lint check run install uninstall clean bump bump-pr
+.PHONY: build release test fmt fmt-check lint check run install uninstall clean bump bump-pr coverage coverage-check
+
+# Minimum line coverage (%). CI fails if `cargo test` drops below this.
+COVERAGE_MIN ?= 90
 
 ## build:      debug build
 build:
@@ -34,6 +37,14 @@ lint:
 
 ## check:      full CI gate — fmt-check + lint + test
 check: fmt-check lint test
+
+## coverage:   print a per-file line-coverage report (needs cargo-llvm-cov)
+coverage:
+	$(CARGO) llvm-cov --all
+
+## coverage-check: fail if line coverage drops below COVERAGE_MIN (default 90%)
+coverage-check:
+	$(CARGO) llvm-cov --all --fail-under-lines $(COVERAGE_MIN)
 
 ## run:        run spm, e.g. `make run ARGS="list"`
 run:

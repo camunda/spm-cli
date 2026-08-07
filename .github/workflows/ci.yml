@@ -44,6 +44,23 @@ jobs:
       - name: test
         run: cargo test --all
 
+  # Enforces a minimum line-coverage floor. Uses cargo-llvm-cov; the build
+  # fails if coverage drops below COVERAGE_MIN (see Makefile). Ubuntu-only —
+  # coverage is platform-independent enough that one runner is sufficient.
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: coverage
+        run: make coverage-check
+
   # Guards the `rust-version` (MSRV) we publish in Cargo.toml: the matrix above
   # only exercises `stable`, so without this a newer-than-1.97 API could slip in
   # and break `cargo install` for users on the declared minimum toolchain.
