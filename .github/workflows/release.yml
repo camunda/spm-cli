@@ -21,8 +21,37 @@ permissions:
   contents: write
 
 jobs:
+  # Defense-in-depth backstop for the `restrict-release-tag-creation` tag
+  # ruleset: a repository ruleset already limits who can create `v*` tags, but
+  # this job re-verifies at run time that the actor who triggered the release
+  # actually has admin/maintain permission on the repo. It gates every other
+  # job, so a stray tag (e.g. from a ruleset bypass or future settings drift)
+  # can never build binaries or publish to npm. See RELEASE.md / issue #58.
+  authorize:
+    name: authorize release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Verify actor may trigger a release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          perm="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${GITHUB_ACTOR}/permission" --jq '.role_name' 2>/dev/null || echo none)"
+          echo "actor=${GITHUB_ACTOR} permission=${perm}"
+          case "$perm" in
+            admin|maintain)
+              echo "::notice::${GITHUB_ACTOR} (${perm}) is authorized to trigger a release." ;;
+            *)
+              echo "::error::${GITHUB_ACTOR} (${perm}) is not permitted to trigger a release; admin or maintain permission is required."
+              exit 1 ;;
+          esac
+
   build:
     name: ${{ matrix.target }}
+    needs: authorize
     # Skip the (expensive) cross-compile + npm path when the run is only a
     # manual "regenerate the release notes for this tag" request.
     if: github.event_name == 'push' || inputs.notes_tag == ''
@@ -147,16 +176,18 @@ jobs:
   # to backfill the notes for an already-published tag without rebuilding.
   release-notes:
     name: release notes
-    needs: [build]
+    needs: [authorize, build]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write # edit the GitHub Release
     # Run after a successful tag build (so the release exists and its binaries
     # are already attached — no race to create it), OR standalone for a
-    # notes-only dispatch, where `build` is skipped.
+    # notes-only dispatch, where `build` is skipped. Either way `authorize`
+    # must have passed first.
     if: |
       always() &&
+      needs.authorize.result == 'success' &&
       ((github.event_name == 'push' && needs.build.result == 'success') ||
        (github.event_name == 'workflow_dispatch' && inputs.notes_tag != ''))
     steps:
