@@ -6,7 +6,7 @@ the authoritative, version-specific usage.
 ```bash
 spm init [--target claude|copilot ...]             # scaffold ai.json (repeatable / comma-separated)
 spm add <git> (--tag|--branch|--commit <v>) \      # add + install a skill
-        [--path <subdir>] [--name <local-name>] [--all]  # --all: add every skill under --path
+        [--path <subdir>] [--name <local-name>] [--all] [--force]  # --all: add every skill under --path
 spm target add [vendor ...]                        # add target vendor(s); no arg = pick interactively
 spm remove <name>                                  # drop a skill
 spm update [name]                                  # re-resolve branches/tags to latest
