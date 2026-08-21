@@ -111,6 +111,25 @@ The tag push fans out to:
 
 Both verify the tag equals the `Cargo.toml` version before publishing.
 
+## Who can release
+
+Publishing is gated on two independent layers, so only repository
+**admins** can cut a release:
+
+1. **Tag ruleset (`restrict-release-tag-creation`)** — a repository ruleset
+   restricts creation, update, and deletion of `refs/tags/v*` to repo admins
+   (bypass list = the Admin role). Non-admins — including any org member with
+   plain write access — simply cannot create a `v*` tag, so the release
+   workflow never even starts. Fork-based external contributors already cannot
+   push tags upstream.
+2. **`authorize` job in `release.yml`** — a defense-in-depth backstop that runs
+   first and re-checks, at run time, that the actor who triggered the workflow
+   has `admin` permission (via the collaborator-permission API). It gates every
+   other job, so a stray tag from a ruleset bypass or future settings drift can
+   never build binaries or publish to npm. If the actor is unauthorized the run
+   fails immediately (it also fails closed if the permission can't be
+   determined).
+
 ## Release notes ("What's Changed")
 
 The GitHub Release description is generated from the PRs/commits in the release
