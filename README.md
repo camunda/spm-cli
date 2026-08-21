@@ -96,7 +96,7 @@ are all supported with no extra config:
 ```bash
 spm add git@bitbucket.org:org/repo.git --branch main        # Bitbucket
 spm add https://gitlab.com/org/repo.git --tag v1.0.0        # GitLab
-spm add ssh://git@git.internal.example.com:7999/p/repo.git  # self-hosted
+spm add ssh://git@git.internal.example.com:7999/p/repo.git --branch main  # self-hosted
 ```
 
 SSH auth goes through your ssh-agent / keys — spm never handles credentials.
