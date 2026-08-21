@@ -24,9 +24,9 @@ jobs:
   # Defense-in-depth backstop for the `restrict-release-tag-creation` tag
   # ruleset: a repository ruleset already limits who can create `v*` tags, but
   # this job re-verifies at run time that the actor who triggered the release
-  # actually has admin/maintain permission on the repo. It gates every other
-  # job, so a stray tag (e.g. from a ruleset bypass or future settings drift)
-  # can never build binaries or publish to npm. See RELEASE.md / issue #58.
+  # actually has admin permission on the repo. It gates every other job, so a
+  # stray tag (e.g. from a ruleset bypass or future settings drift) can never
+  # build binaries or publish to npm. See RELEASE.md / issue #58.
   authorize:
     name: authorize release
     runs-on: ubuntu-latest
@@ -39,13 +39,19 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          perm="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${GITHUB_ACTOR}/permission" --jq '.role_name' 2>/dev/null || echo none)"
+          # The collaborator-permission endpoint exposes both the granular
+          # `role_name` (admin/maintain/write/triage/read) and the legacy
+          # `permission` (admin/write/read/none). Prefer role_name, fall back to
+          # permission, and default to `none` so a missing/null field or a
+          # failed call fails closed rather than authorizing by accident.
+          resp="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${GITHUB_ACTOR}/permission" 2>/dev/null || echo '{}')"
+          perm="$(jq -r '.role_name // .permission // "none"' <<<"$resp")"
           echo "actor=${GITHUB_ACTOR} permission=${perm}"
           case "$perm" in
-            admin|maintain)
+            admin)
               echo "::notice::${GITHUB_ACTOR} (${perm}) is authorized to trigger a release." ;;
             *)
-              echo "::error::${GITHUB_ACTOR} (${perm}) is not permitted to trigger a release; admin or maintain permission is required."
+              echo "::error::${GITHUB_ACTOR} (${perm}) is not permitted to trigger a release; admin permission is required."
               exit 1 ;;
           esac
 

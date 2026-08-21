@@ -124,10 +124,11 @@ Publishing is gated on two independent layers, so only repository
    push tags upstream.
 2. **`authorize` job in `release.yml`** — a defense-in-depth backstop that runs
    first and re-checks, at run time, that the actor who triggered the workflow
-   has `admin`/`maintain` permission (via the collaborator-permission API). It
-   gates every other job, so a stray tag from a ruleset bypass or future
-   settings drift can never build binaries or publish to npm. If the actor is
-   unauthorized the run fails immediately.
+   has `admin` permission (via the collaborator-permission API). It gates every
+   other job, so a stray tag from a ruleset bypass or future settings drift can
+   never build binaries or publish to npm. If the actor is unauthorized the run
+   fails immediately (it also fails closed if the permission can't be
+   determined).
 
 ## Release notes ("What's Changed")
 
