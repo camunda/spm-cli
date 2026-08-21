@@ -1,6 +1,7 @@
 mod claude;
 mod copilot;
 
+use crate::scope::Scope;
 use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
 
@@ -32,7 +33,13 @@ pub struct VendorStatus {
 /// Compare the declared (`expected`) skill names against the subdirectories
 /// actually materialized under `skills_dir`. Shared by the vendor adapters,
 /// whose skills all live one directory deep under a vendor-specific root.
-pub fn classify(skills_dir: &Path, expected: &[String]) -> VendorStatus {
+///
+/// `detect_stale` controls whether directories present on disk but not in
+/// `expected` are reported as stale. Project-scope vendor dirs are 100%
+/// spm-owned, so stale detection is meaningful there; user-global dirs (e.g.
+/// `~/.copilot/skills`) are *shared* with the user's own hand-authored skills,
+/// so global-scope callers pass `false` to avoid mislabeling those as stale.
+pub fn classify(skills_dir: &Path, expected: &[String], detect_stale: bool) -> VendorStatus {
     let (mut present, mut missing) = (Vec::new(), Vec::new());
     for name in expected {
         if skills_dir.join(name).is_dir() {
@@ -42,12 +49,14 @@ pub fn classify(skills_dir: &Path, expected: &[String]) -> VendorStatus {
         }
     }
     let mut stale = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(skills_dir) {
-        for e in entries.flatten() {
-            if e.path().is_dir() {
-                if let Ok(n) = e.file_name().into_string() {
-                    if !expected.iter().any(|x| x == &n) {
-                        stale.push(n);
+    if detect_stale {
+        if let Ok(entries) = std::fs::read_dir(skills_dir) {
+            for e in entries.flatten() {
+                if e.path().is_dir() {
+                    if let Ok(n) = e.file_name().into_string() {
+                        if !expected.iter().any(|x| x == &n) {
+                            stale.push(n);
+                        }
                     }
                 }
             }
@@ -64,27 +73,40 @@ pub fn classify(skills_dir: &Path, expected: &[String]) -> VendorStatus {
 }
 
 /// A target tool (Claude, Copilot, ...) that materializes skills from the
-/// global fetch cache into a project-local, gitignored directory where the tool
-/// discovers them — never into a user-global vendor location.
+/// global fetch cache into the location where the tool discovers them. In
+/// [`Scope::Project`](crate::scope::Scope) that is a project-local, gitignored
+/// directory; in [`Scope::Global`](crate::scope::Scope) it is a user-global
+/// location shared across every project.
 pub trait Vendor {
     #[allow(dead_code)] // part of the adapter contract; not all call sites use it yet
     fn name(&self) -> &'static str;
 
-    /// Generate/refresh whatever config makes this vendor load `skills`.
-    /// `project_id` is the stable, path-independent id from the lockfile.
+    /// Generate/refresh whatever config makes this vendor load `skills` in the
+    /// given `scope`. `project_id` is the stable, path-independent id from the
+    /// lockfile.
+    ///
+    /// `previously_managed` lists the skill names spm materialized on the last
+    /// sync (from the prior lockfile). Project vendors ignore it — they own
+    /// their whole dir and rebuild it from scratch — but global vendors that
+    /// share a directory with the user's own skills use it to remove only the
+    /// entries spm previously owned but that were since dropped from the
+    /// manifest, never touching the user's hand-authored skills.
     fn materialize(
         &self,
-        project_root: &Path,
+        scope: &Scope,
         project_id: &str,
         skills: &[MaterializedSkill],
+        previously_managed: &[String],
     ) -> Result<()>;
 
-    /// Remove everything this vendor generated for this project.
-    fn clean(&self, project_root: &Path, project_id: &str) -> Result<()>;
+    /// Remove everything this vendor generated for this `scope`. `managed` lists
+    /// the skill names spm currently owns (from the lockfile); global vendors
+    /// sharing a directory with the user's skills remove only those.
+    fn clean(&self, scope: &Scope, project_id: &str, managed: &[String]) -> Result<()>;
 
-    /// Report what this vendor has materialized in the current checkout,
-    /// compared against the declared `expected` skill names (from `ai.lock`).
-    fn status(&self, project_root: &Path, expected: &[String]) -> Result<VendorStatus>;
+    /// Report what this vendor has materialized in the given `scope`, compared
+    /// against the declared `expected` skill names (from `ai.lock`).
+    fn status(&self, scope: &Scope, expected: &[String]) -> Result<VendorStatus>;
 }
 
 /// Every target vendor spm knows how to materialize. Single source of truth for

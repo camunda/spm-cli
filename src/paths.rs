@@ -16,6 +16,15 @@ pub fn store_dir() -> Result<PathBuf> {
     Ok(spm_home()?.join("store"))
 }
 
+/// The user's home directory. Used by the vendor adapters to resolve
+/// user-global materialization locations (e.g. `~/.copilot/skills`,
+/// `~/.claude/settings.json`) for global-scope installs — deliberately
+/// independent of `SPM_HOME`, which only relocates spm's own store/manifest.
+pub fn home_dir() -> Result<PathBuf> {
+    let base = directories::BaseDirs::new().context("could not determine home directory")?;
+    Ok(base.home_dir().to_path_buf())
+}
+
 #[cfg(test)]
 /// Serializes tests (here and in `store.rs`) that mutate the process-wide
 /// `SPM_HOME` env var — `cargo test` runs unit tests concurrently within one

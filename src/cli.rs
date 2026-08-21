@@ -1,5 +1,6 @@
 use crate::lockfile::Lockfile;
 use crate::manifest::{Manifest, SkillSpec};
+use crate::scope::Scope;
 use crate::vendor::{self, MaterializedSkill};
 use crate::{paths, resolver, store};
 use anyhow::{anyhow, bail, Context, Result};
@@ -16,11 +17,14 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Create a new ai.json in the current directory.
+    /// Create a new ai.json in the current directory (or, with --global, under
+    /// $SPM_HOME to manage skills shared across every project).
     Init {
         /// Target vendor(s): claude and/or copilot. Repeatable or comma-separated.
         #[arg(long = "target", value_delimiter = ',', default_value = "claude")]
         targets: Vec<String>,
+        #[command(flatten)]
+        scope: ScopeArg,
     },
     /// Add a skill dependency and install it.
     Add {
@@ -43,6 +47,8 @@ enum Command {
         /// Applies to both a single add and --all.
         #[arg(long)]
         force: bool,
+        #[command(flatten)]
+        scope: ScopeArg,
     },
     /// Manage the target vendors declared in ai.json.
     Target {
@@ -50,20 +56,38 @@ enum Command {
         command: TargetCommand,
     },
     /// Remove a skill dependency.
-    Remove { name: String },
+    Remove {
+        name: String,
+        #[command(flatten)]
+        scope: ScopeArg,
+    },
     /// Re-resolve branches/tags to latest commits.
     Update {
         /// Skill to update; omit to update all.
         name: Option<String>,
+        #[command(flatten)]
+        scope: ScopeArg,
     },
     /// Fetch + materialize everything from ai.lock (use after cloning).
-    Install,
+    Install {
+        #[command(flatten)]
+        scope: ScopeArg,
+    },
     /// List declared skills and their locked commits.
-    List,
+    List {
+        #[command(flatten)]
+        scope: ScopeArg,
+    },
     /// Show which declared skills are materialized in this checkout.
-    Status,
+    Status {
+        #[command(flatten)]
+        scope: ScopeArg,
+    },
     /// Remove all generated vendor config for this project.
-    Clean,
+    Clean {
+        #[command(flatten)]
+        scope: ScopeArg,
+    },
     /// Remove everything from the global store (fetch cache). Frees disk by
     /// deleting every cached repo@commit; they re-fetch on demand on the next
     /// `install`. Prompts for confirmation unless `--yes` is given.
@@ -98,11 +122,28 @@ struct VersionArg {
     commit: Option<String>,
 }
 
+/// The `-g/--global` selector shared by every scope-aware subcommand. Operates
+/// on the global manifest under `$SPM_HOME` and user-global vendor locations
+/// instead of the current project.
+#[derive(Args)]
+struct ScopeArg {
+    /// Operate on the user-global scope ($SPM_HOME manifest, user-global vendor
+    /// locations) instead of the current project.
+    #[arg(short = 'g', long = "global")]
+    global: bool,
+}
+
+impl ScopeArg {
+    fn resolve(&self, cwd: &Path) -> Scope {
+        Scope::new(self.global, cwd.to_path_buf())
+    }
+}
+
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
-    let root = std::env::current_dir()?;
+    let cwd = std::env::current_dir()?;
     match cli.command {
-        Command::Init { targets } => init(&root, targets),
+        Command::Init { targets, scope } => init(&scope.resolve(&cwd), targets),
         Command::Add {
             git,
             version,
@@ -110,32 +151,37 @@ pub fn run() -> Result<()> {
             name,
             all,
             force,
-        } => add(&root, git, version, path, name, all, force),
+            scope,
+        } => add(&scope.resolve(&cwd), git, version, path, name, all, force),
         Command::Target { command } => match command {
-            TargetCommand::Add { vendors } => target_add(&root, vendors),
+            TargetCommand::Add { vendors } => target_add(&Scope::Project { root: cwd }, vendors),
         },
-        Command::Remove { name } => remove(&root, &name),
-        Command::Update { name } => update(&root, name),
-        Command::Install => {
-            let n = sync(&root, false, None)?;
+        Command::Remove { name, scope } => remove(&scope.resolve(&cwd), &name),
+        Command::Update { name, scope } => update(&scope.resolve(&cwd), name),
+        Command::Install { scope } => {
+            let scope = scope.resolve(&cwd);
+            let n = sync(&scope, false, None)?;
             println!("installed {n} skill(s)");
             Ok(())
         }
-        Command::List => list(&root),
-        Command::Status => status(&root),
-        Command::Clean => clean(&root),
+        Command::List { scope } => list(&scope.resolve(&cwd)),
+        Command::Status { scope } => status(&scope.resolve(&cwd)),
+        Command::Clean { scope } => clean(&scope.resolve(&cwd)),
         Command::Prune { yes } => prune(yes),
     }
 }
 
-fn clean(root: &Path) -> Result<()> {
-    let manifest = Manifest::load(root)?;
-    let lock = Lockfile::load_or_default(root)?;
+fn clean(scope: &Scope) -> Result<()> {
+    let dir = scope.manifest_dir()?;
+    let manifest = Manifest::load(&dir)?;
+    let lock = Lockfile::load_or_default(&dir)?;
+    let managed: Vec<String> = lock.skills.keys().cloned().collect();
     for target in &manifest.targets {
-        vendor::for_target(target)?.clean(root, &lock.id)?;
+        vendor::for_target(target)?.clean(scope, &lock.id, &managed)?;
     }
     println!(
-        "cleaned generated config for target(s): {}",
+        "cleaned generated {} config for target(s): {}",
+        scope.label(),
         manifest.targets.join(", ")
     );
     Ok(())
@@ -208,7 +254,7 @@ fn human_size(bytes: u64) -> String {
     format!("{size:.1} {}", UNITS[unit])
 }
 
-fn init(root: &Path, targets: Vec<String>) -> Result<()> {
+fn init(scope: &Scope, targets: Vec<String>) -> Result<()> {
     // Validate --target before anything else so typos are caught regardless of
     // whether the project is already initialized — otherwise the idempotent
     // early-return below would silently accept a bogus target in scripts.
@@ -218,13 +264,16 @@ fn init(root: &Path, targets: Vec<String>) -> Result<()> {
     for target in &targets {
         vendor::for_target(target)?; // validate targets early
     }
-    // Re-running `spm init` in an already-initialized project is a harmless
+    let dir = scope.manifest_dir()?;
+    // The global manifest dir ($SPM_HOME) may not exist yet on a first run.
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    // Re-running `spm init` in an already-initialized scope is a harmless
     // no-op, not an error: leave the existing manifest untouched and tell the
     // user rather than failing the command.
-    if Manifest::exists(root) {
+    if Manifest::exists(&dir) {
         println!(
             "{} already exists — leaving it untouched",
-            Manifest::path_in(root).display()
+            Manifest::path_in(&dir).display()
         );
         return Ok(());
     }
@@ -232,13 +281,13 @@ fn init(root: &Path, targets: Vec<String>) -> Result<()> {
         targets,
         skills: BTreeMap::new(),
     };
-    manifest.save(root)?;
-    println!("created {}", Manifest::path_in(root).display());
+    manifest.save(&dir)?;
+    println!("created {}", Manifest::path_in(&dir).display());
     Ok(())
 }
 
 fn add(
-    root: &Path,
+    scope: &Scope,
     git: String,
     version: VersionArg,
     path: Option<String>,
@@ -246,12 +295,13 @@ fn add(
     all: bool,
     force: bool,
 ) -> Result<()> {
-    let mut manifest = Manifest::load(root)?;
+    let dir = scope.manifest_dir()?;
+    let mut manifest = Manifest::load(&dir)?;
     if let Some(sub) = &path {
         crate::manifest::validate_subpath(sub)?;
     }
     if all {
-        add_all(root, &mut manifest, git, version, path, force)?;
+        add_all(scope, &mut manifest, git, version, path, force)?;
     } else {
         let name = name.unwrap_or_else(|| {
             // Prefer the `--path` basename, but fall back to the git URL when the
@@ -270,7 +320,7 @@ fn add(
                 "a skill named `{name}` already exists in {}; either give this one \
                  a different name with `--name <other>`, pass --force to overwrite \
                  the existing entry, or `spm remove {name}` first",
-                Manifest::path_in(root).display()
+                Manifest::path_in(&dir).display()
             );
         }
         let spec = SkillSpec {
@@ -282,8 +332,8 @@ fn add(
         };
         spec.version()?; // validate exactly one selector
         manifest.skills.insert(name.clone(), spec);
-        manifest.save(root)?;
-        sync(root, false, None)?;
+        manifest.save(&dir)?;
+        sync(scope, false, None)?;
         println!("added {name}");
     }
     Ok(())
@@ -296,13 +346,14 @@ fn add(
 /// container warning suggests — so it enumerates sub-skills through the same
 /// `skillcheck::child_skills` source of truth, guaranteeing the two never drift.
 fn add_all(
-    root: &Path,
+    scope: &Scope,
     manifest: &mut Manifest,
     git: String,
     version: VersionArg,
     path: Option<String>,
     force: bool,
 ) -> Result<()> {
+    let dir = scope.manifest_dir()?;
     // Version selector is validated once for the container; every derived entry
     // reuses it verbatim.
     let container = SkillSpec {
@@ -336,7 +387,7 @@ fn add_all(
             bail!(
                 "a skill named `{sub}` already exists in {}; either pass --force to \
                  overwrite the existing entries, or `spm remove {sub}` first",
-                Manifest::path_in(root).display()
+                Manifest::path_in(&dir).display()
             );
         }
     }
@@ -354,8 +405,8 @@ fn add_all(
             },
         );
     }
-    manifest.save(root)?;
-    sync(root, false, None)?;
+    manifest.save(&dir)?;
+    sync(scope, false, None)?;
     println!("added {} skill(s): {}", subs.len(), subs.join(", "));
     Ok(())
 }
@@ -365,8 +416,9 @@ fn add_all(
 /// verbatim; with none given, the vendors *not yet configured* are offered as an
 /// interactive numbered picker. Adding an already-configured target is a skip,
 /// not an error, so the command is safe to re-run.
-fn target_add(root: &Path, vendors: Vec<String>) -> Result<()> {
-    let mut manifest = Manifest::load(root)?;
+fn target_add(scope: &Scope, vendors: Vec<String>) -> Result<()> {
+    let dir = scope.manifest_dir()?;
+    let mut manifest = Manifest::load(&dir)?;
 
     let requested = if vendors.is_empty() {
         let available: Vec<&str> = vendor::ALL_TARGETS
@@ -406,9 +458,9 @@ fn target_add(root: &Path, vendors: Vec<String>) -> Result<()> {
         return Ok(());
     }
 
-    manifest.save(root)?;
+    manifest.save(&dir)?;
     // Materialize existing skills into the newly-added vendor(s).
-    sync(root, false, None)?;
+    sync(scope, false, None)?;
     println!("added target(s): {}", added.join(", "));
     Ok(())
 }
@@ -458,29 +510,31 @@ fn prompt_targets(available: &[&str]) -> Result<Vec<String>> {
     Ok(chosen)
 }
 
-fn remove(root: &Path, name: &str) -> Result<()> {
-    let mut manifest = Manifest::load(root)?;
+fn remove(scope: &Scope, name: &str) -> Result<()> {
+    let dir = scope.manifest_dir()?;
+    let mut manifest = Manifest::load(&dir)?;
     if manifest.skills.remove(name).is_none() {
         bail!(
             "no skill named `{name}` in {}",
-            Manifest::path_in(root).display()
+            Manifest::path_in(&dir).display()
         );
     }
-    manifest.save(root)?;
-    sync(root, false, None)?;
+    manifest.save(&dir)?;
+    sync(scope, false, None)?;
     println!("removed {name}");
     Ok(())
 }
 
-fn update(root: &Path, name: Option<String>) -> Result<()> {
-    sync(root, true, name.as_deref())?;
+fn update(scope: &Scope, name: Option<String>) -> Result<()> {
+    sync(scope, true, name.as_deref())?;
     println!("updated");
     Ok(())
 }
 
-fn list(root: &Path) -> Result<()> {
-    let manifest = Manifest::load(root)?;
-    let lock = Lockfile::load_or_default(root)?;
+fn list(scope: &Scope) -> Result<()> {
+    let dir = scope.manifest_dir()?;
+    let manifest = Manifest::load(&dir)?;
+    let lock = Lockfile::load_or_default(&dir)?;
     if manifest.skills.is_empty() {
         println!("no skills declared");
         return Ok(());
@@ -496,18 +550,35 @@ fn list(root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Show, per target, which declared skills are materialized in the current
-/// checkout. Because spm materializes into gitignored dirs, a fresh clone or a
-/// new git worktree sees nothing until `spm install` runs inside it — this
-/// command surfaces exactly that, and exits non-zero when anything is missing so
-/// it doubles as an automated gate.
-fn status(root: &Path) -> Result<()> {
-    let manifest = Manifest::load(root)?;
-    let lock = Lockfile::load_or_default(root)?;
+/// Show, per target, which declared skills are materialized for this scope.
+/// Because spm materializes into gitignored dirs, a fresh clone or a new git
+/// worktree sees nothing until `spm install` runs inside it — this command
+/// surfaces exactly that, and exits non-zero when anything is missing so it
+/// doubles as an automated gate.
+fn status(scope: &Scope) -> Result<()> {
+    let dir = scope.manifest_dir()?;
+    let manifest = Manifest::load(&dir)?;
+    let lock = Lockfile::load_or_default(&dir)?;
     let expected: Vec<String> = lock.skills.keys().cloned().collect();
 
-    println!("project: {}", root.display());
+    match scope {
+        Scope::Project { root } => println!("project: {}", root.display()),
+        Scope::Global => println!("global: {}", dir.display()),
+    }
     println!("targets: {}", manifest.targets.join(", "));
+
+    // Warn when a skill name is materialized in *both* scopes: the vendor
+    // discovery layer keys by name (`/spm:foo`, `.agents/skills/foo`), so a
+    // project skill and a global skill of the same name collide/shadow at
+    // runtime. Surface it here rather than letting the tool silently pick one.
+    for shadow in shadowed_names(scope, &expected)? {
+        let other = if scope.is_global() {
+            "project"
+        } else {
+            "global"
+        };
+        println!("! `{shadow}` is also installed in the {other} scope — they will collide by name");
+    }
 
     // Nothing locked: either nothing is declared (a clean, correct state) or
     // ai.json declares skills that were never resolved into ai.lock (a real
@@ -519,7 +590,7 @@ fn status(root: &Path) -> Result<()> {
             return Ok(());
         }
         bail!(
-            "ai.json declares {} skill(s) but ai.lock has none — run `spm install` here",
+            "ai.json declares {} skill(s) but ai.lock has none — run `spm install`",
             manifest.skills.len()
         );
     }
@@ -529,7 +600,7 @@ fn status(root: &Path) -> Result<()> {
 
     for target in &manifest.targets {
         let vendor = vendor::for_target(target)?;
-        let st = vendor.status(root, &expected)?;
+        let st = vendor.status(scope, &expected)?;
         println!(
             "\n[{target}]  {}/{} installed  {}",
             st.present.len(),
@@ -556,12 +627,26 @@ fn status(root: &Path) -> Result<()> {
     }
 
     if incomplete {
-        bail!(
-            "some declared skills are not materialized in this checkout — run `spm install` here"
-        );
+        bail!("some declared skills are not materialized — run `spm install`");
     }
-    println!("\nall declared skills are materialized in this checkout");
+    println!("\nall declared skills are materialized");
     Ok(())
+}
+
+/// Skill names in `expected` that are *also* locked in the opposite scope. Used
+/// by `status` to warn about global/project name collisions. Returns an empty
+/// list when the opposite scope has no lockfile.
+fn shadowed_names(scope: &Scope, expected: &[String]) -> Result<Vec<String>> {
+    let other_dir = match scope {
+        Scope::Project { .. } => paths::spm_home()?,
+        Scope::Global => std::env::current_dir()?,
+    };
+    let other = Lockfile::load_or_default(&other_dir)?;
+    Ok(expected
+        .iter()
+        .filter(|n| other.skills.contains_key(*n))
+        .cloned()
+        .collect())
 }
 
 /// Core pipeline shared by add/remove/update/install:
@@ -569,8 +654,9 @@ fn status(root: &Path) -> Result<()> {
 ///
 /// `force_refresh` re-resolves refs to their latest commit; `only` limits the
 /// refresh to a single skill (used by `update <name>`).
-fn sync(root: &Path, force_refresh: bool, only: Option<&str>) -> Result<usize> {
-    let manifest = Manifest::load(root)?;
+fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Result<usize> {
+    let dir = scope.manifest_dir()?;
+    let manifest = Manifest::load(&dir)?;
     if manifest.targets.is_empty() {
         bail!("ai.json declares no targets");
     }
@@ -580,11 +666,17 @@ fn sync(root: &Path, force_refresh: bool, only: Option<&str>) -> Result<usize> {
         .iter()
         .map(|t| vendor::for_target(t))
         .collect::<Result<Vec<_>>>()?;
-    let mut prev = Lockfile::load_or_default(root)?;
+    let mut prev = Lockfile::load_or_default(&dir)?;
+
+    // Skill names spm materialized on the previous sync. Captured before the
+    // resolve loop mutates `prev`, so global vendors (which share a directory
+    // with the user's own skills) can purge only the entries spm previously
+    // owned but that were since dropped from the manifest.
+    let previously_managed: Vec<String> = prev.skills.keys().cloned().collect();
 
     // Stable, path-independent project id: reuse the locked one, else mint & persist.
     let id = if prev.id.is_empty() {
-        crate::lockfile::generate_id(root)
+        crate::lockfile::generate_id(&dir)
     } else {
         prev.id.clone()
     };
@@ -628,7 +720,7 @@ fn sync(root: &Path, force_refresh: bool, only: Option<&str>) -> Result<usize> {
         lock.skills.insert(name.clone(), locked);
     }
 
-    lock.save(root)?;
+    lock.save(&dir)?;
 
     // Populate the store and collect absolute paths for the vendor.
     if !manifest.skills.is_empty() {
@@ -661,7 +753,7 @@ fn sync(root: &Path, force_refresh: bool, only: Option<&str>) -> Result<usize> {
         println!("materializing: {}", manifest.targets.join(", "));
     }
     for vendor in &vendors {
-        vendor.materialize(root, &lock.id, &materialized)?;
+        vendor.materialize(scope, &lock.id, &materialized, &previously_managed)?;
     }
     Ok(lock.skills.len())
 }
@@ -682,7 +774,7 @@ fn default_name(git: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_name, human_size, init};
+    use super::{default_name, human_size, init, Scope};
 
     /// `clap`'s `--target` always yields at least one element (it defaults to
     /// `["claude"]` and a comma split never produces zero tokens), so the
@@ -700,7 +792,7 @@ mod tests {
             std::process::id(),
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        let err = init(&dir, Vec::new()).unwrap_err();
+        let err = init(&Scope::Project { root: dir.clone() }, Vec::new()).unwrap_err();
         assert!(
             format!("{err}").contains("at least one --target is required"),
             "{err}"

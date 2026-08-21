@@ -4,17 +4,41 @@ The full `spm` command surface. Run `spm --help` or `spm <command> --help` for
 the authoritative, version-specific usage.
 
 ```bash
-spm init [--target claude|copilot ...]             # scaffold ai.json (repeatable / comma-separated)
+spm init [--target claude|copilot ...] [-g]        # scaffold ai.json (repeatable / comma-separated)
 spm add <git> (--tag|--branch|--commit <v>) \      # add + install a skill
-        [--path <subdir>] [--name <local-name>] [--all] [--force]  # --all: add every skill under --path
+        [--path <subdir>] [--name <local-name>] [--all] [--force] [-g]  # --all: add every skill under --path
 spm target add [vendor ...]                        # add target vendor(s); no arg = pick interactively
-spm remove <name>                                  # drop a skill
-spm update [name]                                  # re-resolve branches/tags to latest
-spm install                                        # rebuild from ai.lock (after clone)
-spm list                                           # show skills + pinned commits
-spm status                                         # check skills are materialized in this checkout
-spm clean                                          # remove generated vendor config
+spm remove <name> [-g]                             # drop a skill
+spm update [name] [-g]                             # re-resolve branches/tags to latest
+spm install [-g]                                   # rebuild from ai.lock (after clone)
+spm list [-g]                                      # show skills + pinned commits
+spm status [-g]                                    # check skills are materialized in this checkout
+spm clean [-g]                                     # remove generated vendor config
 spm prune [--yes]                                  # wipe the global fetch cache ($SPM_HOME/store, default ~/.spm/store)
+```
+
+## Scope: project (default) vs. global (`-g`)
+
+Every command except `target add` and `prune` accepts `-g` / `--global`. Without
+it, the command operates on the **project** in the current directory. With it,
+the command manages a **user-global** set of skills available to your AI tools in
+every project:
+
+- The global **manifest + lock** live under `$SPM_HOME` (default `~/.spm/ai.json`
+  / `~/.spm/ai.lock`) and reuse the same fetch cache as project installs.
+- Global skills materialize into user-global vendor locations:
+  `~/.copilot/skills/<name>/` for Copilot, and a marketplace under
+  `$SPM_HOME/claude-global/` registered in `~/.claude/settings.json` as
+  `spm-global` (skills invoked as `/spm-global:<name>`) for Claude.
+- Copilot's global dir is shared with your hand-authored skills, so spm only
+  touches the entries it manages there — it never wipes the directory.
+- `spm status` warns when a skill name is installed in **both** scopes, since the
+  two collide by name at discovery time.
+
+```bash
+spm init -g --target copilot
+spm add  -g https://github.com/org/repo --tag v1.0.0 --name reviewer
+spm status -g
 ```
 
 ## Command details
