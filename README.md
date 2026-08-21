@@ -89,6 +89,16 @@ spm add git@github.com:org/repo.git --branch main           # SSH (scp-style)
 spm add ssh://git@github.com/org/repo.git --branch main     # SSH (url form)
 ```
 
+**Any git host works** — spm shells out to `git` and never detects or
+special-cases a provider, so GitHub, GitLab, Bitbucket, and self-hosted servers
+are all supported with no extra config:
+
+```bash
+spm add git@bitbucket.org:org/repo.git --branch main        # Bitbucket
+spm add https://gitlab.com/org/repo.git --tag v1.0.0        # GitLab
+spm add ssh://git@git.internal.example.com:7999/p/repo.git --branch main  # self-hosted
+```
+
 SSH auth goes through your ssh-agent / keys — spm never handles credentials.
 Private HTTPS repos use your git credential helper. spm runs git with
 `GIT_TERMINAL_PROMPT=0`, so a missing credential fails with a clear error

@@ -727,6 +727,25 @@ mod tests {
         assert_eq!(default_name("git@host:repo.git"), "repo");
     }
 
+    /// spm is host-agnostic: it never detects or special-cases a hosting
+    /// provider, so any git remote — Bitbucket, GitLab, self-hosted — parses
+    /// through the same URL forms as GitHub. This locks that guarantee in.
+    #[test]
+    fn default_name_is_host_agnostic() {
+        // Bitbucket Cloud
+        assert_eq!(default_name("https://bitbucket.org/org/repo.git"), "repo");
+        assert_eq!(default_name("git@bitbucket.org:org/repo.git"), "repo");
+        assert_eq!(default_name("ssh://git@bitbucket.org/org/repo.git"), "repo");
+        // GitLab
+        assert_eq!(default_name("https://gitlab.com/org/repo.git"), "repo");
+        assert_eq!(default_name("git@gitlab.com:org/repo.git"), "repo");
+        // Self-hosted (Bitbucket Server / GitLab CE / plain git over ssh)
+        assert_eq!(
+            default_name("ssh://git@git.internal.example.com:7999/proj/repo.git"),
+            "repo"
+        );
+    }
+
     #[test]
     fn default_name_handles_subpaths() {
         assert_eq!(default_name("skills/camunda-feel"), "camunda-feel");
