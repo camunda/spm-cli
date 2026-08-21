@@ -175,16 +175,19 @@ impl Sandbox {
     }
 
     /// Copilot's user-global personal-skills dir (under the sandboxed HOME).
+    #[cfg(unix)]
     fn copilot_global_skills(&self) -> PathBuf {
         self.home.join(".copilot/skills")
     }
 
     /// The user-global Claude settings file spm registers into.
+    #[cfg(unix)]
     fn claude_global_settings(&self) -> PathBuf {
         self.home.join(".claude/settings.json")
     }
 
     /// The spm-owned global Claude marketplace dir (under SPM_HOME).
+    #[cfg(unix)]
     fn claude_global_market_dir(&self) -> PathBuf {
         self.spm_home.join("claude-global")
     }
