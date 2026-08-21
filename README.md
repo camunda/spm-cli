@@ -19,7 +19,7 @@ ai.json ──resolve──▶ ai.lock ──fetch──▶ ~/.spm/store/<repo>@
 - **`ai.json`** — you author it, commit it. Declares target vendors + skill deps.
 - **`ai.lock`** — generated, commit it. Pins every version selector to an immutable commit SHA → reproducible installs.
 - **Global store** (`~/.spm/store`) — a **fetch cache only**: each repo@commit is cloned once and shared across all projects. Nothing is *registered* or *materialized* here — it exists purely so repeated installs don't re-clone.
-- **Vendor projection** — spm copies the store's skills into a **project-local** directory wherever each vendor loads them from. Nothing spm generates is committed to your repo, and nothing is written into a user-global vendor location.
+- **Vendor projection** — spm copies the store's skills into the directory where each vendor loads them from. In the default **project** scope that is a **project-local**, gitignored dir — nothing spm generates is committed. With `-g`/`--global` (see [Global skills](#global-skills--g----global)) it materializes into a **user-global** location shared across all your projects instead.
 - **Registration** differs per vendor:
   - **Claude** — spm assembles a self-contained plugin marketplace in the **project-local**, gitignored `.spm/claude/` dir and writes a pointer to it into `.claude/settings.local.json` (gitignored by convention). The dir sits outside `.agents/skills/` so Copilot's scanner never picks it up. Declarative, per-project, zero VCS footprint.
   - **Copilot CLI** — spm copies the resolved skills into a **project-local** directory, `.agents/skills/spm-managed-skills/<name>/`, where Copilot CLI auto-discovers them (`.agents/skills/**/SKILL.md`). That directory is added to the project's `.gitignore` (with an explanatory comment) so the materialized skills stay truly local and are never committed. No user-global state, no `copilot` CLI required.
@@ -171,18 +171,47 @@ make install PREFIX=~/.local  # or a custom prefix
 ## Commands
 
 ```bash
-spm init [--target claude|copilot ...]             # scaffold ai.json (repeatable / comma-separated)
+spm init [--target claude|copilot ...] [-g]        # scaffold ai.json (repeatable / comma-separated)
 spm add <git> (--tag|--branch|--commit <v>) \      # add + install a skill
-        [--path <subdir>] [--name <local-name>] [--all]  # --all: add every skill under --path
+        [--path <subdir>] [--name <local-name>] [--all] [-g]  # --all: add every skill under --path
 spm target add [vendor ...]                        # add target vendor(s); no arg = pick interactively
-spm remove <name>                                  # drop a skill
-spm update [name]                                  # re-resolve branches/tags to latest
-spm install                                        # rebuild from ai.lock (after clone)
-spm list                                           # show skills + pinned commits
-spm status                                         # check skills are materialized in this checkout
-spm clean                                          # remove generated vendor config
+spm remove <name> [-g]                             # drop a skill
+spm update [name] [-g]                              # re-resolve branches/tags to latest
+spm install [-g]                                   # rebuild from ai.lock (after clone)
+spm list [-g]                                      # show skills + pinned commits
+spm status [-g]                                    # check skills are materialized in this checkout
+spm clean [-g]                                     # remove generated vendor config
 spm prune [--yes]                                  # wipe the global fetch cache ($SPM_HOME/store, default ~/.spm/store)
 ```
+
+## Global skills (`-g` / `--global`)
+
+By default every command operates on the **project** in the current directory.
+Pass `-g` (`--global`) to instead manage a **user-global** set of skills that is
+available to your AI tools in *every* project:
+
+```bash
+spm init -g --target copilot                       # create the global manifest ($SPM_HOME/ai.json)
+spm add  -g <git> --tag v1.0.0 --name reviewer     # install a skill globally
+spm list -g                                        # list global skills
+spm remove -g reviewer                             # drop a global skill
+spm clean  -g                                      # remove global vendor config
+```
+
+- The global **manifest + lock** live under `$SPM_HOME` (default `~/.spm/ai.json`
+  and `~/.spm/ai.lock`) — commit/sync them with your dotfiles for a reproducible
+  personal setup. They reuse the same fetch cache as project installs.
+- **Where global skills materialize:**
+  - **Copilot CLI** → `~/.copilot/skills/<name>/` (its personal-skills dir). This
+    directory is *shared* with skills you author by hand, so spm only ever
+    touches the entries it manages and never wipes the whole directory.
+  - **Claude** → a self-contained marketplace under `$SPM_HOME/claude-global/`,
+    registered in `~/.claude/settings.json` under the marketplace name
+    `spm-global` (skills invoked as `/spm-global:<name>`). A distinct name keeps
+    it from colliding with a project's `spm` marketplace.
+- A skill installed in **both** scopes collides by name at discovery time
+  (`/spm:foo` vs `/spm-global:foo` for Claude; a duplicate `foo` dir for
+  Copilot). `spm status` warns when it detects such a global/project shadow.
 
 ## Worktrees & fresh clones
 
