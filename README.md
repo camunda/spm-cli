@@ -5,6 +5,9 @@ AI tool (Claude Code and GitHub Copilot CLI) **without ever committing skills to
 your repo**. Anything spm materializes into the working tree is gitignored — no
 symlinks, no skills under version control.
 
+📖 **Documentation:** <https://camunda.github.io/spm-cli/> (built from
+[`docs/`](docs/) and deployed via GitHub Pages).
+
 ## How it works
 
 ```
