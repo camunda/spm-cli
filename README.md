@@ -132,10 +132,9 @@ toolchain). The crate is `spm-cli`; the installed binary is `spm`:
 cargo install spm-cli
 ```
 
-**Prebuilt binary** — the repo is **internal**, so release assets require
-authentication. Download with the [GitHub CLI](https://cli.github.com/) (you must
-be signed in via `gh auth login` and be a Camunda org member), then put the binary
-on your `PATH`:
+**Prebuilt binary** — download a release asset directly; no authentication
+required (the repo is public). The easiest way is the
+[GitHub CLI](https://cli.github.com/):
 
 ```bash
 # pick the asset for your platform (see list below); example: Apple Silicon macOS
@@ -146,6 +145,15 @@ chmod +x spm && sudo mv spm /usr/local/bin/
 
 `--repo camunda/spm-cli` with no tag grabs the latest release; add
 `v0.1.0` as the first positional arg to pin a specific version.
+
+Without `gh`, download straight from the public release URL with `curl`:
+
+```bash
+# latest release; swap the asset name for your platform
+curl -fsSL -o spm \
+  https://github.com/camunda/spm-cli/releases/latest/download/spm-aarch64-apple-darwin
+chmod +x spm && sudo mv spm /usr/local/bin/
+```
 
 Assets: `spm-x86_64-unknown-linux-gnu`, `spm-aarch64-unknown-linux-gnu`,
 `spm-x86_64-apple-darwin`, `spm-aarch64-apple-darwin`,
