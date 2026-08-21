@@ -53,8 +53,8 @@ spm copies the resolved skills into the project-local, gitignored directory:
 
 Copilot CLI auto-discovers skills matching `.agents/skills/**/SKILL.md`. spm adds
 that directory to the project's `.gitignore` (with an explanatory comment) so the
-materialized skills stay truly local and are never committed. There is no
-user-global state and no `copilot` CLI required.
+materialized skills stay truly local and are never committed. spm does not invoke
+the `copilot` CLI during install; it only writes files where Copilot looks.
 
 To inspect what Copilot actually loaded:
 
