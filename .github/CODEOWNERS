@@ -1,0 +1,7 @@
+# Code owners for camunda/spm-cli.
+# See https://docs.github.com/articles/about-code-owners
+#
+# Only the CI/CD workflows are owned: the PLE team must review any change
+# under .github/workflows/. Everything else has no required code owner and
+# can be reviewed by anyone.
+/.github/workflows/ @camunda/ple
