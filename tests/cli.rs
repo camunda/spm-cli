@@ -301,6 +301,35 @@ fn copilot_add_materializes_project_local_skills() {
 }
 
 #[test]
+fn gemini_add_materializes_project_local_skills() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "gemini"]);
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--name",
+        "greet",
+    ]);
+
+    // Skills are copied one level deep under the tool-native .gemini/skills dir.
+    let skill_md = sb.project.join(".gemini/skills/greet/SKILL.md");
+    assert!(skill_md.exists(), "missing {}", skill_md.display());
+    // The shared skills dir is not nested under an spm-owned subdir.
+    assert!(!sb
+        .project
+        .join(".gemini/skills/spm-managed-skills")
+        .exists());
+
+    // Only the spm-managed skill subdir is gitignored (not the whole shared dir,
+    // which may hold the user's own committed skills), with a comment.
+    let gitignore = sb.read(".gitignore");
+    assert!(gitignore.contains(".gemini/skills/greet/"), "{gitignore}");
+    assert!(gitignore.contains("spm-managed Gemini"), "{gitignore}");
+}
+
+#[test]
 fn add_without_name_keys_manifest_by_path_basename() {
     let sb = Sandbox::new();
     sb.add_skill_pack();
@@ -1276,7 +1305,9 @@ fn target_add_interactive_picks_unconfigured_vendor_from_list() {
 #[test]
 fn target_add_interactive_reports_when_all_configured() {
     let sb = Sandbox::new();
-    sb.ok(&["init", "--target", "claude,copilot"]);
+    // Init with every supported vendor so the "nothing to pick" path is exercised
+    // regardless of how many targets exist.
+    sb.ok(&["init", "--target", "claude,copilot,gemini"]);
 
     // Every supported vendor is already configured: nothing to pick, and the
     // command short-circuits with a message (no stdin consumed).

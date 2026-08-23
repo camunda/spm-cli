@@ -1,6 +1,7 @@
+use super::dirskills::{copy_skills_into, remove_managed};
 use super::{MaterializedSkill, Vendor};
 use crate::scope::Scope;
-use crate::{fsutil, gitignore, paths};
+use crate::{gitignore, paths};
 use anyhow::{Context, Result};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -117,36 +118,6 @@ fn skills_dir(scope: &Scope) -> Result<PathBuf> {
 
 fn join_all(base: &Path, segs: &[&str]) -> PathBuf {
     segs.iter().fold(base.to_path_buf(), |p, seg| p.join(seg))
-}
-
-/// Copy each skill into `dir/<name>/`, creating `dir` if needed.
-fn copy_skills_into(dir: &Path, skills: &[MaterializedSkill]) -> Result<()> {
-    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    for s in skills {
-        let dest = dir.join(&s.name);
-        // Replace any pre-existing dir of the same name so re-materialization is
-        // idempotent even in the shared global dir.
-        if dest.exists() {
-            std::fs::remove_dir_all(&dest)
-                .with_context(|| format!("clearing {}", dest.display()))?;
-        }
-        fsutil::copy_tree(&s.path, &dest)
-            .with_context(|| format!("copying skill `{}` into {}", s.name, dir.display()))?;
-    }
-    Ok(())
-}
-
-/// Remove `dir/<name>/` for each managed `name`, ignoring absent entries and
-/// leaving every other entry in `dir` (e.g. the user's own skills) untouched.
-fn remove_managed<'a>(dir: &Path, names: impl Iterator<Item = &'a str>) -> Result<()> {
-    for name in names {
-        let target = dir.join(name);
-        if target.is_dir() {
-            std::fs::remove_dir_all(&target)
-                .with_context(|| format!("removing {}", target.display()))?;
-        }
-    }
-    Ok(())
 }
 
 fn ensure_gitignored(project_root: &Path) -> Result<()> {
