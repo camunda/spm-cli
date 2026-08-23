@@ -1,5 +1,7 @@
 mod claude;
 mod copilot;
+mod dirskills;
+mod gemini;
 
 use crate::scope::Scope;
 use anyhow::{bail, Result};
@@ -111,15 +113,16 @@ pub trait Vendor {
 
 /// Every target vendor spm knows how to materialize. Single source of truth for
 /// the `for_target` dispatch, the CLI's interactive target picker, and the
-/// "supported targets" error text — so those never drift apart. Keep in sync with
-/// the `targets` enum in `schema/ai.schema.json` (guarded by a schema round-trip
-/// test).
-pub const ALL_TARGETS: &[&str] = &["claude", "copilot"];
+/// "supported targets" error text — so those never drift apart. Kept in sync with
+/// the `targets` enum in `schema/ai.schema.json` by
+/// [`all_targets_match_schema_enum`](tests::all_targets_match_schema_enum).
+pub const ALL_TARGETS: &[&str] = &["claude", "copilot", "gemini"];
 
 pub fn for_target(target: &str) -> Result<Box<dyn Vendor>> {
     match target {
         "claude" => Ok(Box::new(claude::Claude)),
         "copilot" => Ok(Box::new(copilot::Copilot)),
+        "gemini" => Ok(Box::new(gemini::Gemini)),
         other => bail!(
             "unknown target `{other}` (supported: {})",
             ALL_TARGETS.join(", ")
@@ -141,5 +144,27 @@ mod tests {
             let v = for_target(t).expect("advertised target must resolve");
             assert_eq!(&v.name(), t, "vendor name must match its target key");
         }
+    }
+
+    /// Close the drift surface between the runtime target list and the manifest
+    /// schema: the `targets` enum in `schema/ai.schema.json` must be exactly
+    /// `ALL_TARGETS`. Adding a vendor without updating the schema (or vice versa)
+    /// fails here instead of silently letting `ai.json` accept/reject the wrong
+    /// set of targets.
+    #[test]
+    fn all_targets_match_schema_enum() {
+        let schema: serde_json::Value =
+            serde_json::from_str(crate::schema::SOURCE).expect("schema is valid JSON");
+        let enum_vals = schema["properties"]["targets"]["items"]["enum"]
+            .as_array()
+            .expect("targets.items.enum must be an array");
+        let schema_targets: Vec<&str> = enum_vals
+            .iter()
+            .map(|v| v.as_str().expect("enum entries are strings"))
+            .collect();
+        assert_eq!(
+            schema_targets, ALL_TARGETS,
+            "schema targets enum must match ALL_TARGETS (order included)"
+        );
     }
 }

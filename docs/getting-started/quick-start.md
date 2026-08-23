@@ -6,8 +6,8 @@ tool. It assumes `spm` is already on your `PATH` — see
 
 ## 1. Scaffold `ai.json`
 
-Pick one or more target vendors (`claude`, `copilot`). Targets are repeatable and
-comma-separated:
+Pick one or more target vendors (`claude`, `copilot`, `gemini`). Targets are
+repeatable and comma-separated:
 
 ```bash
 spm init --target claude --target copilot
