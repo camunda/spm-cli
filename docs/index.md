@@ -4,7 +4,7 @@ layout: home
 hero:
   name: spm
   text: Skill Package Manager
-  tagline: Declare AI skills as git dependencies in ai.json and materialize them for Claude Code, GitHub Copilot CLI, and Gemini CLI — without ever committing skills to your repo.
+  tagline: Declare AI skills as git dependencies in ai.json and materialize them for Claude Code, OpenAI Codex CLI, GitHub Copilot CLI, and Gemini CLI — without ever committing skills to your repo.
   image:
     src: /logo.svg
     alt: spm logo
@@ -28,7 +28,7 @@ features:
     details: Everything spm materializes into the working tree is gitignored — no symlinks, no skills under version control. Same model as node_modules.
   - icon: 🛠️
     title: Multi-Vendor Projection
-    details: One declaration resolves once and projects independently into Claude Code, GitHub Copilot CLI, and Gemini CLI, each in the project-local location that vendor expects.
+    details: One declaration resolves once and projects independently into Claude Code, OpenAI Codex CLI, GitHub Copilot CLI, and Gemini CLI, each in the project-local location that vendor expects.
   - icon: ♻️
     title: Reproducible Installs
     details: A committed ai.lock pins every version selector to a commit SHA. Teammates run spm install on a fresh clone and get exactly the same skills.

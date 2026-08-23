@@ -47,6 +47,9 @@ full detail:
   tool-native `.gemini/skills/<name>/`, a team-shared dir it never wipes;
   spm-managed subdirs are individually gitignored so your own skills stay
   committable.
+- **Codex CLI** — spm copies the resolved skills one level deep into the
+  cross-tool `.agents/skills/<name>/` alias (the same dir Copilot and Gemini can
+  read), also shared and never wiped, with per-skill gitignore.
 
 ## Fresh clones
 

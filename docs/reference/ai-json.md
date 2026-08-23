@@ -19,8 +19,9 @@ and the skill dependencies for your project. spm validates it against an embedde
 
 ## `targets`
 
-A list of one or more vendors: `claude`, `copilot`, `gemini`. Skills resolve once
-and project into each target independently. See [Targets & Vendors](/guide/targets).
+A list of one or more vendors: `claude`, `codex`, `copilot`, `gemini`. Skills
+resolve once and project into each target independently. See
+[Targets & Vendors](/guide/targets).
 
 ## `skills`
 

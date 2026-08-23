@@ -28,7 +28,7 @@ validation in editors that support JSON Schema:
 
 ## What the schema enforces
 
-- `targets` is a list of supported vendors (`claude`, `copilot`, `gemini`).
+- `targets` is a list of supported vendors (`claude`, `codex`, `copilot`, `gemini`).
 - Each entry under `skills` requires a `git` URL and **exactly one** version
   selector (`tag`, `branch`, or `commit`) — enforced via a `oneOf` constraint.
 - `path` is an optional subdirectory selector.
