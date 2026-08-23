@@ -4,7 +4,7 @@ The full `spm` command surface. Run `spm --help` or `spm <command> --help` for
 the authoritative, version-specific usage.
 
 ```bash
-spm init [--target claude|copilot ...] [-g]        # scaffold ai.json (repeatable / comma-separated)
+spm init [--target claude|copilot|gemini ...] [-g]  # scaffold ai.json (repeatable / comma-separated)
 spm add <git> (--tag|--branch|--commit <v>) \      # add + install a skill
         [--path <subdir>] [--name <local-name>] [--all] [--force] [-g]  # --all: add every skill under --path
 spm target add [vendor ...]                        # add target vendor(s); no arg = pick interactively
@@ -27,11 +27,12 @@ every project:
 - The global **manifest + lock** live under `$SPM_HOME` (default `~/.spm/ai.json`
   / `~/.spm/ai.lock`) and reuse the same fetch cache as project installs.
 - Global skills materialize into user-global vendor locations:
-  `~/.copilot/skills/<name>/` for Copilot, and a marketplace under
+  `~/.copilot/skills/<name>/` for Copilot, `~/.gemini/skills/<name>/` for Gemini,
+  and a marketplace under
   `$SPM_HOME/claude-global/` registered in `~/.claude/settings.json` as
   `spm-global` (skills invoked as `/spm-global:<name>`) for Claude.
-- Copilot's global dir is shared with your hand-authored skills, so spm only
-  touches the entries it manages there — it never wipes the directory.
+- Copilot's and Gemini's global dirs are shared with your hand-authored skills, so
+  spm only touches the entries it manages there — it never wipes the directory.
 - `spm status` warns when a skill name is installed in **both** scopes, since the
   two collide by name at discovery time.
 

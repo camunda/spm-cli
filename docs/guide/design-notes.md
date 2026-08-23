@@ -25,8 +25,10 @@ Adding a target means implementing one `Vendor` trait in `src/vendor/`:
   gitignored project-local `.spm/claude/` directory and points to it.
 - **`copilot`** copies skills into the gitignored project-local
   `.agents/skills/spm-managed-skills/`.
+- **`gemini`** copies skills into the tool-native `.gemini/skills/`, sharing the
+  `copilot` adapter's `src/vendor/dirskills.rs` copy/remove helpers.
 
-Both keep their materialized files out of VCS via a shared gitignore helper, so
+All keep their materialized files out of VCS via a shared gitignore helper, so
 the "nothing committed" guarantee is enforced in one place rather than
 re-implemented per vendor.
 

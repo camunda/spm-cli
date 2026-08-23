@@ -1,8 +1,8 @@
 # Targets & Vendors
 
 `targets` in [`ai.json`](/reference/ai-json) lists one or more vendors. A skill
-resolves once and projects into each target independently. Two vendors are
-supported today: `claude` and `copilot`.
+resolves once and projects into each target independently. Three vendors are
+supported today: `claude`, `copilot`, and `gemini`.
 
 Add or remove targets at any time:
 
@@ -62,8 +62,35 @@ To inspect what Copilot actually loaded:
 copilot skill list
 ```
 
+## Gemini CLI
+
+spm copies the resolved skills **one directory deep** into Gemini CLI's
+tool-native skills directory:
+
+```
+.gemini/skills/<name>/SKILL.md
+```
+
+Gemini CLI auto-discovers skills there (and in the user-global
+`~/.gemini/skills/` for [global installs](/reference/cli-commands#scope-project-default-vs-global-g)). Because Gemini treats
+`.gemini/skills/` as a **team-shared, version-controlled** location, spm shares
+it with skills you author by hand:
+
+- it never wipes the directory and removes only the entries it previously
+  managed;
+- it writes skills at the documented one-level depth (no spm-owned subdir);
+- it gitignores only its own managed subdirs (`.gemini/skills/<name>/`), so your
+  own skills in the same directory stay committable.
+
+To inspect what Gemini actually loaded:
+
+```bash
+gemini /skills list
+```
+
 ## Adding a new target
 
-Adding a target means implementing one `Vendor` trait in `src/vendor/`. Both
-existing adapters keep their materialized files out of VCS via the shared
-gitignore helper. See [Design Notes](/guide/design-notes).
+Adding a target means implementing one `Vendor` trait in `src/vendor/`. The
+copy-dir adapters (`copilot`, `gemini`) share the `src/vendor/dirskills.rs`
+copy/remove helpers, and every adapter keeps its materialized files out of VCS
+via the shared gitignore helper. See [Design Notes](/guide/design-notes).

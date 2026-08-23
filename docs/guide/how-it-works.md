@@ -43,6 +43,10 @@ full detail:
 - **Copilot CLI** — spm copies the resolved skills into the project-local,
   gitignored `.agents/skills/spm-managed-skills/<name>/`, where Copilot CLI
   auto-discovers them (`.agents/skills/**/SKILL.md`).
+- **Gemini CLI** — spm copies the resolved skills one level deep into the
+  tool-native `.gemini/skills/<name>/`, a team-shared dir it never wipes;
+  spm-managed subdirs are individually gitignored so your own skills stay
+  committable.
 
 ## Fresh clones
 
