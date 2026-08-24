@@ -61,6 +61,23 @@ pub fn codex() -> SharedDirVendor {
     }
 }
 
+/// Cursor: workspace `.cursor/skills/` + user `~/.cursor/skills/`. Per the
+/// official docs Cursor auto-discovers skills one level deep from its own
+/// `.cursor/skills` dir (and the `.agents/skills` alias) in *both* scopes, and
+/// treats that dir as version-controlled/shared — the same shared-dir contract
+/// as Gemini. We target the tool-native `.cursor/skills` so a skill added for
+/// `cursor` alone lands in Cursor's own dir without colliding with the
+/// `.agents/skills` alias other targets use.
+pub fn cursor() -> SharedDirVendor {
+    SharedDirVendor {
+        name: "cursor",
+        project_segs: &[".cursor", "skills"],
+        global_segs: &[".cursor", "skills"],
+        gitignore_comment:
+            "# spm-managed Cursor skills — materialized locally by `spm`, not committed.",
+    }
+}
+
 impl SharedDirVendor {
     /// Absolute path of the managed skills directory for a scope.
     fn skills_dir(&self, scope: &Scope) -> Result<PathBuf> {
@@ -157,6 +174,8 @@ mod tests {
         assert_eq!(gemini().gitignore_entry("greet"), ".gemini/skills/greet/");
         assert_eq!(codex().name(), "codex");
         assert_eq!(codex().gitignore_entry("greet"), ".agents/skills/greet/");
+        assert_eq!(cursor().name(), "cursor");
+        assert_eq!(cursor().gitignore_entry("greet"), ".cursor/skills/greet/");
     }
 
     /// Project materialize drops skills one level deep under the tool's skills

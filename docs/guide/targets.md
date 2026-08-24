@@ -1,8 +1,8 @@
 # Targets & Vendors
 
 `targets` in [`ai.json`](/reference/ai-json) lists one or more vendors. A skill
-resolves once and projects into each target independently. Four vendors are
-supported today: `claude`, `codex`, `copilot`, and `gemini`.
+resolves once and projects into each target independently. Five vendors are
+supported today: `claude`, `codex`, `copilot`, `cursor`, and `gemini`.
 
 Add or remove targets at any time:
 
@@ -119,10 +119,32 @@ To inspect what Codex actually loaded:
 codex   # then: /skills
 ```
 
+## Cursor
+
+spm copies the resolved skills **one directory deep** into Cursor's tool-native
+skills directory:
+
+```
+.cursor/skills/<name>/SKILL.md          # workspace (project) skills
+~/.cursor/skills/<name>/SKILL.md        # user (global) skills
+```
+
+Cursor auto-discovers skills there in both scopes (it also reads the
+`.agents/skills` alias). Because Cursor treats `.cursor/skills/` as a
+**version-controlled** location, spm shares it with skills you author by hand:
+
+- it never wipes the directory and removes only the entries it previously
+  managed;
+- it writes skills at the documented one-level depth (no spm-owned subdir);
+- it gitignores only its own managed subdirs (`.cursor/skills/<name>/`), so your
+  own skills in the same directory stay committable.
+
+In Cursor, type `/` in Agent chat to see the discovered skills.
+
 ## Adding a new target
 
 Adding a target means implementing one `Vendor` trait in `src/vendor/`. Tools
 that auto-discover skills one directory deep under a shared root (`gemini`,
-`codex`) are expressed as config on the generic `src/vendor/shareddir.rs`
+`codex`, `cursor`) are expressed as config on the generic `src/vendor/shareddir.rs`
 adapter; every adapter keeps its materialized files out of VCS via the shared
 gitignore helper. See [Design Notes](/guide/design-notes).
