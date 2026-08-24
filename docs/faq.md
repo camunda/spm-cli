@@ -8,9 +8,10 @@ git repositories and materializes them where each vendor discovers them.
 
 ## Which AI tools does spm support?
 
-Five targets today: **Claude Code** (`claude`), **OpenAI Codex CLI** (`codex`),
-**GitHub Copilot CLI** (`copilot`), **Cursor** (`cursor`), and **Gemini CLI**
-(`gemini`). One `ai.json` declaration resolves once and projects into each. See
+Eight targets today: **Amp** (`amp`), **Claude Code** (`claude`), **Cline**
+(`cline`), **OpenAI Codex CLI** (`codex`), **GitHub Copilot CLI** (`copilot`),
+**Cursor** (`cursor`), **Gemini CLI** (`gemini`), and **Windsurf** (`windsurf`).
+One `ai.json` declaration resolves once and projects into each. See
 [Targets & Vendors](/guide/targets).
 
 ## Why aren't the skills committed to my repo?

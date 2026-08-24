@@ -1,7 +1,7 @@
 # spm — skill package manager
 
 Declare AI skills as git dependencies in `ai.json`, and `spm` wires them into your
-AI tool (Claude Code, OpenAI Codex CLI, GitHub Copilot CLI, Cursor and Gemini CLI) **without ever committing
+AI tool (Amp, Claude Code, Cline, OpenAI Codex CLI, GitHub Copilot CLI, Cursor, Gemini CLI and Windsurf) **without ever committing
 skills to your repo**. Anything spm materializes into the working tree is
 gitignored — no symlinks, no skills under version control.
 
@@ -26,6 +26,9 @@ ai.json ──resolve──▶ ai.lock ──fetch──▶ ~/.spm/store/<repo>@
   - **Gemini CLI** — spm copies the resolved skills one directory deep into the tool-native `.gemini/skills/<name>/`, where Gemini CLI auto-discovers them. Because Gemini treats that dir as a team-shared, version-controlled location, spm shares it with your own hand-authored skills: it never wipes the dir, touches only the entries it manages, and gitignores just those spm-managed subdirs (`.gemini/skills/<name>/`) so they stay local while your own skills remain committable.
   - **Codex CLI** — spm copies the resolved skills one directory deep into the cross-tool `.agents/skills/<name>/` alias (the same standard location Copilot and Gemini can read), where Codex CLI auto-discovers them. Same shared-dir handling as Gemini: spm never wipes the dir, touches only its managed entries, and gitignores just those spm-managed subdirs (`.agents/skills/<name>/`).
   - **Cursor** — spm copies the resolved skills one directory deep into the tool-native `.cursor/skills/<name>/`, where Cursor auto-discovers them. Same shared-dir handling as Gemini: Cursor treats that dir as version-controlled, so spm never wipes it, touches only the entries it manages, and gitignores just those spm-managed subdirs (`.cursor/skills/<name>/`).
+  - **Cline** — spm copies the resolved skills one directory deep into the tool-native `.cline/skills/<name>/`, where Cline auto-discovers them. Same shared-dir handling as Gemini (never wipes the dir, surgical per-skill add/remove, per-skill gitignore).
+  - **Windsurf** — spm copies the resolved skills one directory deep into the tool-native `.windsurf/skills/<name>/`, where Windsurf's Cascade agent auto-discovers them. Same shared-dir handling as Gemini. (Note: Windsurf's *global* skills live under `~/.codeium/windsurf/skills/`, not `~/.windsurf/`.)
+  - **Amp** — spm copies the resolved skills one directory deep into the cross-tool `.agents/skills/<name>/` alias (Amp's documented default, the same dir Codex reads), where Amp auto-discovers them. Same shared-dir handling as Gemini.
 
 On a fresh clone, teammates run `spm install` — it repopulates their own fetch cache and re-materializes the project-local skills from `ai.lock`. Same model as `node_modules`.
 
@@ -42,7 +45,7 @@ On a fresh clone, teammates run `spm install` — it repopulates their own fetch
 }
 ```
 
-`targets` lists one or more vendors (`claude`, `codex`, `copilot`, `cursor`, `gemini`) — skills
+`targets` lists one or more vendors (`amp`, `claude`, `cline`, `codex`, `copilot`, `cursor`, `gemini`, `windsurf`) — skills
 resolve once and project into each independently.
 
 ### Schema & validation
@@ -174,7 +177,7 @@ make install PREFIX=~/.local  # or a custom prefix
 ## Commands
 
 ```bash
-spm init [--target claude|codex|copilot|cursor|gemini ...] [-g]  # scaffold ai.json (repeatable / comma-separated)
+spm init [--target amp|claude|cline|codex|copilot|cursor|gemini|windsurf ...] [-g]  # scaffold ai.json (repeatable / comma-separated)
 spm add <git> (--tag|--branch|--commit <v>) \      # add + install a skill
         [--path <subdir>] [--name <local-name>] [--all] [-g]  # --all: add every skill under --path
 spm target add [vendor ...]                        # add target vendor(s); no arg = pick interactively
@@ -216,6 +219,14 @@ spm clean  -g                                      # remove global vendor config
     directory.
   - **Cursor** → `~/.cursor/skills/<name>/` (its user-skills dir). Also *shared*,
     so spm touches only its managed entries and never wipes the directory.
+  - **Cline** → `~/.cline/skills/<name>/` (its user-skills dir). Also *shared*, so
+    spm touches only its managed entries and never wipes the directory.
+  - **Windsurf** → `~/.codeium/windsurf/skills/<name>/` (its user-skills dir —
+    note the `~/.codeium/windsurf` path, not `~/.windsurf`). Also *shared*, so spm
+    touches only its managed entries and never wipes the directory.
+  - **Amp** → `~/.config/agents/skills/<name>/` (its user-skills dir). Also
+    *shared*, so spm touches only its managed entries and never wipes the
+    directory.
   - **Claude** → a self-contained marketplace under `$SPM_HOME/claude-global/`,
     registered in `~/.claude/settings.json` under the marketplace name
     `spm-global` (skills invoked as `/spm-global:<name>`). A distinct name keeps
@@ -277,7 +288,7 @@ To see what each harness actually loaded: `claude plugin list` /
 
 - **Cross-OS**: shells out to the system `git` (no libgit2 build deps); no symlinks; all paths via `std::path`. Runs on Linux, macOS, Windows.
 - **`SPM_HOME`** overrides the store root (default `~/.spm`, holding only the fetch cache) — used by tests. Vendor output is always project-local and is not affected by `SPM_HOME`.
-- **Vendor adapters**: adding a target means implementing one `Vendor` trait (`src/vendor/`). `claude` assembles a plugin-marketplace layout (`marketplace.json` → `plugin.json` → `skills/<name>/SKILL.md`) into the gitignored project-local `.spm/claude/` and points to it; `copilot` copies skills into the gitignored project-local `.agents/skills/spm-managed-skills/`; `gemini`, `codex` and `cursor` copy skills one level deep into a shared, team-committable skills dir (`.gemini/skills/`, the cross-tool `.agents/skills/` alias, and `.cursor/skills/` respectively) via the generic `src/vendor/shareddir.rs` adapter. All share the `src/vendor/dirskills.rs` copy/remove helpers and keep their materialized files out of VCS via the shared `src/gitignore.rs` helper.
+- **Vendor adapters**: adding a target means implementing one `Vendor` trait (`src/vendor/`). `claude` assembles a plugin-marketplace layout (`marketplace.json` → `plugin.json` → `skills/<name>/SKILL.md`) into the gitignored project-local `.spm/claude/` and points to it; `copilot` copies skills into the gitignored project-local `.agents/skills/spm-managed-skills/`; the remaining targets (`gemini`, `codex`, `cursor`, `cline`, `windsurf`, `amp`) copy skills one level deep into a shared, team-committable skills dir via the generic `src/vendor/shareddir.rs` adapter — each is just a config row naming its project/global dirs (which may differ, e.g. Windsurf's `~/.codeium/windsurf/skills` and Amp's `~/.config/agents/skills`). All share the `src/vendor/dirskills.rs` copy/remove helpers and keep their materialized files out of VCS via the shared `src/gitignore.rs` helper.
 
 ## Development
 

@@ -25,11 +25,15 @@ Adding a target means implementing one `Vendor` trait in `src/vendor/`:
   gitignored project-local `.spm/claude/` directory and points to it.
 - **`copilot`** copies skills into the gitignored project-local
   `.agents/skills/spm-managed-skills/`.
-- **`gemini`**, **`codex`** and **`cursor`** copy skills one level deep into a
-  shared, team-committable skills dir (`.gemini/skills/`, the cross-tool
-  `.agents/skills/` alias, and `.cursor/skills/` respectively). All three are
-  config on the generic `src/vendor/shareddir.rs` adapter and reuse the
-  `src/vendor/dirskills.rs` copy/remove helpers.
+- **`gemini`**, **`codex`**, **`cursor`**, **`cline`**, **`windsurf`** and
+  **`amp`** copy skills one level deep into a shared, team-committable skills dir
+  (`.gemini/skills/`, the cross-tool `.agents/skills/` alias, `.cursor/skills/`,
+  `.cline/skills/`, `.windsurf/skills/`, and `.agents/skills/` respectively). All
+  are config rows on the generic `src/vendor/shareddir.rs` adapter and reuse the
+  `src/vendor/dirskills.rs` copy/remove helpers. The adapter keeps a separate
+  project and global directory per target, so tools whose user-scope dir isn't a
+  simple `~/.<tool>` mirror (Windsurf's `~/.codeium/windsurf/skills`, Amp's
+  `~/.config/agents/skills`) are expressed without a special case.
 
 All keep their materialized files out of VCS via a shared gitignore helper, so
 the "nothing committed" guarantee is enforced in one place rather than

@@ -78,6 +78,50 @@ pub fn cursor() -> SharedDirVendor {
     }
 }
 
+/// Cline: workspace `.cline/skills/` + user `~/.cline/skills/` (verified against
+/// docs.cline.bot). Skills live one level deep; the workspace dir is committed
+/// with the repo, so spm shares it surgically like the other shared-dir tools.
+pub fn cline() -> SharedDirVendor {
+    SharedDirVendor {
+        name: "cline",
+        project_segs: &[".cline", "skills"],
+        global_segs: &[".cline", "skills"],
+        gitignore_comment:
+            "# spm-managed Cline skills — materialized locally by `spm`, not committed.",
+    }
+}
+
+/// Windsurf (Cascade): workspace `.windsurf/skills/` + user
+/// `~/.codeium/windsurf/skills/` (verified against docs.windsurf.com). Note the
+/// **asymmetric** dirs — the global scope lives under `~/.codeium/windsurf`, not
+/// `~/.windsurf` — which is exactly why [`SharedDirVendor`] keeps `project_segs`
+/// and `global_segs` separate. The workspace dir is committed with the repo, so
+/// spm shares it surgically.
+pub fn windsurf() -> SharedDirVendor {
+    SharedDirVendor {
+        name: "windsurf",
+        project_segs: &[".windsurf", "skills"],
+        global_segs: &[".codeium", "windsurf", "skills"],
+        gitignore_comment:
+            "# spm-managed Windsurf skills — materialized locally by `spm`, not committed.",
+    }
+}
+
+/// Amp: workspace `.agents/skills/` (its documented default) + user
+/// `~/.config/agents/skills/` (verified against ampcode.com). Amp installs into
+/// the cross-tool `.agents/skills` alias in the workspace — the same dir Codex
+/// reads — so targeting both `amp` and `codex` writes to one shared workspace
+/// dir; the user-scope dirs differ. Amp has no private `.amp/skills` dir.
+pub fn amp() -> SharedDirVendor {
+    SharedDirVendor {
+        name: "amp",
+        project_segs: &[".agents", "skills"],
+        global_segs: &[".config", "agents", "skills"],
+        gitignore_comment:
+            "# spm-managed Amp skills — materialized locally by `spm`, not committed.",
+    }
+}
+
 impl SharedDirVendor {
     /// Absolute path of the managed skills directory for a scope.
     fn skills_dir(&self, scope: &Scope) -> Result<PathBuf> {
@@ -176,6 +220,34 @@ mod tests {
         assert_eq!(codex().gitignore_entry("greet"), ".agents/skills/greet/");
         assert_eq!(cursor().name(), "cursor");
         assert_eq!(cursor().gitignore_entry("greet"), ".cursor/skills/greet/");
+        assert_eq!(cline().name(), "cline");
+        assert_eq!(cline().gitignore_entry("greet"), ".cline/skills/greet/");
+        assert_eq!(windsurf().name(), "windsurf");
+        assert_eq!(
+            windsurf().gitignore_entry("greet"),
+            ".windsurf/skills/greet/"
+        );
+        assert_eq!(amp().name(), "amp");
+        assert_eq!(amp().gitignore_entry("greet"), ".agents/skills/greet/");
+    }
+
+    /// Guards the *asymmetric* scopes: Windsurf and Amp materialize into
+    /// different dirs per scope (global lives under `~/.codeium/windsurf` and
+    /// `~/.config/agents` respectively, not a `~/.<tool>` mirror of the project
+    /// dir), so `skills_dir` must honor `global_segs` independently.
+    #[test]
+    fn asymmetric_presets_resolve_distinct_global_dirs() {
+        let home = std::path::Path::new("/home/u");
+        let ws = windsurf();
+        assert_eq!(
+            join_all(home, ws.global_segs),
+            home.join(".codeium").join("windsurf").join("skills")
+        );
+        let a = amp();
+        assert_eq!(
+            join_all(home, a.global_segs),
+            home.join(".config").join("agents").join("skills")
+        );
     }
 
     /// Project materialize drops skills one level deep under the tool's skills

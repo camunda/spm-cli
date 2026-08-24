@@ -16,7 +16,7 @@
       "description": "Vendors the skills are materialized for.",
       "minItems": 1,
       "uniqueItems": true,
-      "items": { "enum": ["claude", "codex", "copilot", "cursor", "gemini"] }
+      "items": { "enum": ["amp", "claude", "cline", "codex", "copilot", "cursor", "gemini", "windsurf"] }
     },
     "skills": {
       "type": "object",

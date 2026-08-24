@@ -116,15 +116,20 @@ pub trait Vendor {
 /// "supported targets" error text — so those never drift apart. Kept in sync with
 /// the `targets` enum in `schema/ai.schema.json` by
 /// [`all_targets_match_schema_enum`](tests::all_targets_match_schema_enum).
-pub const ALL_TARGETS: &[&str] = &["claude", "codex", "copilot", "cursor", "gemini"];
+pub const ALL_TARGETS: &[&str] = &[
+    "amp", "claude", "cline", "codex", "copilot", "cursor", "gemini", "windsurf",
+];
 
 pub fn for_target(target: &str) -> Result<Box<dyn Vendor>> {
     match target {
+        "amp" => Ok(Box::new(shareddir::amp())),
         "claude" => Ok(Box::new(claude::Claude)),
+        "cline" => Ok(Box::new(shareddir::cline())),
         "codex" => Ok(Box::new(shareddir::codex())),
         "copilot" => Ok(Box::new(copilot::Copilot)),
         "cursor" => Ok(Box::new(shareddir::cursor())),
         "gemini" => Ok(Box::new(shareddir::gemini())),
+        "windsurf" => Ok(Box::new(shareddir::windsurf())),
         other => bail!(
             "unknown target `{other}` (supported: {})",
             ALL_TARGETS.join(", ")
