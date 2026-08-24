@@ -1784,6 +1784,58 @@ fn global_copilot_preserves_user_authored_skills_on_add_and_remove() {
 
 #[cfg(unix)]
 #[test]
+fn global_cursor_materializes_into_home_and_preserves_user_skills() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "-g", "--target", "cursor"]);
+
+    // The global manifest lives under SPM_HOME, not the project.
+    assert!(
+        sb.spm_home.join("ai.json").exists(),
+        "global ai.json missing"
+    );
+
+    // A skill the user authored by hand in the shared global dir.
+    let cursor_global = sb.home.join(".cursor/skills");
+    let mine = cursor_global.join("mine");
+    std::fs::create_dir_all(&mine).unwrap();
+    std::fs::write(mine.join("SKILL.md"), "---\nname: mine\n---\n").unwrap();
+
+    sb.ok(&[
+        "add",
+        "-g",
+        &sb.skill_url(),
+        "--tag",
+        "v0.1.0",
+        "--name",
+        "greet",
+    ]);
+
+    // Skill copied one level deep into ~/.cursor/skills/greet/ (Cursor's global dir).
+    assert!(cursor_global.join("greet/SKILL.md").exists());
+    // No project-local materialization happened.
+    assert!(
+        !sb.project.join(".cursor").exists(),
+        "global add must not materialize into the project"
+    );
+    // The user's own skill in the shared dir survives.
+    assert!(
+        mine.join("SKILL.md").exists(),
+        "user's own skill must survive a global add"
+    );
+
+    sb.ok(&["remove", "-g", "greet"]);
+    assert!(
+        !cursor_global.join("greet").exists(),
+        "removed skill should be gone"
+    );
+    assert!(
+        mine.join("SKILL.md").exists(),
+        "user's own skill must survive a global remove"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn global_claude_registers_spm_global_marketplace_in_user_settings() {
     let sb = Sandbox::new();
     sb.ok(&["init", "-g", "--target", "claude"]);
