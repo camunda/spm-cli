@@ -25,11 +25,11 @@ Adding a target means implementing one `Vendor` trait in `src/vendor/`:
   gitignored project-local `.spm/claude/` directory and points to it.
 - **`copilot`** copies skills into the gitignored project-local
   `.agents/skills/spm-managed-skills/`.
-- **`gemini`** and **`codex`** copy skills one level deep into a shared,
-  team-committable skills dir (`.gemini/skills/` and the cross-tool
-  `.agents/skills/` alias respectively). Both are config on the generic
-  `src/vendor/shareddir.rs` adapter and reuse the `src/vendor/dirskills.rs`
-  copy/remove helpers.
+- **`gemini`**, **`codex`** and **`cursor`** copy skills one level deep into a
+  shared, team-committable skills dir (`.gemini/skills/`, the cross-tool
+  `.agents/skills/` alias, and `.cursor/skills/` respectively). All three are
+  config on the generic `src/vendor/shareddir.rs` adapter and reuse the
+  `src/vendor/dirskills.rs` copy/remove helpers.
 
 All keep their materialized files out of VCS via a shared gitignore helper, so
 the "nothing committed" guarantee is enforced in one place rather than

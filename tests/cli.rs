@@ -354,6 +354,35 @@ fn codex_add_materializes_agents_skills() {
 }
 
 #[test]
+fn cursor_add_materializes_cursor_skills() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "cursor"]);
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--name",
+        "greet",
+    ]);
+
+    // Cursor auto-discovers skills one level deep under its native .cursor/skills dir.
+    let skill_md = sb.project.join(".cursor/skills/greet/SKILL.md");
+    assert!(skill_md.exists(), "missing {}", skill_md.display());
+    // The shared skills dir is not nested under an spm-owned subdir.
+    assert!(!sb
+        .project
+        .join(".cursor/skills/spm-managed-skills")
+        .exists());
+
+    // Only the spm-managed skill subdir is gitignored (not the whole shared dir,
+    // which may hold the user's own committed skills), with a comment.
+    let gitignore = sb.read(".gitignore");
+    assert!(gitignore.contains(".cursor/skills/greet/"), "{gitignore}");
+    assert!(gitignore.contains("spm-managed Cursor"), "{gitignore}");
+}
+
+#[test]
 fn add_without_name_keys_manifest_by_path_basename() {
     let sb = Sandbox::new();
     sb.add_skill_pack();
@@ -1309,7 +1338,7 @@ fn target_add_interactive_picks_unconfigured_vendor_from_list() {
     let sb = Sandbox::new();
     // Configure every vendor except copilot so it is the sole unconfigured one
     // (option 1), independent of the global target ordering.
-    sb.ok(&["init", "--target", "claude,codex,gemini"]);
+    sb.ok(&["init", "--target", "claude,codex,cursor,gemini"]);
 
     // No vendor arg → interactive numbered picker over the unconfigured vendors
     // (here just `copilot`, option 1). Piped stdin drives it.
@@ -1333,7 +1362,7 @@ fn target_add_interactive_reports_when_all_configured() {
     let sb = Sandbox::new();
     // Init with every supported vendor so the "nothing to pick" path is exercised
     // regardless of how many targets exist.
-    sb.ok(&["init", "--target", "claude,codex,copilot,gemini"]);
+    sb.ok(&["init", "--target", "claude,codex,copilot,cursor,gemini"]);
 
     // Every supported vendor is already configured: nothing to pick, and the
     // command short-circuits with a message (no stdin consumed).
@@ -1504,7 +1533,7 @@ fn target_add_interactive_rejects_empty_input() {
 fn target_add_interactive_accepts_all() {
     let sb = Sandbox::new();
     sb.ok(&["init", "--target", "claude"]);
-    // `all` picks every not-yet-configured vendor (here codex, copilot, gemini).
+    // `all` picks every not-yet-configured vendor (here codex, copilot, cursor, gemini).
     let out = sb.spm_stdin(&["target", "add"], "all\n");
     assert!(
         out.status.success(),
@@ -1513,7 +1542,7 @@ fn target_add_interactive_accepts_all() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("added target(s):"), "{stdout}");
-    for vendor in ["codex", "copilot", "gemini"] {
+    for vendor in ["codex", "copilot", "cursor", "gemini"] {
         assert!(
             stdout.contains(vendor),
             "picker `all` must add {vendor}: {stdout}"

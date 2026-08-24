@@ -4,7 +4,7 @@ The full `spm` command surface. Run `spm --help` or `spm <command> --help` for
 the authoritative, version-specific usage.
 
 ```bash
-spm init [--target claude|codex|copilot|gemini ...] [-g]  # scaffold ai.json (repeatable / comma-separated)
+spm init [--target claude|codex|copilot|cursor|gemini ...] [-g]  # scaffold ai.json (repeatable / comma-separated)
 spm add <git> (--tag|--branch|--commit <v>) \      # add + install a skill
         [--path <subdir>] [--name <local-name>] [--all] [--force] [-g]  # --all: add every skill under --path
 spm target add [vendor ...]                        # add target vendor(s); no arg = pick interactively
@@ -28,12 +28,13 @@ every project:
   / `~/.spm/ai.lock`) and reuse the same fetch cache as project installs.
 - Global skills materialize into user-global vendor locations:
   `~/.copilot/skills/<name>/` for Copilot, `~/.gemini/skills/<name>/` for Gemini,
-  `~/.agents/skills/<name>/` for Codex, and a marketplace under
-  `$SPM_HOME/claude-global/` registered in `~/.claude/settings.json` as
-  `spm-global` (skills invoked as `/spm-global:<name>`) for Claude.
-- Copilot's, Gemini's, and Codex's global dirs are shared with your hand-authored
-  skills, so spm only touches the entries it manages there — it never wipes the
-  directory.
+  `~/.agents/skills/<name>/` for Codex, `~/.cursor/skills/<name>/` for Cursor, and
+  a marketplace under `$SPM_HOME/claude-global/` registered in
+  `~/.claude/settings.json` as `spm-global` (skills invoked as
+  `/spm-global:<name>`) for Claude.
+- Copilot's, Gemini's, Codex's, and Cursor's global dirs are shared with your
+  hand-authored skills, so spm only touches the entries it manages there — it
+  never wipes the directory.
 - `spm status` warns when a skill name is installed in **both** scopes, since the
   two collide by name at discovery time.
 

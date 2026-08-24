@@ -50,6 +50,9 @@ full detail:
 - **Codex CLI** — spm copies the resolved skills one level deep into the
   cross-tool `.agents/skills/<name>/` alias (the same dir Copilot and Gemini can
   read), also shared and never wiped, with per-skill gitignore.
+- **Cursor** — spm copies the resolved skills one level deep into the tool-native
+  `.cursor/skills/<name>/`, a version-controlled dir it never wipes; spm-managed
+  subdirs are individually gitignored so your own skills stay committable.
 
 ## Fresh clones
 
