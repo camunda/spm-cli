@@ -53,6 +53,15 @@ full detail:
 - **Cursor** — spm copies the resolved skills one level deep into the tool-native
   `.cursor/skills/<name>/`, a version-controlled dir it never wipes; spm-managed
   subdirs are individually gitignored so your own skills stay committable.
+- **Cline** — spm copies the resolved skills one level deep into the tool-native
+  `.cline/skills/<name>/`, also shared and never wiped, with per-skill gitignore.
+- **Windsurf** — spm copies the resolved skills one level deep into the
+  tool-native `.windsurf/skills/<name>/` (its Cascade agent auto-discovers them),
+  also shared and never wiped, with per-skill gitignore. Its user-global dir is
+  `~/.codeium/windsurf/skills/`.
+- **Amp** — spm copies the resolved skills one level deep into the cross-tool
+  `.agents/skills/<name>/` alias (Amp's documented default), also shared and
+  never wiped, with per-skill gitignore.
 
 ## Fresh clones
 

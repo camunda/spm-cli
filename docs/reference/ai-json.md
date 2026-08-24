@@ -19,7 +19,7 @@ and the skill dependencies for your project. spm validates it against an embedde
 
 ## `targets`
 
-A list of one or more vendors: `claude`, `codex`, `copilot`, `cursor`, `gemini`. Skills
+A list of one or more vendors: `amp`, `claude`, `cline`, `codex`, `copilot`, `cursor`, `gemini`, `windsurf`. Skills
 resolve once and project into each target independently. See
 [Targets & Vendors](/guide/targets).
 

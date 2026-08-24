@@ -2,9 +2,10 @@
 
 ## The problem
 
-AI coding tools — Claude Code, OpenAI Codex CLI, GitHub Copilot CLI, Cursor,
-Gemini CLI — load "skills" from specific directories in your project. If you want
-a team to share a set of skills, you are usually left with bad options:
+AI coding tools — Amp, Claude Code, Cline, OpenAI Codex CLI, GitHub Copilot CLI,
+Cursor, Gemini CLI, Windsurf — load "skills" from specific directories in your
+project. If you want a team to share a set of skills, you are usually left with
+bad options:
 
 - **Commit the skills into every repo.** They drift, bloat your history, and
   couple your codebase to third-party skill content.

@@ -20,7 +20,7 @@ enum Command {
     /// Create a new ai.json in the current directory (or, with --global, under
     /// $SPM_HOME to manage skills shared across every project).
     Init {
-        /// Target vendor(s): claude, codex, copilot, cursor and/or gemini. Repeatable or comma-separated.
+        /// Target vendor(s): amp, claude, cline, codex, copilot, cursor, gemini and/or windsurf. Repeatable or comma-separated.
         #[arg(long = "target", value_delimiter = ',', default_value = "claude")]
         targets: Vec<String>,
         #[command(flatten)]
@@ -104,8 +104,8 @@ enum TargetCommand {
     /// them). With no vendor given, pick interactively from the vendors not yet
     /// configured.
     Add {
-        /// Vendor(s) to add: claude, codex, copilot, cursor and/or gemini. Repeatable or
-        /// comma-separated. Omit to choose interactively.
+        /// Vendor(s) to add: amp, claude, cline, codex, copilot, cursor, gemini and/or
+        /// windsurf. Repeatable or comma-separated. Omit to choose interactively.
         #[arg(value_delimiter = ',')]
         vendors: Vec<String>,
     },

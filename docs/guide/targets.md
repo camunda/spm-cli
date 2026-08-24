@@ -1,8 +1,9 @@
 # Targets & Vendors
 
 `targets` in [`ai.json`](/reference/ai-json) lists one or more vendors. A skill
-resolves once and projects into each target independently. Five vendors are
-supported today: `claude`, `codex`, `copilot`, `cursor`, and `gemini`.
+resolves once and projects into each target independently. Eight vendors are
+supported today: `amp`, `claude`, `cline`, `codex`, `copilot`, `cursor`,
+`gemini`, and `windsurf`.
 
 Add or remove targets at any time:
 
@@ -141,10 +142,62 @@ Cursor auto-discovers skills there in both scopes (it also reads the
 
 In Cursor, type `/` in Agent chat to see the discovered skills.
 
+## Cline
+
+spm copies the resolved skills **one directory deep** into Cline's tool-native
+skills directory:
+
+```
+.cline/skills/<name>/SKILL.md           # workspace (project) skills
+~/.cline/skills/<name>/SKILL.md         # user (global) skills
+```
+
+Cline auto-discovers skills there in both scopes (a global skill takes precedence
+over a workspace skill of the same name). The workspace dir is committed with the
+repo, so spm shares it surgically — never wiping it, removing only the entries it
+manages, and gitignoring only its own managed subdirs (`.cline/skills/<name>/`).
+
+## Windsurf
+
+spm copies the resolved skills **one directory deep** into Windsurf's tool-native
+skills directory, which its **Cascade** agent auto-discovers:
+
+```
+.windsurf/skills/<name>/SKILL.md                 # workspace (project) skills
+~/.codeium/windsurf/skills/<name>/SKILL.md       # user (global) skills
+```
+
+::: warning Asymmetric global dir
+Windsurf's **global** skills live under `~/.codeium/windsurf/skills/` — *not*
+`~/.windsurf/skills/`. spm's shared-dir adapter tracks the project and global
+directories separately, so this is handled without a special case.
+:::
+
+The workspace dir is committed with the repo, so spm shares it surgically: it
+never wipes the directory, removes only the entries it manages, and gitignores
+only its own managed subdirs (`.windsurf/skills/<name>/`).
+
+## Amp
+
+Amp installs skills into the **cross-tool `.agents/skills` alias** by default —
+the same standard location Codex reads. spm copies the resolved skills one
+directory deep into:
+
+```
+.agents/skills/<name>/SKILL.md          # workspace (project) skills
+~/.config/agents/skills/<name>/SKILL.md # user (global) skills
+```
+
+Same shared-dir handling as the other tools (never wiped, surgical add/remove,
+per-skill gitignore). Because Amp's workspace dir is the shared `.agents/skills`
+alias, targeting both `amp` and `codex` writes to the same workspace directory.
+
 ## Adding a new target
 
 Adding a target means implementing one `Vendor` trait in `src/vendor/`. Tools
 that auto-discover skills one directory deep under a shared root (`gemini`,
-`codex`, `cursor`) are expressed as config on the generic `src/vendor/shareddir.rs`
-adapter; every adapter keeps its materialized files out of VCS via the shared
-gitignore helper. See [Design Notes](/guide/design-notes).
+`codex`, `cursor`, `cline`, `windsurf`, `amp`) are expressed as config on the
+generic `src/vendor/shareddir.rs` adapter — each is just a row naming its project
+and global directories (which may differ, as with Windsurf and Amp). Every
+adapter keeps its materialized files out of VCS via the shared gitignore helper.
+See [Design Notes](/guide/design-notes).

@@ -383,6 +383,73 @@ fn cursor_add_materializes_cursor_skills() {
 }
 
 #[test]
+fn cline_add_materializes_cline_skills() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "cline"]);
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--name",
+        "greet",
+    ]);
+
+    // Cline auto-discovers skills one level deep under its native .cline/skills dir.
+    let skill_md = sb.project.join(".cline/skills/greet/SKILL.md");
+    assert!(skill_md.exists(), "missing {}", skill_md.display());
+    assert!(!sb.project.join(".cline/skills/spm-managed-skills").exists());
+
+    let gitignore = sb.read(".gitignore");
+    assert!(gitignore.contains(".cline/skills/greet/"), "{gitignore}");
+    assert!(gitignore.contains("spm-managed Cline"), "{gitignore}");
+}
+
+#[test]
+fn windsurf_add_materializes_windsurf_skills() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "windsurf"]);
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--name",
+        "greet",
+    ]);
+
+    // Windsurf (Cascade) auto-discovers skills one level deep under .windsurf/skills.
+    let skill_md = sb.project.join(".windsurf/skills/greet/SKILL.md");
+    assert!(skill_md.exists(), "missing {}", skill_md.display());
+
+    let gitignore = sb.read(".gitignore");
+    assert!(gitignore.contains(".windsurf/skills/greet/"), "{gitignore}");
+    assert!(gitignore.contains("spm-managed Windsurf"), "{gitignore}");
+}
+
+#[test]
+fn amp_add_materializes_agents_skills() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "amp"]);
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--name",
+        "greet",
+    ]);
+
+    // Amp installs into the cross-tool `.agents/skills` alias one level deep.
+    let skill_md = sb.project.join(".agents/skills/greet/SKILL.md");
+    assert!(skill_md.exists(), "missing {}", skill_md.display());
+
+    let gitignore = sb.read(".gitignore");
+    assert!(gitignore.contains(".agents/skills/greet/"), "{gitignore}");
+    assert!(gitignore.contains("spm-managed Amp"), "{gitignore}");
+}
+
+#[test]
 fn add_without_name_keys_manifest_by_path_basename() {
     let sb = Sandbox::new();
     sb.add_skill_pack();
@@ -1338,7 +1405,11 @@ fn target_add_interactive_picks_unconfigured_vendor_from_list() {
     let sb = Sandbox::new();
     // Configure every vendor except copilot so it is the sole unconfigured one
     // (option 1), independent of the global target ordering.
-    sb.ok(&["init", "--target", "claude,codex,cursor,gemini"]);
+    sb.ok(&[
+        "init",
+        "--target",
+        "amp,claude,cline,codex,cursor,gemini,windsurf",
+    ]);
 
     // No vendor arg → interactive numbered picker over the unconfigured vendors
     // (here just `copilot`, option 1). Piped stdin drives it.
@@ -1362,7 +1433,11 @@ fn target_add_interactive_reports_when_all_configured() {
     let sb = Sandbox::new();
     // Init with every supported vendor so the "nothing to pick" path is exercised
     // regardless of how many targets exist.
-    sb.ok(&["init", "--target", "claude,codex,copilot,cursor,gemini"]);
+    sb.ok(&[
+        "init",
+        "--target",
+        "amp,claude,cline,codex,copilot,cursor,gemini,windsurf",
+    ]);
 
     // Every supported vendor is already configured: nothing to pick, and the
     // command short-circuits with a message (no stdin consumed).
@@ -1533,7 +1608,8 @@ fn target_add_interactive_rejects_empty_input() {
 fn target_add_interactive_accepts_all() {
     let sb = Sandbox::new();
     sb.ok(&["init", "--target", "claude"]);
-    // `all` picks every not-yet-configured vendor (here codex, copilot, cursor, gemini).
+    // `all` picks every not-yet-configured vendor (here amp, cline, codex,
+    // copilot, cursor, gemini, windsurf).
     let out = sb.spm_stdin(&["target", "add"], "all\n");
     assert!(
         out.status.success(),
@@ -1542,7 +1618,9 @@ fn target_add_interactive_accepts_all() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("added target(s):"), "{stdout}");
-    for vendor in ["codex", "copilot", "cursor", "gemini"] {
+    for vendor in [
+        "amp", "cline", "codex", "copilot", "cursor", "gemini", "windsurf",
+    ] {
         assert!(
             stdout.contains(vendor),
             "picker `all` must add {vendor}: {stdout}"
@@ -1831,6 +1909,48 @@ fn global_cursor_materializes_into_home_and_preserves_user_skills() {
     assert!(
         mine.join("SKILL.md").exists(),
         "user's own skill must survive a global remove"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn global_windsurf_materializes_into_asymmetric_codeium_dir() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "-g", "--target", "windsurf"]);
+
+    sb.ok(&[
+        "add",
+        "-g",
+        &sb.skill_url(),
+        "--tag",
+        "v0.1.0",
+        "--name",
+        "greet",
+    ]);
+
+    // Windsurf's *global* dir is ~/.codeium/windsurf/skills (NOT ~/.windsurf/skills):
+    // this guards the asymmetric project/global segments.
+    let global_dir = sb.home.join(".codeium/windsurf/skills");
+    assert!(
+        global_dir.join("greet/SKILL.md").exists(),
+        "missing {}",
+        global_dir.join("greet/SKILL.md").display()
+    );
+    // Must not fall back to a ~/.windsurf mirror of the project path.
+    assert!(
+        !sb.home.join(".windsurf/skills/greet").exists(),
+        "global windsurf must not use ~/.windsurf/skills"
+    );
+    // No project-local materialization happened.
+    assert!(
+        !sb.project.join(".windsurf").exists(),
+        "global add must not materialize into the project"
+    );
+
+    sb.ok(&["remove", "-g", "greet"]);
+    assert!(
+        !global_dir.join("greet").exists(),
+        "removed skill should be gone"
     );
 }
 

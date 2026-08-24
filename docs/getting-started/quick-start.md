@@ -6,7 +6,7 @@ tool. It assumes `spm` is already on your `PATH` — see
 
 ## 1. Scaffold `ai.json`
 
-Pick one or more target vendors (`claude`, `codex`, `copilot`, `cursor`, `gemini`). Targets
+Pick one or more target vendors (`amp`, `claude`, `cline`, `codex`, `copilot`, `cursor`, `gemini`, `windsurf`). Targets
 are repeatable and comma-separated:
 
 ```bash
