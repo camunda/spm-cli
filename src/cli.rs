@@ -667,68 +667,105 @@ fn status(scope: &Scope) -> Result<()> {
         println!("! `{shadow}` is also installed in the {other} scope — they will collide by name");
     }
 
-    // Nothing locked: either nothing is declared (a clean, correct state) or
-    // ai.json declares skills that were never resolved into ai.lock (a real
-    // problem). Both cases have nothing per-target to inspect, so report and
-    // return instead of falling through to a misleading "all materialized".
-    if expected.is_empty() {
-        if manifest.skills.is_empty() && manifest.plugins.is_empty() {
+    // Nothing locked and nothing declared: a clean, correct empty state.
+    if expected.is_empty() && manifest.plugins.is_empty() {
+        if manifest.skills.is_empty() {
             println!("\nno skills or plugins declared — add one with `spm add <git-url>`");
             return Ok(());
         }
-        if !manifest.plugins.is_empty() && lock.plugins.is_empty() {
-            bail!(
-                "ai.json declares {} plugin(s) but ai.lock has none — run `spm install`",
-                manifest.plugins.len()
-            );
-        }
-        if !manifest.skills.is_empty() {
-            bail!(
-                "ai.json declares {} skill(s) but ai.lock has none — run `spm install`",
-                manifest.skills.len()
-            );
-        }
-        // Only plugins declared, all locked, none bundling skills: nothing to
-        // classify per-skill, but the install is complete.
-        println!("\nall declared plugins are installed (no bundled skills to materialize)");
-        return Ok(());
+        bail!(
+            "ai.json declares {} skill(s) but ai.lock has none — run `spm install`",
+            manifest.skills.len()
+        );
     }
 
-    let width = expected.iter().map(String::len).max().unwrap_or(0);
+    // Declared plugins come from the *manifest* (the source of truth for what
+    // should be installed). Comparing against `ai.lock` catches a plugin that
+    // was declared but never resolved/installed; comparing against the on-disk
+    // marketplace (via each vendor's `status_plugins`) catches a deleted
+    // `.spm/claude-plugins` dir or a fresh worktree that was never installed.
+    let declared_plugins: Vec<String> = manifest.plugins.keys().cloned().collect();
+    let width = expected
+        .iter()
+        .chain(declared_plugins.iter())
+        .map(String::len)
+        .max()
+        .unwrap_or(0);
     let mut incomplete = false;
+
+    // A plugin declared in ai.json but absent from ai.lock was never resolved —
+    // installs would be silently incomplete. Flag it explicitly.
+    for name in &declared_plugins {
+        if !lock.plugins.contains_key(name) {
+            incomplete = true;
+            println!(
+                "! plugin `{name}` is declared in ai.json but not in ai.lock — run `spm install`"
+            );
+        }
+    }
 
     for target in &manifest.targets {
         let vendor = vendor::for_target(target)?;
-        let st = vendor.status(scope, &expected)?;
-        println!(
-            "\n[{target}]  {}/{} installed  {}",
-            st.present.len(),
-            expected.len(),
-            st.location.display()
-        );
-        for name in &expected {
-            let missing = st.missing.iter().any(|m| m == name);
-            if missing {
-                incomplete = true;
-            }
+        if !expected.is_empty() {
+            let st = vendor.status(scope, &expected)?;
             println!(
-                "  {name:<width$}  {}",
-                if missing { "MISSING" } else { "ok" }
+                "\n[{target}]  {}/{} installed  {}",
+                st.present.len(),
+                expected.len(),
+                st.location.display()
             );
+            for name in &expected {
+                let missing = st.missing.iter().any(|m| m == name);
+                if missing {
+                    incomplete = true;
+                }
+                println!(
+                    "  {name:<width$}  {}",
+                    if missing { "MISSING" } else { "ok" }
+                );
+            }
+            for s in &st.stale {
+                println!("  {s:<width$}  stale (not in ai.lock)");
+            }
+            for note in &st.notes {
+                incomplete = true;
+                println!("  ! {note}");
+            }
         }
-        for s in &st.stale {
-            println!("  {s:<width$}  stale (not in ai.lock)");
-        }
-        for note in &st.notes {
-            incomplete = true;
-            println!("  ! {note}");
+
+        // Full-plugin materialization is only meaningful for vendors that
+        // register plugins beyond their bundled skills (currently Claude);
+        // `status_plugins` returns `None` for the rest.
+        if !declared_plugins.is_empty() {
+            if let Some(st) = vendor.status_plugins(scope, &declared_plugins)? {
+                println!(
+                    "\n[{target}] plugins  {}/{} installed  {}",
+                    st.present.len(),
+                    declared_plugins.len(),
+                    st.location.display()
+                );
+                for name in &declared_plugins {
+                    let missing = st.missing.iter().any(|m| m == name);
+                    if missing {
+                        incomplete = true;
+                    }
+                    println!(
+                        "  {name:<width$}  {}",
+                        if missing { "MISSING" } else { "ok" }
+                    );
+                }
+                for note in &st.notes {
+                    incomplete = true;
+                    println!("  ! {note}");
+                }
+            }
         }
     }
 
     if incomplete {
-        bail!("some declared skills are not materialized — run `spm install`");
+        bail!("some declared skills or plugins are not materialized — run `spm install`");
     }
-    println!("\nall declared skills are materialized");
+    println!("\nall declared skills and plugins are materialized");
     Ok(())
 }
 

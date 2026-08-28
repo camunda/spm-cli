@@ -104,6 +104,12 @@ impl Lockfile {
 /// means the committed (untrusted) `ai.lock` was hand-edited to point elsewhere.
 fn validate_locked_map(map: &BTreeMap<String, LockedSkill>, kind: &str) -> Result<()> {
     for (name, l) in map {
+        // The map key names a directory that `spm status`/vendor path checks
+        // join onto their skills dir (`skills_dir.join(name)`), so a hand-edited
+        // `ai.lock` key with `/`, `..`, etc. must be rejected up front — same
+        // guarantee manifest parsing gives.
+        crate::manifest::validate_skill_name(name)
+            .with_context(|| format!("{kind} name in ai.lock"))?;
         validate_commit(&l.commit).with_context(|| format!("{kind} `{name}`"))?;
         validate_store_key(&l.store).with_context(|| format!("{kind} `{name}`"))?;
         let expected = store_key(&l.git, &l.commit);
@@ -112,6 +118,12 @@ fn validate_locked_map(map: &BTreeMap<String, LockedSkill>, kind: &str) -> Resul
                 "{kind} `{name}`: store key `{}` does not match `{expected}` derived from git+commit",
                 l.store
             );
+        }
+        // Bundled-skill names flow into the same vendor path joins via `status`,
+        // so validate each one just like a top-level skill name.
+        for s in &l.bundled_skills {
+            crate::manifest::validate_skill_name(s)
+                .with_context(|| format!("{kind} `{name}`: bundled skill name"))?;
         }
     }
     Ok(())
@@ -253,6 +265,60 @@ mod tests {
         };
         let err = lock.validate().unwrap_err();
         assert!(format!("{err}").contains("does not match"), "{err}");
+    }
+
+    /// A hand-edited `ai.lock` could inject a path separator (or `..`) into a
+    /// plugin's `bundled_skills`, which `spm status` later joins onto a vendor
+    /// skills dir. Reject such names with the same guarantee as manifest names.
+    #[test]
+    fn validate_rejects_bundled_skill_with_path_separator() {
+        let git = "https://example.com/repo.git";
+        let sha = "c".repeat(40);
+        let mut plugins = BTreeMap::new();
+        plugins.insert(
+            "myplugin".to_string(),
+            LockedSkill {
+                git: git.into(),
+                reference: "branch:main".into(),
+                commit: sha.clone(),
+                path: None,
+                store: store_key(git, &sha),
+                bundled_skills: vec!["../evil".into()],
+            },
+        );
+        let lock = Lockfile {
+            plugins,
+            ..Default::default()
+        };
+        let err = lock.validate().unwrap_err();
+        assert!(format!("{err:#}").contains("invalid skill name"), "{err:#}");
+    }
+
+    /// A hand-edited lock map *key* (skill or plugin name) with a path separator
+    /// is equally dangerous — `status` joins it onto the skills dir — so it must
+    /// be rejected on load.
+    #[test]
+    fn validate_rejects_map_key_with_path_separator() {
+        let git = "https://example.com/repo.git";
+        let sha = "d".repeat(40);
+        let mut skills = BTreeMap::new();
+        skills.insert(
+            "../escape".to_string(),
+            LockedSkill {
+                git: git.into(),
+                reference: "branch:main".into(),
+                commit: sha.clone(),
+                path: None,
+                store: store_key(git, &sha),
+                bundled_skills: Vec::new(),
+            },
+        );
+        let lock = Lockfile {
+            skills,
+            ..Default::default()
+        };
+        let err = lock.validate().unwrap_err();
+        assert!(format!("{err:#}").contains("invalid skill name"), "{err:#}");
     }
 
     #[test]

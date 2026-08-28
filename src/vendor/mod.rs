@@ -139,6 +139,17 @@ pub trait Vendor {
         Ok(())
     }
 
+    /// Report what full plugins this vendor has materialized in `scope`,
+    /// compared against the declared plugin names (the `ai.json`/`ai.lock`
+    /// plugin keys). Returns `None` for vendors that don't register full plugins
+    /// (their plugins contribute only *skills*, already covered by
+    /// [`status`](Vendor::status)); richer targets (e.g. Claude) return `Some`
+    /// so `spm status` can catch a deleted marketplace dir or a fresh worktree
+    /// whose plugin registration was never installed here.
+    fn status_plugins(&self, _scope: &Scope, _expected: &[String]) -> Result<Option<VendorStatus>> {
+        Ok(None)
+    }
+
     /// Remove everything this vendor registered for full plugins in this
     /// `scope`. Counterpart to [`materialize_plugins`](Vendor::materialize_plugins);
     /// the default is a no-op for targets that never registered any.

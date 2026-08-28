@@ -208,6 +208,36 @@ impl Vendor for Claude {
         Ok(())
     }
 
+    fn status_plugins(
+        &self,
+        scope: &Scope,
+        expected: &[String],
+    ) -> Result<Option<super::VendorStatus>> {
+        let market_dir = plugins_managed_dir(scope)?;
+        // Each plugin is copied verbatim to `<market_dir>/<manifest-name>/`.
+        // Stale detection is disabled: `.claude-plugin/` (the marketplace
+        // manifest) lives directly under `market_dir` and is not a plugin.
+        let mut st = super::classify(&market_dir, expected, false);
+        // Verify the settings registration, mirroring the skills marketplace
+        // check: a deleted `.spm/claude-plugins` or a fresh worktree that
+        // inherited another checkout's absolute path both surface here.
+        if !expected.is_empty() {
+            match registered_plugins_marketplace_path(scope)? {
+                None => st.notes.push(format!(
+                    "no spm plugins marketplace registered in {}",
+                    settings_path(scope)?.display()
+                )),
+                Some(p) if Path::new(&p) != market_dir => st.notes.push(format!(
+                    "{} plugins marketplace points at {p}, not this location ({})",
+                    settings_path(scope)?.display(),
+                    market_dir.display()
+                )),
+                Some(_) => {}
+            }
+        }
+        Ok(Some(st))
+    }
+
     fn clean_plugins(&self, scope: &Scope, _project_id: &str, _managed: &[String]) -> Result<()> {
         let market = plugins_marketplace(scope);
         let market_dir = plugins_managed_dir(scope)?;
@@ -267,12 +297,26 @@ fn marketplace(scope: &Scope) -> &'static str {
     }
 }
 
-/// Read the directory path spm registered for its marketplace, if present.
+/// Read the directory path spm registered for its **skills** marketplace, if present.
 fn registered_marketplace_path(scope: &Scope) -> Result<Option<String>> {
     let root = jsonutil::read_object(&settings_path(scope)?)?;
     Ok(root
         .get("extraKnownMarketplaces")
         .and_then(|v| v.get(marketplace(scope)))
+        .and_then(|v| v.get("source"))
+        .and_then(|v| v.get("path"))
+        .and_then(|v| v.as_str())
+        .map(str::to_owned))
+}
+
+/// Read the directory path spm registered for its **full-plugin** marketplace,
+/// if present. Mirrors [`registered_marketplace_path`] for the `spm-plugins`
+/// registration.
+fn registered_plugins_marketplace_path(scope: &Scope) -> Result<Option<String>> {
+    let root = jsonutil::read_object(&settings_path(scope)?)?;
+    Ok(root
+        .get("extraKnownMarketplaces")
+        .and_then(|v| v.get(plugins_marketplace(scope)))
         .and_then(|v| v.get("source"))
         .and_then(|v| v.get("path"))
         .and_then(|v| v.as_str())

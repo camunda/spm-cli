@@ -2400,3 +2400,97 @@ fn add_plugin_conflicts_with_all() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// `spm status` must not falsely report success when a plugin's marketplace has
+/// been removed (e.g. a deleted `.spm/claude-plugins` or a fresh worktree). The
+/// plugin's *bundled skills* still sit in the skills marketplace, so a
+/// skills-only check would wrongly pass — status must verify the full plugin
+/// materialization too.
+#[test]
+fn status_fails_when_plugin_marketplace_deleted() {
+    let sb = Sandbox::new();
+    sb.add_plugin();
+    sb.ok(&["init", "--target", "claude"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["claude"],"plugins":{{"ds":{{"git":"{}","branch":"main","path":"pkg"}}}}}}"#,
+            sb.skill_url()
+        ),
+    );
+    sb.ok(&["install"]);
+    // Sanity: a clean install reports success.
+    sb.ok(&["status"]);
+
+    // Simulate a fresh worktree / accidental deletion: the full-plugin
+    // marketplace is gone, but the bundled skill copy survives.
+    std::fs::remove_dir_all(sb.project.join(".spm/claude-plugins")).unwrap();
+    assert!(sb
+        .project
+        .join(".spm/claude/plugin/skills/composer/SKILL.md")
+        .exists());
+
+    let out = sb.spm(&["status"]);
+    assert!(
+        !out.status.success(),
+        "status must fail when the plugin marketplace is missing"
+    );
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        text.contains("MISSING"),
+        "should mark plugin MISSING: {text}"
+    );
+    assert!(
+        text.contains("spm install"),
+        "should tell the user to run `spm install`: {text}"
+    );
+}
+
+/// `spm status` must fail when `ai.json` declares a plugin that `ai.lock` never
+/// pinned (a partial/hand-edited lock), instructing the user to run
+/// `spm install` rather than reporting a false success.
+#[test]
+fn status_fails_when_plugin_declared_but_not_locked() {
+    let sb = Sandbox::new();
+    sb.add_plugin();
+    sb.ok(&["init", "--target", "claude"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["claude"],"plugins":{{"ds":{{"git":"{}","branch":"main","path":"pkg"}}}}}}"#,
+            sb.skill_url()
+        ),
+    );
+    sb.ok(&["install"]);
+
+    // Drop the plugin from ai.lock (leaving ai.json declaring it) to model a
+    // partial lock. This also clears the only source of bundled skills, so
+    // `expected` is empty — exactly the branch that used to report success.
+    let lock: serde_json::Value = serde_json::from_str(&sb.read("ai.lock")).unwrap();
+    let mut lock = lock.as_object().unwrap().clone();
+    lock.remove("plugins");
+    std::fs::write(
+        sb.project.join("ai.lock"),
+        serde_json::to_string_pretty(&lock).unwrap(),
+    )
+    .unwrap();
+
+    let out = sb.spm(&["status"]);
+    assert!(
+        !out.status.success(),
+        "status must fail when a declared plugin is absent from ai.lock"
+    );
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        text.contains("not in ai.lock") && text.contains("spm install"),
+        "should flag the unlocked plugin and point at `spm install`: {text}"
+    );
+}
