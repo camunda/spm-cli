@@ -43,6 +43,12 @@ enum Command {
         /// skill. Incompatible with --name (names are derived per sub-skill).
         #[arg(long, conflicts_with = "name")]
         all: bool,
+        /// Add as a full **plugin** dependency (agents, MCP servers, hooks,
+        /// scripts + bundled skills) rather than a single skill. `--path` should
+        /// point at the plugin root (the dir holding `.claude-plugin/plugin.json`).
+        /// Incompatible with --all.
+        #[arg(long, conflicts_with = "all")]
+        plugin: bool,
         /// Overwrite existing skill(s) of the same name instead of erroring.
         /// Applies to both a single add and --all.
         #[arg(long)]
@@ -55,9 +61,12 @@ enum Command {
         #[command(subcommand)]
         command: TargetCommand,
     },
-    /// Remove a skill dependency.
+    /// Remove a skill (or, with --plugin, a plugin) dependency.
     Remove {
         name: String,
+        /// Remove a plugin dependency instead of a skill.
+        #[arg(long)]
+        plugin: bool,
         #[command(flatten)]
         scope: ScopeArg,
     },
@@ -150,13 +159,29 @@ pub fn run() -> Result<()> {
             path,
             name,
             all,
+            plugin,
             force,
             scope,
-        } => add(&scope.resolve(&cwd), git, version, path, name, all, force),
+        } => add(
+            &scope.resolve(&cwd),
+            AddRequest {
+                git,
+                version,
+                path,
+                name,
+                all,
+                plugin,
+                force,
+            },
+        ),
         Command::Target { command } => match command {
             TargetCommand::Add { vendors } => target_add(&Scope::Project { root: cwd }, vendors),
         },
-        Command::Remove { name, scope } => remove(&scope.resolve(&cwd), &name),
+        Command::Remove {
+            name,
+            plugin,
+            scope,
+        } => remove(&scope.resolve(&cwd), &name, plugin),
         Command::Update { name, scope } => update(&scope.resolve(&cwd), name),
         Command::Install { scope } => {
             let scope = scope.resolve(&cwd);
@@ -290,15 +315,28 @@ fn init(scope: &Scope, targets: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-fn add(
-    scope: &Scope,
+/// The parsed arguments for `spm add`, grouped so the handler takes one request
+/// rather than a long positional argument list.
+struct AddRequest {
     git: String,
     version: VersionArg,
     path: Option<String>,
     name: Option<String>,
     all: bool,
+    plugin: bool,
     force: bool,
-) -> Result<()> {
+}
+
+fn add(scope: &Scope, req: AddRequest) -> Result<()> {
+    let AddRequest {
+        git,
+        version,
+        path,
+        name,
+        all,
+        plugin,
+        force,
+    } = req;
     let dir = scope.manifest_dir()?;
     let mut manifest = Manifest::load(&dir)?;
     if let Some(sub) = &path {
@@ -318,13 +356,22 @@ fn add(
         crate::manifest::validate_skill_name(&name)?;
         // Never clobber an existing entry silently: adding a name that already
         // exists is an error unless the user opts in with --force (e.g. to
-        // re-pin a version).
-        if !force && manifest.skills.contains_key(&name) {
+        // re-pin a version). A plugin and a skill share neither map nor the
+        // vendor `<name>` namespace question here, so each `--plugin` add is
+        // checked against the plugins map and each skill add against skills.
+        let kind = if plugin { "plugin" } else { "skill" };
+        let occupied = if plugin {
+            manifest.plugins.contains_key(&name)
+        } else {
+            manifest.skills.contains_key(&name)
+        };
+        if !force && occupied {
             bail!(
-                "a skill named `{name}` already exists in {}; either give this one \
+                "a {kind} named `{name}` already exists in {}; either give this one \
                  a different name with `--name <other>`, pass --force to overwrite \
-                 the existing entry, or `spm remove {name}` first",
-                Manifest::path_in(&dir).display()
+                 the existing entry, or `spm remove {}{name}` first",
+                Manifest::path_in(&dir).display(),
+                if plugin { "--plugin " } else { "" }
             );
         }
         let spec = SkillSpec {
@@ -335,10 +382,14 @@ fn add(
             path,
         };
         spec.version()?; // validate exactly one selector
-        manifest.skills.insert(name.clone(), spec);
+        if plugin {
+            manifest.plugins.insert(name.clone(), spec);
+        } else {
+            manifest.skills.insert(name.clone(), spec);
+        }
         manifest.save(&dir)?;
         sync(scope, false, None)?;
-        println!("added {name}");
+        println!("added {kind} {name}");
     }
     Ok(())
 }
@@ -514,18 +565,23 @@ fn prompt_targets(available: &[&str]) -> Result<Vec<String>> {
     Ok(chosen)
 }
 
-fn remove(scope: &Scope, name: &str) -> Result<()> {
+fn remove(scope: &Scope, name: &str, plugin: bool) -> Result<()> {
     let dir = scope.manifest_dir()?;
     let mut manifest = Manifest::load(&dir)?;
-    if manifest.skills.remove(name).is_none() {
+    let (removed, kind) = if plugin {
+        (manifest.plugins.remove(name).is_some(), "plugin")
+    } else {
+        (manifest.skills.remove(name).is_some(), "skill")
+    };
+    if !removed {
         bail!(
-            "no skill named `{name}` in {}",
+            "no {kind} named `{name}` in {}",
             Manifest::path_in(&dir).display()
         );
     }
     manifest.save(&dir)?;
     sync(scope, false, None)?;
-    println!("removed {name}");
+    println!("removed {kind} {name}");
     Ok(())
 }
 
@@ -809,6 +865,19 @@ fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Result<usize>
             "  {name:<width$}  {}",
             if ensured.fetched { "fetched" } else { "cached" }
         );
+        if !crate::plugin::looks_like_plugin(&ensured.path) {
+            eprintln!(
+                "warning: plugin `{name}` ({} @ {}) has no `.claude-plugin/plugin.json`{} — \
+                 is it really a plugin? (only its bundled skills, if any, will be materialized)",
+                locked.git,
+                locked.reference,
+                locked
+                    .path
+                    .as_deref()
+                    .map(|p| format!(" under `{p}`"))
+                    .unwrap_or_default()
+            );
+        }
         let bundled = crate::plugin::plugin_skills(&ensured.path)
             .with_context(|| format!("enumerating skills bundled in plugin `{name}`"))?;
         locked.bundled_skills = bundled.iter().map(|s| s.name.clone()).collect();

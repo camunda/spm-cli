@@ -109,6 +109,15 @@ On install:
 A bundled skill whose name collides with a standalone `skills` entry (or another
 plugin's skill) is a hard error, never a silent overwrite.
 
+Add or remove a plugin from the CLI with the `--plugin` flag (point `--path` at
+the plugin root):
+
+```bash
+spm add https://github.com/camunda/design-system --branch main \
+        --path plugins/camunda-design-system --plugin --name design-system
+spm remove design-system --plugin
+```
+
 To pull in **every** skill under a directory at once (each immediate
 subdirectory that has its own `SKILL.md`), add `--all` instead of naming them
 one by one:
@@ -214,8 +223,9 @@ make install PREFIX=~/.local  # or a custom prefix
 spm init [--target amp|claude|cline|codex|copilot|cursor|gemini|windsurf ...] [-g]  # scaffold ai.json (repeatable / comma-separated)
 spm add <git> (--tag|--branch|--commit <v>) \      # add + install a skill
         [--path <subdir>] [--name <local-name>] [--all] [-g]  # --all: add every skill under --path
+        [--plugin]                                 # --plugin: add a full plugin (see "Full plugins")
 spm target add [vendor ...]                        # add target vendor(s); no arg = pick interactively
-spm remove <name> [-g]                             # drop a skill
+spm remove <name> [--plugin] [-g]                  # drop a skill (or a plugin with --plugin)
 spm update [name] [-g]                              # re-resolve branches/tags to latest
 spm install [-g]                                   # rebuild from ai.lock (after clone)
 spm list [-g]                                      # show skills + pinned commits

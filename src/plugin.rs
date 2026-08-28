@@ -42,6 +42,13 @@ fn read_plugin_json(root: &Path) -> Result<PluginJson> {
     serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
 }
 
+/// Whether `root` looks like a Claude Code plugin, i.e. carries a
+/// `.claude-plugin/plugin.json`. Used to warn when a `--plugin` dependency
+/// points at something that isn't actually a plugin.
+pub fn looks_like_plugin(root: &Path) -> bool {
+    root.join(".claude-plugin").join("plugin.json").is_file()
+}
+
 /// The plugin's declared name (`plugin.json` → `name`), falling back to
 /// `fallback` (the manifest key) when the plugin omits it. The returned value
 /// feeds the Claude marketplace/enabled-plugins keys, so it is validated to be a

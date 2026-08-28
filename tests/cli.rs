@@ -2300,3 +2300,103 @@ fn plugin_clean_removes_marketplace_and_registration() {
         "plugin de-enabled: {settings}"
     );
 }
+
+/// `spm add --plugin` declares a full-plugin dependency in `ai.json` and
+/// materializes it (agents registered for Claude); `spm remove --plugin` tears
+/// it back down.
+#[test]
+fn add_and_remove_plugin_via_cli() {
+    let sb = Sandbox::new();
+    let plugin_name = sb.add_plugin();
+    sb.ok(&["init", "--target", "claude"]);
+
+    let out = sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--path",
+        "pkg",
+        "--plugin",
+        "--name",
+        "ds",
+    ]);
+    assert!(out.contains("added plugin ds"), "{out}");
+
+    // Declared under `plugins` (not `skills`) in ai.json.
+    let manifest: serde_json::Value = serde_json::from_str(&sb.read("ai.json")).unwrap();
+    assert!(manifest["plugins"]["ds"].is_object(), "{manifest}");
+    assert!(manifest.get("skills").is_none_or(|s| s.get("ds").is_none()));
+
+    // Materialized: the plugin's agents are registered for Claude.
+    assert!(sb
+        .project
+        .join(".spm/claude-plugins/ds/agents/dev.md")
+        .exists());
+    let settings: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(sb.project.join(".claude/settings.local.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        settings["enabledPlugins"][format!("{plugin_name}@spm-plugins")],
+        serde_json::Value::Bool(true)
+    );
+
+    // `spm list` shows it as a plugin.
+    let listed = sb.ok(&["list"]);
+    assert!(
+        listed.contains("ds") && listed.contains("plugin"),
+        "{listed}"
+    );
+
+    // Remove it again.
+    let out = sb.ok(&["remove", "ds", "--plugin"]);
+    assert!(out.contains("removed plugin ds"), "{out}");
+    let manifest: serde_json::Value = serde_json::from_str(&sb.read("ai.json")).unwrap();
+    assert!(manifest
+        .get("plugins")
+        .is_none_or(|p| p.get("ds").is_none()));
+    assert!(
+        !sb.project.join(".spm/claude-plugins/ds").exists(),
+        "plugin dir removed after remove --plugin"
+    );
+}
+
+/// Removing a non-existent plugin (or a skill via `--plugin`) is a clear error,
+/// not a silent success.
+#[test]
+fn remove_plugin_unknown_errors() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    // A skill exists, but `--plugin` must not match it.
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let out = sb.spm(&["remove", "greet", "--plugin"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("no plugin named `greet`"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// `spm add --plugin --all` is rejected: a plugin is a single unit, not a
+/// container of skills.
+#[test]
+fn add_plugin_conflicts_with_all() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    let out = sb.spm(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--plugin",
+        "--all",
+    ]);
+    assert!(!out.status.success(), "--plugin --all must conflict");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("cannot be used with"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
