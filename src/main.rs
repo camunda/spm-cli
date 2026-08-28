@@ -6,6 +6,7 @@ mod jsonutil;
 mod lockfile;
 mod manifest;
 mod paths;
+mod plugin;
 mod resolver;
 mod schema;
 mod scope;

@@ -17,6 +17,11 @@ pub struct Lockfile {
     pub id: String,
     #[serde(default)]
     pub skills: BTreeMap<String, LockedSkill>,
+    /// Pinned full-plugin dependencies, parallel to `skills`. Same locked shape
+    /// (a plugin resolves to a single commit + store checkout); the `path` just
+    /// points at a plugin root rather than a single skill folder.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub plugins: BTreeMap<String, LockedSkill>,
 }
 
 /// Generate a fresh, kebab-safe project id. Called once when a lockfile has none;
@@ -47,6 +52,12 @@ pub struct LockedSkill {
     pub path: Option<String>,
     /// Store directory key: `<repo-name>-<url-hash>@<sha>`.
     pub store: String,
+    /// For a full-plugin lock entry: the names of the skills the plugin bundles,
+    /// recorded at install time so `spm status` (which never touches the store)
+    /// still knows the plugin's materialized component set. Always empty for an
+    /// ordinary `skills` entry, so it is omitted from those.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bundled_skills: Vec<String>,
 }
 
 impl Lockfile {
@@ -75,19 +86,8 @@ impl Lockfile {
         if !self.id.is_empty() {
             validate_project_id(&self.id)?;
         }
-        for (name, l) in &self.skills {
-            validate_commit(&l.commit).with_context(|| format!("skill `{name}`"))?;
-            validate_store_key(&l.store).with_context(|| format!("skill `{name}`"))?;
-            // The store key must be exactly what we would derive; a mismatch means
-            // the lockfile was hand-edited to point somewhere else.
-            let expected = store_key(&l.git, &l.commit);
-            if l.store != expected {
-                bail!(
-                    "skill `{name}`: store key `{}` does not match `{expected}` derived from git+commit",
-                    l.store
-                );
-            }
-        }
+        validate_locked_map(&self.skills, "skill")?;
+        validate_locked_map(&self.plugins, "plugin")?;
         Ok(())
     }
 
@@ -96,6 +96,25 @@ impl Lockfile {
         let text = serde_json::to_string_pretty(self)?;
         std::fs::write(&p, text + "\n").with_context(|| format!("writing {}", p.display()))
     }
+}
+
+/// Validate one locked-dependency map (`skills` or `plugins`). `kind` only
+/// shapes the error text. Every entry must carry a full commit SHA and a store
+/// key that is exactly what we would derive from its git+commit — a mismatch
+/// means the committed (untrusted) `ai.lock` was hand-edited to point elsewhere.
+fn validate_locked_map(map: &BTreeMap<String, LockedSkill>, kind: &str) -> Result<()> {
+    for (name, l) in map {
+        validate_commit(&l.commit).with_context(|| format!("{kind} `{name}`"))?;
+        validate_store_key(&l.store).with_context(|| format!("{kind} `{name}`"))?;
+        let expected = store_key(&l.git, &l.commit);
+        if l.store != expected {
+            bail!(
+                "{kind} `{name}`: store key `{}` does not match `{expected}` derived from git+commit",
+                l.store
+            );
+        }
+    }
+    Ok(())
 }
 
 /// A project id may be used verbatim as a directory name, so restrict it to a
@@ -224,11 +243,13 @@ mod tests {
                 commit: sha.clone(),
                 path: None,
                 store: "totally-not-the-derived-key".into(),
+                bundled_skills: Vec::new(),
             },
         );
         let lock = Lockfile {
             id: String::new(),
             skills,
+            ..Default::default()
         };
         let err = lock.validate().unwrap_err();
         assert!(format!("{err}").contains("does not match"), "{err}");

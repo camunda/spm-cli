@@ -75,6 +75,40 @@ Version selectors (exactly one per skill):
 
 `path` (optional) selects a subdirectory — for monorepos holding many skills.
 
+### Full plugins (`plugins`)
+
+Alongside individual `skills`, `ai.json` can depend on a **full Claude Code
+plugin** — one that bundles agents, MCP servers, hooks and scripts in addition
+to (or instead of) skills. Declare it under a `plugins` map, keyed by local
+name, with the same git/version selectors as a skill; `path` points at the
+plugin root (the directory holding `.claude-plugin/plugin.json`):
+
+```json
+{
+  "targets": ["claude", "copilot"],
+  "plugins": {
+    "design-system": {
+      "git": "https://github.com/camunda/design-system",
+      "branch": "main",
+      "path": "plugins/camunda-design-system"
+    }
+  }
+}
+```
+
+On install:
+
+- **Claude** gets the whole plugin registered under a dedicated, project-local
+  `spm-plugins` marketplace (`.spm/claude-plugins/`), so its **agents, MCP
+  servers, hooks and scripts** all load — not just its `SKILL.md`.
+- **Every** target (including skills-only ones like Copilot, Gemini, …) still
+  gets the plugin's **bundled skills**, flattened into that target's normal
+  skills dir — a graceful, skills-only degradation.
+- `ai.lock` pins the plugin's commit and records its bundled skill set.
+
+A bundled skill whose name collides with a standalone `skills` entry (or another
+plugin's skill) is a hard error, never a silent overwrite.
+
 To pull in **every** skill under a directory at once (each immediate
 subdirectory that has its own `SKILL.md`), add `--all` instead of naming them
 one by one:

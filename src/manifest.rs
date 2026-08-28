@@ -12,6 +12,16 @@ pub struct Manifest {
     pub targets: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_unique_skills")]
     pub skills: BTreeMap<String, SkillSpec>,
+    /// Full-plugin dependencies (agents/MCP servers/hooks/scripts + bundled
+    /// skills), keyed by local name. Unlike a `skills` entry — which points at a
+    /// single `SKILL.md` folder — a plugin `path` points at a Claude Code plugin
+    /// root (a dir holding `.claude-plugin/plugin.json`).
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "deserialize_unique_plugins"
+    )]
+    pub plugins: BTreeMap<String, SkillSpec>,
 }
 
 /// Deserialize the `skills` map while rejecting duplicate names. A plain
@@ -23,23 +33,46 @@ fn deserialize_unique_skills<'de, D>(d: D) -> Result<BTreeMap<String, SkillSpec>
 where
     D: serde::Deserializer<'de>,
 {
+    deserialize_unique_map(d, "skill")
+}
+
+/// Same duplicate-key rejection as [`deserialize_unique_skills`], for the
+/// `plugins` map.
+fn deserialize_unique_plugins<'de, D>(d: D) -> Result<BTreeMap<String, SkillSpec>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_unique_map(d, "plugin")
+}
+
+/// Stream a `{name: SkillSpec}` map, rejecting duplicate `name` keys. `kind`
+/// ("skill"/"plugin") only shapes the error message. Shared by the `skills` and
+/// `plugins` maps so both get identical last-wins-collapse protection.
+fn deserialize_unique_map<'de, D>(
+    d: D,
+    kind: &'static str,
+) -> Result<BTreeMap<String, SkillSpec>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
     use serde::de::{self, MapAccess, Visitor};
-    struct SkillsVisitor;
-    impl<'de> Visitor<'de> for SkillsVisitor {
+    struct MapVisitor(&'static str);
+    impl<'de> Visitor<'de> for MapVisitor {
         type Value = BTreeMap<String, SkillSpec>;
         fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            f.write_str("a map of unique skill names")
+            write!(f, "a map of unique {} names", self.0)
         }
         fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
         where
             M: MapAccess<'de>,
         {
+            let kind = self.0;
             let mut out = BTreeMap::new();
             while let Some((name, spec)) = map.next_entry::<String, SkillSpec>()? {
                 if out.contains_key(&name) {
                     return Err(de::Error::custom(format!(
-                        "duplicate skill name `{name}` in the `skills` map; \
-                         each skill name may appear only once — remove or rename \
+                        "duplicate {kind} name `{name}` in the `{kind}s` map; \
+                         each {kind} name may appear only once — remove or rename \
                          one of the `{name}` entries"
                     )));
                 }
@@ -48,7 +81,7 @@ where
             Ok(out)
         }
     }
-    d.deserialize_map(SkillsVisitor)
+    d.deserialize_map(MapVisitor(kind))
 }
 
 /// A single skill dependency. Exactly one of tag/branch/commit selects the version.
@@ -163,6 +196,13 @@ impl Manifest {
             if let Some(sub) = &spec.path {
                 validate_subpath(sub)
                     .with_context(|| format!("skill `{name}` in {}", p.display()))?;
+            }
+        }
+        for (name, spec) in &manifest.plugins {
+            validate_skill_name(name).with_context(|| format!("in {}", p.display()))?;
+            if let Some(sub) = &spec.path {
+                validate_subpath(sub)
+                    .with_context(|| format!("plugin `{name}` in {}", p.display()))?;
             }
         }
         Ok(manifest)

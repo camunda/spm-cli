@@ -1,7 +1,7 @@
 use crate::lockfile::Lockfile;
 use crate::manifest::{Manifest, SkillSpec};
 use crate::scope::Scope;
-use crate::vendor::{self, MaterializedSkill};
+use crate::vendor::{self, MaterializedPlugin, MaterializedSkill};
 use crate::{paths, resolver, store};
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -161,7 +161,7 @@ pub fn run() -> Result<()> {
         Command::Install { scope } => {
             let scope = scope.resolve(&cwd);
             let n = sync(&scope, false, None)?;
-            println!("installed {n} skill(s)");
+            println!("installed {n} dependency(ies)");
             Ok(())
         }
         Command::List { scope } => list(&scope.resolve(&cwd)),
@@ -176,8 +176,11 @@ fn clean(scope: &Scope) -> Result<()> {
     let manifest = Manifest::load(&dir)?;
     let lock = Lockfile::load_or_default(&dir)?;
     let managed: Vec<String> = lock.skills.keys().cloned().collect();
+    let managed_plugins: Vec<String> = lock.plugins.keys().cloned().collect();
     for target in &manifest.targets {
-        vendor::for_target(target)?.clean(scope, &lock.id, &managed)?;
+        let vendor = vendor::for_target(target)?;
+        vendor.clean(scope, &lock.id, &managed)?;
+        vendor.clean_plugins(scope, &lock.id, &managed_plugins)?;
     }
     println!(
         "cleaned generated {} config for target(s): {}",
@@ -280,6 +283,7 @@ fn init(scope: &Scope, targets: Vec<String>) -> Result<()> {
     let manifest = Manifest {
         targets,
         skills: BTreeMap::new(),
+        plugins: BTreeMap::new(),
     };
     manifest.save(&dir)?;
     println!("created {}", Manifest::path_in(&dir).display());
@@ -535,8 +539,8 @@ fn list(scope: &Scope) -> Result<()> {
     let dir = scope.manifest_dir()?;
     let manifest = Manifest::load(&dir)?;
     let lock = Lockfile::load_or_default(&dir)?;
-    if manifest.skills.is_empty() {
-        println!("no skills declared");
+    if manifest.skills.is_empty() && manifest.plugins.is_empty() {
+        println!("no skills or plugins declared");
         return Ok(());
     }
     for (name, spec) in &manifest.skills {
@@ -546,6 +550,25 @@ fn list(scope: &Scope) -> Result<()> {
             .map(|l| format!("{} @ {}", l.reference, &l.commit[..l.commit.len().min(8)]))
             .unwrap_or_else(|| "not installed".into());
         println!("{name:<24} {}  ({pinned})", spec.git);
+    }
+    for (name, spec) in &manifest.plugins {
+        let pinned = lock
+            .plugins
+            .get(name)
+            .map(|l| {
+                let short = &l.commit[..l.commit.len().min(8)];
+                if l.bundled_skills.is_empty() {
+                    format!("{} @ {short}", l.reference)
+                } else {
+                    format!(
+                        "{} @ {short}, skills: {}",
+                        l.reference,
+                        l.bundled_skills.join(", ")
+                    )
+                }
+            })
+            .unwrap_or_else(|| "not installed".into());
+        println!("{name:<24} {}  (plugin; {pinned})", spec.git);
     }
     Ok(())
 }
@@ -559,7 +582,15 @@ fn status(scope: &Scope) -> Result<()> {
     let dir = scope.manifest_dir()?;
     let manifest = Manifest::load(&dir)?;
     let lock = Lockfile::load_or_default(&dir)?;
-    let expected: Vec<String> = lock.skills.keys().cloned().collect();
+    // Plugin-bundled skills are flattened into every vendor's skills dir just
+    // like standalone skills, so they belong in `expected` — otherwise `status`
+    // would flag them as stale (present on disk, not declared).
+    let mut expected: Vec<String> = lock.skills.keys().cloned().collect();
+    for l in lock.plugins.values() {
+        expected.extend(l.bundled_skills.iter().cloned());
+    }
+    expected.sort();
+    expected.dedup();
 
     match scope {
         Scope::Project { root } => println!("project: {}", root.display()),
@@ -585,14 +616,26 @@ fn status(scope: &Scope) -> Result<()> {
     // problem). Both cases have nothing per-target to inspect, so report and
     // return instead of falling through to a misleading "all materialized".
     if expected.is_empty() {
-        if manifest.skills.is_empty() {
-            println!("\nno skills declared — add one with `spm add <git-url>`");
+        if manifest.skills.is_empty() && manifest.plugins.is_empty() {
+            println!("\nno skills or plugins declared — add one with `spm add <git-url>`");
             return Ok(());
         }
-        bail!(
-            "ai.json declares {} skill(s) but ai.lock has none — run `spm install`",
-            manifest.skills.len()
-        );
+        if !manifest.plugins.is_empty() && lock.plugins.is_empty() {
+            bail!(
+                "ai.json declares {} plugin(s) but ai.lock has none — run `spm install`",
+                manifest.plugins.len()
+            );
+        }
+        if !manifest.skills.is_empty() {
+            bail!(
+                "ai.json declares {} skill(s) but ai.lock has none — run `spm install`",
+                manifest.skills.len()
+            );
+        }
+        // Only plugins declared, all locked, none bundling skills: nothing to
+        // classify per-skill, but the install is complete.
+        println!("\nall declared plugins are installed (no bundled skills to materialize)");
+        return Ok(());
     }
 
     let width = expected.iter().map(String::len).max().unwrap_or(0);
@@ -673,6 +716,7 @@ fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Result<usize>
     // with the user's own skills) can purge only the entries spm previously
     // owned but that were since dropped from the manifest.
     let previously_managed: Vec<String> = prev.skills.keys().cloned().collect();
+    let previously_managed_plugins: Vec<String> = prev.plugins.keys().cloned().collect();
 
     // Stable, path-independent project id: reuse the locked one, else mint & persist.
     let id = if prev.id.is_empty() {
@@ -685,15 +729,22 @@ fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Result<usize>
         ..Default::default()
     };
 
-    // Column width for aligned per-skill output.
-    let width = manifest.skills.keys().map(String::len).max().unwrap_or(0);
+    // Column width for aligned per-entry output (skills + plugins).
+    let width = manifest
+        .skills
+        .keys()
+        .chain(manifest.plugins.keys())
+        .map(String::len)
+        .max()
+        .unwrap_or(0);
 
-    if manifest.skills.is_empty() {
-        println!("no skills declared");
+    if manifest.skills.is_empty() && manifest.plugins.is_empty() {
+        println!("no skills or plugins declared");
     } else {
         println!(
-            "resolving {} skill(s) for: {}",
+            "resolving {} skill(s) + {} plugin(s) for: {}",
             manifest.skills.len(),
+            manifest.plugins.len(),
             manifest.targets.join(", ")
         );
     }
@@ -718,6 +769,54 @@ fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Result<usize>
         let short = &locked.commit[..locked.commit.len().min(8)];
         println!("  {name:<width$}  {reference} @ {short}  ({how})");
         lock.skills.insert(name.clone(), locked);
+    }
+
+    // Resolve full plugins the same way. A plugin's version reuse also depends
+    // on the pinned commit being unchanged; its bundled-skill list is (re)filled
+    // from the store checkout below, so we never carry a stale one forward.
+    for (name, spec) in &manifest.plugins {
+        let requested = spec.version()?;
+        let reference = requested.label();
+        let refresh = force_refresh && only.is_none_or(|o| o == name);
+        let reuse = prev.plugins.remove(name).filter(|l| {
+            !refresh && l.git == spec.git && l.reference == reference && l.path == spec.path
+        });
+        let (mut locked, how) = match reuse {
+            Some(l) => (l, "locked"),
+            None => (
+                resolver::resolve(spec).with_context(|| format!("resolving plugin `{name}`"))?,
+                "resolved",
+            ),
+        };
+        locked.bundled_skills.clear();
+        let short = &locked.commit[..locked.commit.len().min(8)];
+        println!("  {name:<width$}  {reference} @ {short}  (plugin, {how})");
+        lock.plugins.insert(name.clone(), locked);
+    }
+
+    // Populate the store for plugins first: we need each plugin's checkout to
+    // enumerate its bundled skills before writing the lockfile (so `ai.lock`
+    // records the full component set) and before flattening those skills into
+    // the shared list every vendor consumes.
+    let mut plugins: Vec<MaterializedPlugin> = Vec::new();
+    let mut plugin_skills: Vec<MaterializedSkill> = Vec::new();
+    if !manifest.plugins.is_empty() {
+        println!("fetching plugins into store");
+    }
+    for (name, locked) in &mut lock.plugins {
+        let ensured = store::ensure(locked).with_context(|| format!("fetching plugin `{name}`"))?;
+        println!(
+            "  {name:<width$}  {}",
+            if ensured.fetched { "fetched" } else { "cached" }
+        );
+        let bundled = crate::plugin::plugin_skills(&ensured.path)
+            .with_context(|| format!("enumerating skills bundled in plugin `{name}`"))?;
+        locked.bundled_skills = bundled.iter().map(|s| s.name.clone()).collect();
+        plugin_skills.extend(bundled);
+        plugins.push(MaterializedPlugin {
+            name: name.clone(),
+            path: ensured.path,
+        });
     }
 
     lock.save(&dir)?;
@@ -748,14 +847,31 @@ fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Result<usize>
         });
     }
 
-    // Same resolved skills projected into every configured vendor.
-    if !manifest.skills.is_empty() {
+    // Flatten plugin-bundled skills into the same list every vendor consumes, so
+    // even skills-only targets get them. A bundled skill name that collides with
+    // a standalone skill (or another plugin's skill) is a hard error: silently
+    // overwriting a skill's content by manifest-key ordering is exactly the kind
+    // of drift AGENTS.md's "no drift surfaces" rule forbids.
+    for s in plugin_skills {
+        if materialized.iter().any(|m| m.name == s.name) {
+            bail!(
+                "skill name collision: `{}` is provided by more than one skill/plugin — \
+                 rename the conflicting skill or plugin-bundled skill",
+                s.name
+            );
+        }
+        materialized.push(s);
+    }
+
+    // Same resolved skills + plugins projected into every configured vendor.
+    if !manifest.skills.is_empty() || !manifest.plugins.is_empty() {
         println!("materializing: {}", manifest.targets.join(", "));
     }
     for vendor in &vendors {
         vendor.materialize(scope, &lock.id, &materialized, &previously_managed)?;
+        vendor.materialize_plugins(scope, &lock.id, &plugins, &previously_managed_plugins)?;
     }
-    Ok(lock.skills.len())
+    Ok(lock.skills.len() + lock.plugins.len())
 }
 
 /// Derive a skill name from a repo URL. Handles https, `ssh://`, and scp-style

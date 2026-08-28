@@ -113,6 +113,49 @@ impl Sandbox {
         format!("file://{}", self.skill_repo.display())
     }
 
+    /// Add, on `main`, a full Claude Code plugin under `pkg/` — the shape spm's
+    /// `plugins` dependency consumes. It bundles two agents, a `scripts/` file,
+    /// and one skill (`composer`), and declares its own name + `skills` pointer
+    /// in `.claude-plugin/plugin.json`. Returns the plugin's internal name.
+    fn add_plugin(&self) -> String {
+        let pkg = self.skill_repo.join("pkg");
+        let cp = pkg.join(".claude-plugin");
+        std::fs::create_dir_all(&cp).unwrap();
+        std::fs::write(
+            cp.join("plugin.json"),
+            r#"{
+  "name": "camunda-design-system",
+  "version": "1.0.0",
+  "skills": "./skills/",
+  "mcpServers": { "demo": { "command": "node", "args": ["./scripts/mcp.mjs"] } }
+}
+"#,
+        )
+        .unwrap();
+        for agent in ["dev", "validator"] {
+            let dir = pkg.join("agents");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join(format!("{agent}.md")),
+                format!("---\nname: {agent}\n---\nI am the {agent} agent.\n"),
+            )
+            .unwrap();
+        }
+        let scripts = pkg.join("scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(scripts.join("mcp.mjs"), "// mcp server\n").unwrap();
+        let skill = pkg.join("skills").join("composer");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: composer\ndescription: Compose things.\n---\nCompose.\n",
+        )
+        .unwrap();
+        self.git(&["add", "-A"]);
+        self.git(&["commit", "-qm", "add plugin"]);
+        "camunda-design-system".to_string()
+    }
+
     /// Run `spm <args>` in the project dir with the sandboxed SPM_HOME.
     fn spm(&self, args: &[&str]) -> std::process::Output {
         Command::new(env!("CARGO_BIN_EXE_spm"))
@@ -950,7 +993,7 @@ fn status_succeeds_when_no_skills_are_declared() {
     sb.ok(&["init", "--target", "copilot"]);
 
     let out = sb.ok(&["status"]);
-    assert!(out.contains("no skills declared"), "{out}");
+    assert!(out.contains("no skills or plugins declared"), "{out}");
     assert!(
         !out.contains("all declared skills are materialized"),
         "must not claim materialization when nothing is declared: {out}"
@@ -1548,7 +1591,7 @@ fn list_reports_declared_skills_and_pins() {
 
     // No skills declared yet.
     let out = sb.ok(&["list"]);
-    assert!(out.contains("no skills declared"), "{out}");
+    assert!(out.contains("no skills or plugins declared"), "{out}");
 
     sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
     let out = sb.ok(&["list"]);
@@ -2084,5 +2127,176 @@ fn global_list_and_clean() {
     assert!(
         !sb.copilot_global_skills().join("greet").exists(),
         "clean -g should remove the materialized global skill"
+    );
+}
+
+/// Helper: write an `ai.json` into the project dir.
+#[cfg(test)]
+fn write_manifest(sb: &Sandbox, json: &str) {
+    std::fs::write(sb.project.join("ai.json"), json).unwrap();
+}
+
+/// Installing a full-plugin dependency registers the plugin's agents/MCP/scripts
+/// for Claude via a dedicated `spm-plugins` marketplace, and flattens the
+/// plugin's bundled skill into every target's skills dir (skills-only
+/// degradation for Copilot). Verified against a `camunda-design-system`-shaped
+/// plugin bundling `dev`/`validator` agents and a `composer` skill.
+#[test]
+fn plugin_install_materializes_agents_and_degrades_skills() {
+    let sb = Sandbox::new();
+    let plugin_name = sb.add_plugin();
+    sb.ok(&["init", "--target", "claude", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["claude","copilot"],"plugins":{{"ds":{{"git":"{}","branch":"main","path":"pkg"}}}}}}"#,
+            sb.skill_url()
+        ),
+    );
+
+    let out = sb.ok(&["install"]);
+    assert!(
+        out.contains("plugin"),
+        "install should report the plugin: {out}"
+    );
+
+    // Claude: the full plugin is copied into the spm-plugins marketplace, with
+    // its agents and scripts intact.
+    let pdir = sb.project.join(".spm/claude-plugins/ds");
+    assert!(
+        pdir.join("agents/dev.md").exists(),
+        "dev agent materialized"
+    );
+    assert!(
+        pdir.join("agents/validator.md").exists(),
+        "validator agent materialized"
+    );
+    assert!(
+        pdir.join("scripts/mcp.mjs").exists(),
+        "plugin scripts materialized"
+    );
+
+    // The copied plugin.json keeps its name/mcpServers but has the `skills`
+    // pointer stripped (skills are served via the spm skills marketplace).
+    let pj: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(pdir.join(".claude-plugin/plugin.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(pj["name"], plugin_name);
+    assert!(pj.get("mcpServers").is_some(), "mcpServers preserved: {pj}");
+    assert!(pj.get("skills").is_none(), "skills pointer stripped: {pj}");
+
+    // The spm-plugins marketplace lists the plugin under its own internal name.
+    let market: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            sb.project
+                .join(".spm/claude-plugins/.claude-plugin/marketplace.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(market["name"], "spm-plugins");
+    assert_eq!(market["plugins"][0]["name"], plugin_name);
+    assert_eq!(market["plugins"][0]["source"], "./ds");
+
+    // Claude settings register + enable the plugin marketplace.
+    let settings: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(sb.project.join(".claude/settings.local.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(settings["extraKnownMarketplaces"]["spm-plugins"].is_object());
+    assert_eq!(
+        settings["enabledPlugins"][format!("{plugin_name}@spm-plugins")],
+        serde_json::Value::Bool(true)
+    );
+
+    // Skills-only degradation: the bundled `composer` skill lands in Copilot's
+    // skills dir and in Claude's skills marketplace.
+    assert!(
+        sb.project
+            .join(".agents/skills/spm-managed-skills/composer/SKILL.md")
+            .exists(),
+        "bundled skill degraded into Copilot skills dir"
+    );
+    assert!(
+        sb.project
+            .join(".spm/claude/plugin/skills/composer/SKILL.md")
+            .exists(),
+        "bundled skill served via Claude skills marketplace"
+    );
+
+    // ai.lock records the plugin's pinned commit and its bundled component set.
+    let lock = sb.read("ai.lock");
+    assert!(lock.contains("\"ds\""), "plugin locked: {lock}");
+    assert!(
+        lock.contains("bundled_skills"),
+        "bundled skills recorded: {lock}"
+    );
+    assert!(lock.contains("composer"), "composer recorded: {lock}");
+}
+
+/// A bundled skill whose name collides with a standalone skill is a hard error,
+/// not a silent overwrite.
+#[test]
+fn plugin_bundled_skill_name_collision_is_rejected() {
+    let sb = Sandbox::new();
+    sb.add_plugin();
+    sb.ok(&["init", "--target", "copilot"]);
+    // Standalone skill named `composer` collides with the plugin's bundled one.
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"skills":{{"composer":{{"git":"{url}","tag":"v0.1.0"}}}},"plugins":{{"ds":{{"git":"{url}","branch":"main","path":"pkg"}}}}}}"#,
+            url = sb.skill_url()
+        ),
+    );
+    let out = sb.spm(&["install"]);
+    assert!(!out.status.success(), "collision must fail the install");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("collision"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// `spm clean` removes the plugins marketplace dir and de-registers it from
+/// Claude settings.
+#[test]
+fn plugin_clean_removes_marketplace_and_registration() {
+    let sb = Sandbox::new();
+    let plugin_name = sb.add_plugin();
+    sb.ok(&["init", "--target", "claude"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["claude"],"plugins":{{"ds":{{"git":"{}","branch":"main","path":"pkg"}}}}}}"#,
+            sb.skill_url()
+        ),
+    );
+    sb.ok(&["install"]);
+    assert!(sb.project.join(".spm/claude-plugins/ds").exists());
+
+    sb.ok(&["clean"]);
+    assert!(
+        !sb.project.join(".spm/claude-plugins").exists(),
+        "clean removes the plugins marketplace dir"
+    );
+    let settings: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(sb.project.join(".claude/settings.local.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        settings
+            .get("extraKnownMarketplaces")
+            .and_then(|m| m.get("spm-plugins"))
+            .is_none(),
+        "spm-plugins marketplace de-registered: {settings}"
+    );
+    assert!(
+        settings
+            .get("enabledPlugins")
+            .and_then(|e| e.get(format!("{plugin_name}@spm-plugins")))
+            .is_none(),
+        "plugin de-enabled: {settings}"
     );
 }
