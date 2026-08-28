@@ -20,6 +20,11 @@ ai.json ──resolve──▶ ai.lock ──fetch/project──▶ materialized
 | `branch`           | resolved commit SHA    |
 | `commit`           | itself                 |
 
+[Full plugins](/reference/ai-json#plugins) declared under `plugins` are pinned
+the same way, and `ai.lock` additionally records each plugin's **bundled skill
+set** so `spm status` can tell the materialized plugin skills apart from stale
+leftovers.
+
 ## Commit it
 
 Commit **both** `ai.json` and `ai.lock`. Never commit the materialized skills —

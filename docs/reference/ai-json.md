@@ -45,6 +45,41 @@ skill. Each selector is locked to a resolved commit SHA in
 | `branch` | resolved SHA |
 | `commit` | itself       |
 
+## `plugins`
+
+A map of local plugin name → plugin spec. A **plugin** is a Claude Code plugin
+that bundles agents, MCP servers, hooks and scripts in addition to (or instead
+of) skills. The spec uses the **same fields as `skills`** (`git`, one version
+selector, optional `path`), but `path` should point at the **plugin root** — the
+directory holding `.claude-plugin/plugin.json`:
+
+```json
+{
+  "targets": ["claude", "copilot"],
+  "skills": {},
+  "plugins": {
+    "design-system": {
+      "git": "https://github.com/camunda/design-system",
+      "branch": "main",
+      "path": "plugins/camunda-design-system"
+    }
+  }
+}
+```
+
+How each target consumes a plugin:
+
+- **Claude** registers the whole plugin under a dedicated, project-local
+  `spm-plugins` marketplace (`.spm/claude-plugins/`) — its agents, MCP servers,
+  hooks and scripts all load.
+- **Every other target** gets only the plugin's **bundled skills**, flattened
+  into that target's normal skills location.
+
+`ai.lock` pins the plugin's commit and records its bundled skill set. A bundled
+skill whose name collides with a standalone `skills` entry (or another plugin's
+skill) is a hard error, never a silent overwrite. Add or remove plugins from the
+CLI with [`spm add --plugin` / `spm remove --plugin`](/reference/cli-commands#adding-a-full-plugin-plugin).
+
 ## Editor autocompletion
 
 Add a `$schema` reference so your editor validates and autocompletes `ai.json`:

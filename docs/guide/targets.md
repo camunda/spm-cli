@@ -44,6 +44,23 @@ claude plugin list
 claude plugin marketplace list
 ```
 
+### Full plugins
+
+Beyond individual skills, Claude can install a **full plugin** declared under
+[`plugins`](/reference/ai-json#plugins) — one bundling agents, MCP servers, hooks
+and scripts. spm copies the plugin into a **separate**, project-local marketplace
+so it never fights the skills marketplace over one `marketplace.json`:
+
+```
+.spm/claude-plugins/<name>/   →  registered as the `spm-plugins` marketplace
+```
+
+The copied plugin's `plugin.json` has its `skills` key stripped, so the
+full-plugin registration contributes only agents/MCP/hooks/scripts — the plugin's
+bundled skills are materialized **once** through the normal skills path (and so
+reach every other target too). See
+[`spm add --plugin`](/reference/cli-commands#adding-a-full-plugin-plugin).
+
 ## GitHub Copilot CLI
 
 spm copies the resolved skills into the project-local, gitignored directory:

@@ -7,8 +7,9 @@ the authoritative, version-specific usage.
 spm init [--target amp|claude|cline|codex|copilot|cursor|gemini|windsurf ...] [-g]  # scaffold ai.json (repeatable / comma-separated)
 spm add <git> (--tag|--branch|--commit <v>) \      # add + install a skill
         [--path <subdir>] [--name <local-name>] [--all] [--force] [-g]  # --all: add every skill under --path
+        [--plugin]                                 # --plugin: add a full plugin instead of a skill
 spm target add [vendor ...]                        # add target vendor(s); no arg = pick interactively
-spm remove <name> [-g]                             # drop a skill
+spm remove <name> [--plugin] [-g]                  # drop a skill (or a plugin with --plugin)
 spm update [name] [-g]                             # re-resolve branches/tags to latest
 spm install [-g]                                   # rebuild from ai.lock (after clone)
 spm list [-g]                                      # show skills + pinned commits
@@ -69,10 +70,36 @@ selector:
 - `--all` adds **every** skill under `--path` (each immediate subdirectory with
   its own `SKILL.md`), keyed by directory name. `--all` cannot be combined with
   `--name`.
+- `--plugin` adds a **full plugin** instead of a single skill (see below).
+  Point `--path` at the plugin root (the directory holding
+  `.claude-plugin/plugin.json`). `--plugin` cannot be combined with `--all`.
 
 ```bash
 spm add https://github.com/org/repo --tag v1.0.0 --path skills --all
 ```
+
+#### Adding a full plugin (`--plugin`)
+
+Beyond individual skills, spm can install a **Claude Code plugin** — one that
+bundles agents, MCP servers, hooks and scripts in addition to (or instead of)
+skills. Pass `--plugin` and point `--path` at the plugin root:
+
+```bash
+spm add https://github.com/camunda/design-system --branch main \
+        --path plugins/camunda-design-system --plugin --name design-system
+```
+
+The plugin is written to the `plugins` map in [`ai.json`](/reference/ai-json),
+pinned in [`ai.lock`](/reference/ai-lock), and materialized:
+
+- **Claude** gets the whole plugin registered under a dedicated, project-local
+  `spm-plugins` marketplace (`.spm/claude-plugins/`), so its agents, MCP servers,
+  hooks and scripts all load.
+- **Every other target** (Copilot, Gemini, Codex, …) gets the plugin's **bundled
+  skills**, flattened into that target's normal skills location.
+
+A bundled skill whose name collides with a standalone `skills` entry (or another
+plugin's skill) is a hard error, never a silent overwrite.
 
 ### `spm target add`
 
@@ -81,7 +108,13 @@ interactively.
 
 ### `spm remove <name>`
 
-Drops a skill from `ai.json` (and its materialized output).
+Drops a skill from `ai.json` (and its materialized output). Pass `--plugin` to
+remove a **full plugin** (from the `plugins` map) instead of a skill:
+
+```bash
+spm remove reviewer              # drop a skill
+spm remove design-system --plugin  # drop a plugin
+```
 
 ### `spm update [name]`
 
