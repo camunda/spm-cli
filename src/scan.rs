@@ -126,9 +126,11 @@ pub fn scan_path(root: &Path) -> Result<Vec<Finding>> {
         );
     }
     // A single file is scanned directly (relative to its parent, so the
-    // reported path stays just the file name); a directory is walked.
+    // reported path stays just the file name); a directory is walked. A bare
+    // filename has no parent, so fall back to an empty base — stripping that
+    // preserves the file name rather than collapsing it to an empty path.
     if root.is_file() {
-        let base = root.parent().unwrap_or(root);
+        let base = root.parent().unwrap_or_else(|| Path::new(""));
         scan_file(base, root, &mut findings)?;
     } else {
         walk(root, root, &mut findings)?;
@@ -801,7 +803,25 @@ mod tests {
         std::fs::remove_file(&file).unwrap();
         assert!(has(&f, "prompt-injection"), "{f:?}");
         // The reported path is just the file name, not the whole temp path.
-        assert_eq!(f[0].path.to_str().unwrap(), file.file_name().unwrap());
+        assert_eq!(
+            f[0].path.to_str().unwrap(),
+            file.file_name().unwrap().to_str().unwrap()
+        );
+
+        // Filename-based rules must also fire on a single-file scan, and the
+        // reported path must stay the bare file name (not collapse to empty).
+        let makefile = std::env::temp_dir().join(format!(
+            "spm-scan-single-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::SeqCst)
+        ));
+        std::fs::create_dir_all(&makefile).unwrap();
+        let mkf = makefile.join("Makefile");
+        std::fs::write(&mkf, "all:\n\techo hi\n").unwrap();
+        let g = scan_path(&mkf).unwrap();
+        std::fs::remove_dir_all(&makefile).unwrap();
+        assert!(has(&g, "makefile-present"), "{g:?}");
+        assert_eq!(g[0].path.to_str().unwrap(), "Makefile");
     }
 
     #[test]
