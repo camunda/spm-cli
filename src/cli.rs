@@ -825,6 +825,9 @@ fn shadowed_names(scope: &Scope, expected: &[String]) -> Result<Vec<String>> {
 /// finding. Exits non-zero when any blocking (high/critical) finding is present
 /// so it can serve as a CI gate on skill sources.
 fn scan_cmd(path: &Path) -> Result<()> {
+    if !path.exists() {
+        bail!("path does not exist: {}", path.display());
+    }
     let findings = crate::scan::scan_path(path)?;
     if findings.is_empty() {
         println!("no suspicious patterns found in {}", path.display());
