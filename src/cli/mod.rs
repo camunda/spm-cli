@@ -78,9 +78,9 @@ enum Command {
         #[command(flatten)]
         scope: ScopeArg,
     },
-    /// Re-resolve branches/tags to latest commits.
+    /// Re-resolve branches/tags to latest commits (skills and plugins).
     Update {
-        /// Skill to update; omit to update all.
+        /// Skill or plugin to update; omit to update all.
         name: Option<String>,
         #[command(flatten)]
         scope: ScopeArg,
@@ -90,12 +90,12 @@ enum Command {
         #[command(flatten)]
         scope: ScopeArg,
     },
-    /// List declared skills and their locked commits.
+    /// List declared skills and plugins with their locked commits.
     List {
         #[command(flatten)]
         scope: ScopeArg,
     },
-    /// Show which declared skills are materialized in this checkout.
+    /// Show which declared skills and plugins are materialized in this checkout.
     Status {
         #[command(flatten)]
         scope: ScopeArg,

@@ -10,7 +10,18 @@ pub(super) fn clean(scope: &Scope) -> Result<()> {
     let dir = scope.manifest_dir()?;
     let manifest = Manifest::load(&dir)?;
     let lock = Lockfile::load_or_default(&dir)?;
-    let managed: Vec<String> = lock.skills.keys().cloned().collect();
+    // Plugin-bundled skills are flattened into the same shared skills dirs as
+    // standalone skills (see `sync`'s `previously_managed`), so they must be
+    // included here too — otherwise `clean` would leave their materialized
+    // dirs behind in shared-dir/global vendors.
+    let mut managed: Vec<String> = lock.skills.keys().cloned().collect();
+    managed.extend(
+        lock.plugins
+            .values()
+            .flat_map(|l| l.bundled_skills.iter().cloned()),
+    );
+    managed.sort();
+    managed.dedup();
     let managed_plugins: Vec<String> = lock.plugins.keys().cloned().collect();
     for target in &manifest.targets {
         let vendor = vendor::for_target(target)?;

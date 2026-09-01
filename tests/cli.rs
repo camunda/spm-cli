@@ -2131,6 +2131,47 @@ fn status_warns_when_a_skill_is_installed_in_both_scopes() {
 
 #[cfg(unix)]
 #[test]
+fn status_warns_when_a_plugin_bundled_skill_shadows_the_other_scope() {
+    let sb = Sandbox::new();
+    // Project scope: a standalone skill named `composer` (matching the
+    // plugin's bundled skill name added below in the global scope).
+    sb.ok(&["init", "--target", "copilot"]);
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--tag",
+        "v0.1.0",
+        "--name",
+        "composer",
+    ]);
+
+    // Global scope: a plugin whose bundled skill is also named `composer`.
+    sb.add_plugin();
+    sb.ok(&["init", "-g", "--target", "copilot"]);
+    sb.ok(&[
+        "add",
+        "-g",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--path",
+        "pkg",
+        "--plugin",
+        "--name",
+        "ds",
+    ]);
+
+    // Project status must flag the collision even though the global entry is
+    // a plugin-bundled skill, not a standalone one.
+    let out = sb.ok(&["status"]);
+    assert!(
+        out.contains("also installed in the global scope"),
+        "expected a shadow warning for the plugin-bundled skill, got: {out}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn global_list_and_clean() {
     let sb = Sandbox::new();
     sb.ok(&["init", "-g", "--target", "copilot"]);
@@ -2151,6 +2192,49 @@ fn global_list_and_clean() {
     assert!(
         !sb.copilot_global_skills().join("greet").exists(),
         "clean -g should remove the materialized global skill"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn clean_purges_plugin_bundled_skills_from_shared_global_dir() {
+    let sb = Sandbox::new();
+    sb.add_plugin();
+    sb.ok(&["init", "-g", "--target", "copilot"]);
+    sb.ok(&[
+        "add",
+        "-g",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--path",
+        "pkg",
+        "--plugin",
+        "--name",
+        "ds",
+    ]);
+    // The plugin's bundled `composer` skill lands in the shared global dir,
+    // same as a standalone skill would.
+    let composer = sb.copilot_global_skills().join("composer");
+    assert!(
+        composer.join("SKILL.md").exists(),
+        "bundled skill materialized in shared global dir"
+    );
+
+    // A skill the user authored by hand in the same shared dir must survive.
+    let user = sb.copilot_global_skills().join("user-skill");
+    std::fs::create_dir_all(&user).unwrap();
+    std::fs::write(user.join("SKILL.md"), "mine\n").unwrap();
+
+    sb.ok(&["clean", "-g"]);
+    assert!(
+        !composer.exists(),
+        "clean must purge plugin-bundled skills from the shared global dir, \
+         not just top-level skills"
+    );
+    assert!(
+        user.join("SKILL.md").exists(),
+        "the user's own skill in the shared dir must be preserved by clean"
     );
 }
 

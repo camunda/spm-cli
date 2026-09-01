@@ -154,9 +154,24 @@ fn shadowed_names(scope: &Scope, expected: &[String]) -> Result<Vec<String>> {
         Scope::Global => std::env::current_dir()?,
     };
     let other = Lockfile::load_or_default(&other_dir)?;
+    // A name provided by a plugin's bundled skills in the *other* scope
+    // collides on disk just as much as a standalone skill of the same name
+    // (both are flattened into the same vendor skills dir), so it must be
+    // checked here too — not just `other.skills`.
+    let other_names: std::collections::HashSet<&str> = other
+        .skills
+        .keys()
+        .map(String::as_str)
+        .chain(
+            other
+                .plugins
+                .values()
+                .flat_map(|l| l.bundled_skills.iter().map(String::as_str)),
+        )
+        .collect();
     Ok(expected
         .iter()
-        .filter(|n| other.skills.contains_key(*n))
+        .filter(|n| other_names.contains(n.as_str()))
         .cloned()
         .collect())
 }
