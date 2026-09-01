@@ -105,6 +105,15 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Scan skill content for suspicious patterns (prompt injection, secret
+    /// exfiltration, encoded payloads, auto-run hooks, …). Exits non-zero if any
+    /// blocking (high/critical) finding is present. The same scan runs
+    /// automatically as a pre-materialize gate on add/install/update.
+    Scan {
+        /// Directory to scan (defaults to the current directory).
+        #[arg(default_value = ".")]
+        path: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -194,6 +203,7 @@ pub fn run() -> Result<()> {
         Command::Status { scope } => status(&scope.resolve(&cwd)),
         Command::Clean { scope } => clean(&scope.resolve(&cwd)),
         Command::Prune { yes } => prune(yes),
+        Command::Scan { path } => scan_cmd(Path::new(&path)),
     }
 }
 
@@ -811,6 +821,27 @@ fn shadowed_names(scope: &Scope, expected: &[String]) -> Result<Vec<String>> {
         .collect())
 }
 
+/// `spm scan [path]` — run the content scanner over a directory and print every
+/// finding. Exits non-zero when any blocking (high/critical) finding is present
+/// so it can serve as a CI gate on skill sources.
+fn scan_cmd(path: &Path) -> Result<()> {
+    let findings = crate::scan::scan_path(path)?;
+    if findings.is_empty() {
+        println!("no suspicious patterns found in {}", path.display());
+        return Ok(());
+    }
+    let blocking = findings.iter().filter(|f| f.severity.blocks()).count();
+    for f in &findings {
+        println!("{}", f.render());
+    }
+    let total = findings.len();
+    println!("\n{total} finding(s), {blocking} blocking (high/critical)");
+    if blocking > 0 {
+        bail!("content scan found {blocking} blocking finding(s)");
+    }
+    Ok(())
+}
+
 /// Core pipeline shared by add/remove/update/install:
 /// resolve manifest -> ai.lock -> populate store -> materialize vendor config.
 ///
@@ -958,6 +989,10 @@ fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Result<usize>
         let bundled = crate::plugin::plugin_skills(&ensured.path)
             .with_context(|| format!("enumerating skills bundled in plugin `{name}`"))?;
         locked.bundled_skills = bundled.iter().map(|s| s.name.clone()).collect();
+        // Scan the whole plugin tree (agents, scripts, hooks, bundled skills)
+        // before any of it is materialized into an agent-discovered directory.
+        crate::scan::enforce(name, &ensured.path)
+            .with_context(|| format!("scanning plugin `{name}`"))?;
         plugin_skills.extend(bundled);
         plugins.push(MaterializedPlugin {
             name: name.clone(),
@@ -985,6 +1020,11 @@ fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Result<usize>
             locked.path.as_deref(),
             &ensured.path,
         );
+        // Pre-materialize security gate: scan the fetched content before it is
+        // copied into any agent-discovered directory. Blocks on high/critical
+        // findings unless SPM_ALLOW_SUSPICIOUS is set.
+        crate::scan::enforce(name, &ensured.path)
+            .with_context(|| format!("scanning skill `{name}`"))?;
         materialized.push(MaterializedSkill {
             name: name.clone(),
             path: ensured.path,

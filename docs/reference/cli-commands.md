@@ -16,6 +16,7 @@ spm list [-g]                                      # show skills + pinned commit
 spm status [-g]                                    # check skills are materialized in this checkout
 spm clean [-g]                                     # remove generated vendor config
 spm prune [--yes]                                  # wipe the global fetch cache ($SPM_HOME/store, default ~/.spm/store)
+spm scan [path]                                    # scan skill content for suspicious patterns (default: .)
 ```
 
 ## Scope: project (default) vs. global (`-g`)
@@ -144,6 +145,37 @@ Removes generated vendor config from the project.
 
 Wipes the global fetch cache (`$SPM_HOME/store`, default `~/.spm/store`). `--yes`
 skips the confirmation prompt.
+
+### `spm scan [path]`
+
+Runs spm's deterministic **content scanner** over a directory (default: the
+current directory) and prints every finding. **Exits non-zero** when any blocking
+(high/critical) finding is present, so it works as a CI gate on skill sources.
+
+The same scan runs automatically as a **pre-materialize gate**: every skill and
+plugin is scanned right after it is fetched into the store and *before* it is
+copied into any agent-discovered directory, on `spm add`, `spm install`, and
+`spm update`. High/critical findings abort the command (nothing is materialized
+and `ai.lock` is not written); medium/low findings are surfaced as warnings.
+
+Detected pattern categories:
+
+| category | example signals | severity |
+|----------|-----------------|----------|
+| prompt injection | "ignore previous instructions", "disregard your system prompt" | high |
+| secret exfiltration | `~/.ssh/id_rsa`, `.aws/credentials`, `GITHUB_TOKEN` (escalated when paired with `curl`/`post`/`send`) | low → critical |
+| obfuscation | zero-width/bidi Unicode; base64/hex blobs decoding to shell | high / critical |
+| command execution | `curl \| bash`, `/dev/tcp/…`, `nc -e` reverse shells | critical |
+| path traversal | `../../` requested in skill text | medium |
+| auto-run | `postinstall` scripts, git hooks, bundled `Makefile` | low / medium |
+
+```bash
+spm scan               # scan the current directory
+spm scan ./my-skill    # scan a specific path
+```
+
+To override the gate for content you trust (or a false positive), set
+`SPM_ALLOW_SUSPICIOUS=1`: findings are printed as warnings but never block.
 
 ## Repo URLs (HTTPS & SSH)
 
