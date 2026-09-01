@@ -245,7 +245,7 @@ directory. It flags:
 
 - **Prompt injection** — "ignore previous instructions", "disregard your system prompt", etc.
 - **Secret/credential exfiltration** — references to `~/.ssh/id_rsa`, `.aws/credentials`, `.git-credentials`, `GITHUB_TOKEN`, … (escalated when paired with an outbound command).
-- **Obfuscation** — zero-width/bidi Unicode control characters and base64/hex blobs that decode to shell commands.
+- **Obfuscation** — zero-width/bidi Unicode control characters, base64/hex blobs that decode to shell commands, and files padded past the 8 MiB scan cap (which would otherwise hide content behind a truncated read).
 - **Command execution / network exfil** — `curl | bash`, `/dev/tcp/…` and `nc -e` reverse shells.
 - **Path traversal** — `../../` requested in skill text.
 - **Auto-run triggers** — `postinstall` scripts, git hooks, bundled `Makefile`s.

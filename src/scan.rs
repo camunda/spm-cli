@@ -102,6 +102,8 @@ impl Finding {
 /// Never read more than this from a single file. Skills are tiny; a multi-GB
 /// "file" is either a mistake or a resource-exhaustion attempt, and scanning it
 /// in full buys nothing — the first 8 MiB already covers any realistic payload.
+/// A file that exceeds this cap is itself flagged (blocking) so content padded
+/// past the cap can't hide behind a truncated scan.
 const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Recursively scan every file under `root` and return all findings, sorted by
@@ -182,7 +184,27 @@ fn scan_file(root: &Path, path: &Path, out: &mut Vec<Finding>) -> Result<()> {
 
     // Fail closed on an unreadable file: a transient read error or a
     // permission-denied file must not be reported as "nothing suspicious here".
-    let bytes = read_capped(path).with_context(|| format!("reading file {}", path.display()))?;
+    let mut bytes =
+        read_capped(path).with_context(|| format!("reading file {}", path.display()))?;
+    // An oversized file is read only up to the cap. Flagging the oversize as a
+    // blocking finding stops a payload padded past MAX_FILE_BYTES from hiding
+    // behind a silently truncated scan; the remainder is dropped before
+    // content rules run.
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        bytes.truncate(MAX_FILE_BYTES as usize);
+        push(
+            out,
+            &rel,
+            None,
+            "oversized-file",
+            Category::Obfuscation,
+            Severity::High,
+            format!(
+                "file exceeds the {} MiB scan cap; content past the cap is not scanned",
+                MAX_FILE_BYTES / (1024 * 1024)
+            ),
+        );
+    }
     // Binary blobs (NUL bytes / invalid UTF-8) carry no scannable instructions;
     // treat them as opaque so we don't emit garbage-line noise.
     let text = match std::str::from_utf8(&bytes) {
@@ -200,7 +222,9 @@ fn read_capped(path: &Path) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
     let f = std::fs::File::open(path)?;
     let mut buf = Vec::new();
-    f.take(MAX_FILE_BYTES).read_to_end(&mut buf)?;
+    // Read one byte past the cap so the caller can detect (and flag) a file
+    // that exceeds MAX_FILE_BYTES rather than silently scanning a truncation.
+    f.take(MAX_FILE_BYTES + 1).read_to_end(&mut buf)?;
     Ok(buf)
 }
 
@@ -720,6 +744,25 @@ mod tests {
 
     fn has(findings: &[Finding], rule: &str) -> bool {
         findings.iter().any(|f| f.rule == rule)
+    }
+
+    #[test]
+    fn flags_file_exceeding_scan_cap() {
+        // A file padded past the read cap must not scan clean: content beyond
+        // MAX_FILE_BYTES is not read, so the oversize itself is flagged as a
+        // blocking finding to prevent hiding a payload past the cap.
+        let dir = tmp_dir();
+        let big = dir.join("SKILL.md");
+        let mut data = vec![b'a'; MAX_FILE_BYTES as usize + 1];
+        data.push(b'\n');
+        std::fs::write(&big, &data).unwrap();
+        let f = scan_path(&big).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(has(&f, "oversized-file"), "{f:?}");
+        assert!(
+            f.iter().any(|x| x.severity == Severity::High),
+            "oversize must be blocking: {f:?}"
+        );
     }
 
     #[test]

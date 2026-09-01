@@ -165,7 +165,7 @@ Detected pattern categories:
 |----------|-----------------|----------|
 | prompt injection | "ignore previous instructions", "disregard your system prompt" | high |
 | secret exfiltration | `~/.ssh/id_rsa`, `.aws/credentials`, `GITHUB_TOKEN` (escalated when paired with `curl`/`post`/`send`) | low → critical |
-| obfuscation | zero-width/bidi Unicode; base64/hex blobs decoding to shell | high / critical |
+| obfuscation | zero-width/bidi Unicode; base64/hex blobs decoding to shell; files exceeding the 8 MiB scan cap | high / critical |
 | command execution | `curl \| bash`, `/dev/tcp/…`, `nc -e` reverse shells | critical |
 | path traversal | `../../` requested in skill text | medium |
 | auto-run | `postinstall` scripts, git hooks, bundled `Makefile` | low / medium |
