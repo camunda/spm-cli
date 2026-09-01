@@ -186,7 +186,8 @@ pub fn run() -> Result<()> {
         Command::Install { scope } => {
             let scope = scope.resolve(&cwd);
             let n = sync(&scope, false, None)?;
-            println!("installed {n} dependency(ies)");
+            let noun = if n == 1 { "dependency" } else { "dependencies" };
+            println!("installed {n} {noun}");
             Ok(())
         }
         Command::List { scope } => list(&scope.resolve(&cwd)),
@@ -805,10 +806,24 @@ fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Result<usize>
     let mut prev = Lockfile::load_or_default(&dir)?;
 
     // Skill names spm materialized on the previous sync. Captured before the
-    // resolve loop mutates `prev`, so global vendors (which share a directory
-    // with the user's own skills) can purge only the entries spm previously
-    // owned but that were since dropped from the manifest.
-    let previously_managed: Vec<String> = prev.skills.keys().cloned().collect();
+    // resolve loop mutates `prev`, so global/shared-dir vendors (which share a
+    // directory with the user's own skills) can purge only the entries spm
+    // previously owned but that were since dropped from the manifest.
+    //
+    // Plugin-bundled skills are flattened into the same shared skills dirs via
+    // `materialize`, so the previous set must include them too — otherwise
+    // removing a plugin (or shrinking its bundled skill set) would orphan those
+    // skill dirs in shared locations.
+    let previously_managed: Vec<String> = prev
+        .skills
+        .keys()
+        .cloned()
+        .chain(
+            prev.plugins
+                .values()
+                .flat_map(|l| l.bundled_skills.iter().cloned()),
+        )
+        .collect();
     let previously_managed_plugins: Vec<String> = prev.plugins.keys().cloned().collect();
 
     // Stable, path-independent project id: reuse the locked one, else mint & persist.
@@ -925,8 +940,6 @@ fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Result<usize>
         });
     }
 
-    lock.save(&dir)?;
-
     // Populate the store and collect absolute paths for the vendor.
     if !manifest.skills.is_empty() {
         println!("fetching skills into store");
@@ -977,6 +990,11 @@ fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Result<usize>
         vendor.materialize(scope, &lock.id, &materialized, &previously_managed)?;
         vendor.materialize_plugins(scope, &lock.id, &plugins, &previously_managed_plugins)?;
     }
+    // Only persist `ai.lock` once every fallible step (resolution, fetching,
+    // collision checks, and vendor materialization) has succeeded — otherwise
+    // a failed `install` could leave behind a lockfile pointing at state that
+    // was never actually materialized.
+    lock.save(&dir)?;
     Ok(lock.skills.len() + lock.plugins.len())
 }
 

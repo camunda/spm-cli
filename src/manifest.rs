@@ -204,6 +204,17 @@ impl Manifest {
                 validate_subpath(sub)
                     .with_context(|| format!("plugin `{name}` in {}", p.display()))?;
             }
+            // `skills` and `plugins` share one flat namespace of dependency
+            // names (both end up materialized side by side, and commands like
+            // `update <name>`/`remove <name>` look a name up across both), so
+            // a name declared in both maps is ambiguous, not just a warning.
+            if manifest.skills.contains_key(name) {
+                bail!(
+                    "name collision in {}: `{name}` is declared as both a skill and a plugin — \
+                     dependency names must be unique across `skills` and `plugins`",
+                    p.display()
+                );
+            }
         }
         Ok(manifest)
     }

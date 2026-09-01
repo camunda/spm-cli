@@ -110,7 +110,15 @@ impl Sandbox {
     }
 
     fn skill_url(&self) -> String {
-        format!("file://{}", self.skill_repo.display())
+        // Use forward slashes even on Windows: `file://` URLs are conventionally
+        // slash-separated, and this keeps the value safe to embed directly into
+        // JSON string literals in tests that hand-write `ai.json` manifests
+        // (a raw Windows path like `C:\Users\...` contains backslash sequences
+        // that aren't valid JSON escapes).
+        format!(
+            "file://{}",
+            self.skill_repo.display().to_string().replace('\\', "/")
+        )
     }
 
     /// Add, on `main`, a full Claude Code plugin under `pkg/` — the shape spm's
@@ -2492,5 +2500,50 @@ fn status_fails_when_plugin_declared_but_not_locked() {
     assert!(
         text.contains("not in ai.lock") && text.contains("spm install"),
         "should flag the unlocked plugin and point at `spm install`: {text}"
+    );
+}
+
+/// Removing a plugin must purge its bundled skills from a *shared* global skills
+/// dir. Those skills are flattened into the same dir the vendor shares with the
+/// user's own skills, so the previous-managed set fed to `materialize` must
+/// include plugin-bundled skills — otherwise they orphan on removal.
+#[cfg(unix)]
+#[test]
+fn removing_plugin_purges_bundled_skills_from_shared_global_dir() {
+    let sb = Sandbox::new();
+    sb.add_plugin();
+    sb.ok(&["init", "-g", "--target", "copilot"]);
+    sb.ok(&[
+        "add",
+        "-g",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--path",
+        "pkg",
+        "--plugin",
+        "--name",
+        "ds",
+    ]);
+    // The plugin's bundled `composer` skill lands in the shared global dir.
+    let composer = sb.copilot_global_skills().join("composer");
+    assert!(
+        composer.join("SKILL.md").exists(),
+        "bundled skill materialized in shared global dir"
+    );
+
+    // A skill the user authored by hand in the same shared dir must survive.
+    let user = sb.copilot_global_skills().join("user-skill");
+    std::fs::create_dir_all(&user).unwrap();
+    std::fs::write(user.join("SKILL.md"), "mine\n").unwrap();
+
+    sb.ok(&["remove", "-g", "ds", "--plugin"]);
+    assert!(
+        !composer.exists(),
+        "bundled skill must be purged from the shared global dir on plugin removal"
+    );
+    assert!(
+        user.join("SKILL.md").exists(),
+        "the user's own skill in the shared dir must be preserved"
     );
 }
