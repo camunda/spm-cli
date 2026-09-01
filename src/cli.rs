@@ -110,7 +110,7 @@ enum Command {
     /// blocking (high/critical) finding is present. The same scan runs
     /// automatically as a pre-materialize gate on add/install/update.
     Scan {
-        /// Directory to scan (defaults to the current directory).
+        /// Path to scan — a file or directory (defaults to the current directory).
         #[arg(default_value = ".")]
         path: String,
     },
@@ -821,9 +821,10 @@ fn shadowed_names(scope: &Scope, expected: &[String]) -> Result<Vec<String>> {
         .collect())
 }
 
-/// `spm scan [path]` — run the content scanner over a directory and print every
-/// finding. Exits non-zero when any blocking (high/critical) finding is present
-/// so it can serve as a CI gate on skill sources.
+/// `spm scan [path]` — run the content scanner over a path (a single file or a
+/// directory) and print every finding. Exits non-zero when any blocking
+/// (high/critical) finding is present so it can serve as a CI gate on skill
+/// sources.
 fn scan_cmd(path: &Path) -> Result<()> {
     if !path.exists() {
         bail!("path does not exist: {}", path.display());

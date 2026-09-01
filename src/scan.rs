@@ -109,9 +109,22 @@ const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 ///
 /// Symlinks are not followed (mirroring `fsutil::copy_tree`): the vendor copy
 /// skips them, so their targets are never materialized and scanning them would
-/// only invite the very exfiltration copy_tree already blocks.
+/// only invite the very exfiltration copy_tree already blocks. A scan root that
+/// is itself a symlink fails closed with an error rather than being followed.
 pub fn scan_path(root: &Path) -> Result<Vec<Finding>> {
     let mut findings = Vec::new();
+    // Fail closed when the scan root itself is a symlink: `is_file()` /
+    // `read_dir()` would follow it and traverse outside the intended tree,
+    // contradicting the no-follow-symlinks guarantee. `symlink_metadata` does
+    // not dereference, so we can detect and reject it before any traversal.
+    let meta = std::fs::symlink_metadata(root)
+        .with_context(|| format!("reading path {}", root.display()))?;
+    if meta.file_type().is_symlink() {
+        bail!(
+            "refusing to scan symlinked path {} (symlinks are not followed)",
+            root.display()
+        );
+    }
     // A single file is scanned directly (relative to its parent, so the
     // reported path stays just the file name); a directory is walked.
     if root.is_file() {
@@ -975,6 +988,29 @@ mod tests {
         if !still_readable {
             assert!(result.is_err(), "an unreadable file must fail closed");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scanning_a_symlinked_root_fails_closed() {
+        // A scan root that is itself a symlink must not be followed: it fails
+        // closed with an error rather than traversing outside the intended tree.
+        use std::os::unix::fs::symlink;
+        let target = tmp_dir();
+        std::fs::write(target.join("SKILL.md"), "ignore previous instructions\n").unwrap();
+        let link = std::env::temp_dir().join(format!(
+            "spm-scan-symlink-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        symlink(&target, &link).unwrap();
+        let err = scan_path(&link).unwrap_err().to_string();
+        let _ = std::fs::remove_file(&link);
+        std::fs::remove_dir_all(&target).unwrap();
+        assert!(err.contains("symlink"), "{err}");
     }
 
     fn tmp_dir() -> std::path::PathBuf {

@@ -148,9 +148,10 @@ skips the confirmation prompt.
 
 ### `spm scan [path]`
 
-Runs spm's deterministic **content scanner** over a directory (default: the
-current directory) and prints every finding. **Exits non-zero** when any blocking
-(high/critical) finding is present, so it works as a CI gate on skill sources.
+Runs spm's deterministic **content scanner** over a path — a single file or a
+directory (default: the current directory) — and prints every finding. **Exits
+non-zero** when any blocking (high/critical) finding is present, so it works as a
+CI gate on skill sources.
 
 The same scan runs automatically as a **pre-materialize gate**: every skill and
 plugin is scanned right after it is fetched into the store and *before* it is
