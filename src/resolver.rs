@@ -28,5 +28,6 @@ pub fn resolve(spec: &SkillSpec) -> Result<LockedSkill> {
         store: store_key(&spec.git, &commit),
         path: spec.path.clone(),
         commit,
+        bundled_skills: Vec::new(),
     })
 }

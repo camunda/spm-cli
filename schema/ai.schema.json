@@ -22,6 +22,11 @@
       "type": "object",
       "description": "Skill dependencies, keyed by local name.",
       "additionalProperties": { "$ref": "#/definitions/skill" }
+    },
+    "plugins": {
+      "type": "object",
+      "description": "Full-plugin dependencies (agents, MCP servers, hooks, scripts and bundled skills), keyed by local name. The `path` points at a Claude Code plugin root (a directory containing `.claude-plugin/plugin.json`).",
+      "additionalProperties": { "$ref": "#/definitions/skill" }
     }
   },
   "definitions": {

@@ -49,6 +49,23 @@ pub fn remove_nested(root: &mut Value, outer: &str, inner: &str) {
     }
 }
 
+/// Remove every key ending in `suffix` from the object at `outer`, dropping
+/// `outer` if it becomes empty. Used to purge all of spm's enabled-plugin
+/// entries (keyed `<plugin>@<marketplace>`) for a given marketplace without
+/// having to know each plugin's name — spm owns its whole marketplace, so any
+/// `*@<marketplace>` key is spm's to remove.
+pub fn remove_nested_by_suffix(root: &mut Value, outer: &str, suffix: &str) {
+    let Some(map) = root.as_object_mut() else {
+        return;
+    };
+    if let Some(Value::Object(m)) = map.get_mut(outer) {
+        m.retain(|k, _| !k.ends_with(suffix));
+        if m.is_empty() {
+            map.remove(outer);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

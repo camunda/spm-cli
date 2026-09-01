@@ -46,6 +46,7 @@ generated source to regenerate.
 | `src/vendor/copilot.rs` | Copilot adapter: copies skills into the gitignored, project-local `.agents/skills/spm-managed-skills/`. |
 | `tests/cli.rs` | End-to-end tests against the real binary with an isolated `SPM_HOME` per test. |
 | `schema/ai.schema.json` | Source of truth for the `ai.json` shape (draft-07); embedded by `src/schema.rs`. |
+| `docs/` | VitePress documentation site (published to GitHub Pages). User-facing docs live here — keep it in sync with `README.md` when behavior changes (`reference/` for CLI/`ai.json`/`ai.lock`/schema, `guide/` for concepts/targets). |
 | `npm/` | npm distribution: `build.mjs` generates the launcher + 5 platform packages from the crate version. |
 | `Makefile` | Convenience shortcuts over `cargo` (`make check` mirrors the CI gate). |
 | `.cargo-husky/hooks/` | Pre-commit hook (fmt + clippy) auto-installed via `cargo-husky` on first `cargo test`/`build`. |

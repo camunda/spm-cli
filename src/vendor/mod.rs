@@ -14,6 +14,15 @@ pub struct MaterializedSkill {
     pub path: PathBuf,
 }
 
+/// A resolved full plugin ready to be registered with a vendor that supports
+/// more than skills: a name (the manifest key) plus the absolute path to the
+/// plugin root in the global store (the dir holding `.claude-plugin/plugin.json`,
+/// `agents/`, `skills/`, scripts, hooks, …).
+pub struct MaterializedPlugin {
+    pub name: String,
+    pub path: PathBuf,
+}
+
 /// A per-target snapshot of what is materialized in the *current* checkout vs.
 /// what `ai.lock` declares. Powers `spm status` and, in particular, the
 /// "fresh worktree/clone not installed here" diagnostic: because spm materializes
@@ -109,6 +118,44 @@ pub trait Vendor {
     /// Report what this vendor has materialized in the given `scope`, compared
     /// against the declared `expected` skill names (from `ai.lock`).
     fn status(&self, scope: &Scope, expected: &[String]) -> Result<VendorStatus>;
+
+    /// Register full plugins (agents, MCP servers, hooks, scripts) for this
+    /// vendor. Only targets that can load more than a `SKILL.md` override this;
+    /// the default is a no-op because a plugin's *skills* are already flattened
+    /// into the ordinary [`materialize`](Vendor::materialize) list, so every
+    /// vendor gets the skills-only subset for free and only richer targets (e.g.
+    /// Claude) need to do more here.
+    ///
+    /// `previously_managed` lists the plugin names spm registered on the last
+    /// sync (from the prior lockfile), mirroring
+    /// [`materialize`](Vendor::materialize).
+    fn materialize_plugins(
+        &self,
+        _scope: &Scope,
+        _project_id: &str,
+        _plugins: &[MaterializedPlugin],
+        _previously_managed: &[String],
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Report what full plugins this vendor has materialized in `scope`,
+    /// compared against the declared plugin names (the `ai.json`/`ai.lock`
+    /// plugin keys). Returns `None` for vendors that don't register full plugins
+    /// (their plugins contribute only *skills*, already covered by
+    /// [`status`](Vendor::status)); richer targets (e.g. Claude) return `Some`
+    /// so `spm status` can catch a deleted marketplace dir or a fresh worktree
+    /// whose plugin registration was never installed here.
+    fn status_plugins(&self, _scope: &Scope, _expected: &[String]) -> Result<Option<VendorStatus>> {
+        Ok(None)
+    }
+
+    /// Remove everything this vendor registered for full plugins in this
+    /// `scope`. Counterpart to [`materialize_plugins`](Vendor::materialize_plugins);
+    /// the default is a no-op for targets that never registered any.
+    fn clean_plugins(&self, _scope: &Scope, _project_id: &str, _managed: &[String]) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Every target vendor spm knows how to materialize. Single source of truth for

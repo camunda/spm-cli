@@ -75,6 +75,49 @@ Version selectors (exactly one per skill):
 
 `path` (optional) selects a subdirectory — for monorepos holding many skills.
 
+### Full plugins (`plugins`)
+
+Alongside individual `skills`, `ai.json` can depend on a **full Claude Code
+plugin** — one that bundles agents, MCP servers, hooks and scripts in addition
+to (or instead of) skills. Declare it under a `plugins` map, keyed by local
+name, with the same git/version selectors as a skill; `path` points at the
+plugin root (the directory holding `.claude-plugin/plugin.json`):
+
+```json
+{
+  "targets": ["claude", "copilot"],
+  "plugins": {
+    "design-system": {
+      "git": "https://github.com/camunda/design-system",
+      "branch": "main",
+      "path": "plugins/camunda-design-system"
+    }
+  }
+}
+```
+
+On install:
+
+- **Claude** gets the whole plugin registered under a dedicated, project-local
+  `spm-plugins` marketplace (`.spm/claude-plugins/`), so its **agents, MCP
+  servers, hooks and scripts** all load — not just its `SKILL.md`.
+- **Every** target (including skills-only ones like Copilot, Gemini, …) still
+  gets the plugin's **bundled skills**, flattened into that target's normal
+  skills dir — a graceful, skills-only degradation.
+- `ai.lock` pins the plugin's commit and records its bundled skill set.
+
+A bundled skill whose name collides with a standalone `skills` entry (or another
+plugin's skill) is a hard error, never a silent overwrite.
+
+Add or remove a plugin from the CLI with the `--plugin` flag (point `--path` at
+the plugin root):
+
+```bash
+spm add https://github.com/camunda/design-system --branch main \
+        --path plugins/camunda-design-system --plugin --name design-system
+spm remove design-system --plugin
+```
+
 To pull in **every** skill under a directory at once (each immediate
 subdirectory that has its own `SKILL.md`), add `--all` instead of naming them
 one by one:
@@ -180,8 +223,9 @@ make install PREFIX=~/.local  # or a custom prefix
 spm init [--target amp|claude|cline|codex|copilot|cursor|gemini|windsurf ...] [-g]  # scaffold ai.json (repeatable / comma-separated)
 spm add <git> (--tag|--branch|--commit <v>) \      # add + install a skill
         [--path <subdir>] [--name <local-name>] [--all] [-g]  # --all: add every skill under --path
+        [--plugin]                                 # --plugin: add a full plugin (see "Full plugins")
 spm target add [vendor ...]                        # add target vendor(s); no arg = pick interactively
-spm remove <name> [-g]                             # drop a skill
+spm remove <name> [--plugin] [-g]                  # drop a skill (or a plugin with --plugin)
 spm update [name] [-g]                              # re-resolve branches/tags to latest
 spm install [-g]                                   # rebuild from ai.lock (after clone)
 spm list [-g]                                      # show skills + pinned commits
