@@ -232,7 +232,34 @@ spm list [-g]                                      # show skills + pinned commit
 spm status [-g]                                    # check skills are materialized in this checkout
 spm clean [-g]                                     # remove generated vendor config
 spm prune [--yes]                                  # wipe the global fetch cache ($SPM_HOME/store, default ~/.spm/store)
+spm scan [path]                                    # scan skill content for suspicious patterns (default: .)
 ```
+
+## Content scanning (security gate)
+
+Skills are markdown + scripts that Claude/Copilot auto-discover and act on, so a
+malicious or compromised skill repo could smuggle in a payload that hijacks the
+agent or exfiltrates secrets. spm runs a **deterministic content scan** over every
+fetched skill/plugin *before* it is materialized into an agent-discovered
+directory. It flags:
+
+- **Prompt injection** — "ignore previous instructions", "disregard your system prompt", etc.
+- **Secret/credential exfiltration** — references to `~/.ssh/id_rsa`, `.aws/credentials`, `.git-credentials`, `GITHUB_TOKEN`, … (escalated when paired with an outbound command).
+- **Obfuscation** — zero-width/bidi Unicode control characters, base64/hex blobs that decode to shell commands, and files padded past the 8 MiB scan cap (which would otherwise hide content behind a truncated read).
+- **Command execution / network exfil** — `curl | bash`, `/dev/tcp/…` and `nc -e` reverse shells.
+- **Path traversal** — `../../` requested in skill text.
+- **Auto-run triggers** — `postinstall` scripts, git hooks, bundled `Makefile`s.
+
+**High/critical findings block** `add`/`install`/`update`. To review a source (or
+gate it in CI) run it standalone — it exits non-zero on any blocking finding:
+
+```bash
+spm scan               # scan the current directory
+spm scan ./my-skill    # scan a specific path
+```
+
+To override the gate for content you trust (or a false positive), set
+`SPM_ALLOW_SUSPICIOUS=1` — findings are then printed as warnings but never block.
 
 ## Global skills (`-g` / `--global`)
 

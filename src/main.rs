@@ -8,6 +8,7 @@ mod manifest;
 mod paths;
 mod plugin;
 mod resolver;
+mod scan;
 mod schema;
 mod scope;
 mod skillcheck;
