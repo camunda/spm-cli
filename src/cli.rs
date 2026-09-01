@@ -355,17 +355,42 @@ fn add(scope: &Scope, req: AddRequest) -> Result<()> {
                 .unwrap_or_else(|| default_name(&git))
         });
         crate::manifest::validate_skill_name(&name)?;
+        // A dependency name lives in one flat namespace shared by `skills` and
+        // `plugins` (see `Manifest::load`), so a name already taken by the
+        // *other* map is always a hard error — even with --force, since --force
+        // only authorizes re-pinning an entry of the *same* kind, never turning
+        // a skill into a plugin (or vice versa) behind the user's back. Check
+        // this before `manifest.save`, otherwise we'd persist an ai.json that
+        // `sync`'s re-load immediately rejects, stranding the user with an
+        // invalid manifest.
+        let (this_map_has, other_map_has, other_kind) = if plugin {
+            (
+                manifest.plugins.contains_key(&name),
+                manifest.skills.contains_key(&name),
+                "skill",
+            )
+        } else {
+            (
+                manifest.skills.contains_key(&name),
+                manifest.plugins.contains_key(&name),
+                "plugin",
+            )
+        };
+        if other_map_has {
+            bail!(
+                "a {other_kind} named `{name}` already exists in {}; dependency names \
+                 must be unique across skills and plugins — pick a different name with \
+                 `--name <other>` or `spm remove` the existing {other_kind} first",
+                Manifest::path_in(&dir).display()
+            );
+        }
         // Never clobber an existing entry silently: adding a name that already
         // exists is an error unless the user opts in with --force (e.g. to
         // re-pin a version). A plugin and a skill share neither map nor the
         // vendor `<name>` namespace question here, so each `--plugin` add is
         // checked against the plugins map and each skill add against skills.
         let kind = if plugin { "plugin" } else { "skill" };
-        let occupied = if plugin {
-            manifest.plugins.contains_key(&name)
-        } else {
-            manifest.skills.contains_key(&name)
-        };
+        let occupied = this_map_has;
         if !force && occupied {
             bail!(
                 "a {kind} named `{name}` already exists in {}; either give this one \

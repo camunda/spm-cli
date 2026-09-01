@@ -2370,6 +2370,57 @@ fn add_and_remove_plugin_via_cli() {
     );
 }
 
+/// Adding a plugin whose name already names a *skill* (or vice versa) is a hard
+/// error that must be caught *before* ai.json is rewritten — otherwise the
+/// manifest would be persisted with a cross-map collision that every later
+/// command rejects, stranding the user with an invalid ai.json. `--force` must
+/// not override this (it only authorizes re-pinning a same-kind entry).
+#[test]
+fn add_rejects_cross_map_name_collision() {
+    let sb = Sandbox::new();
+    sb.add_plugin();
+    sb.ok(&["init", "--target", "claude"]);
+    // A standalone skill named `ds`.
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "ds"]);
+    let before = sb.read("ai.json");
+
+    // Adding a plugin also named `ds` must fail — even with --force.
+    let out = sb.spm(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--path",
+        "pkg",
+        "--plugin",
+        "--name",
+        "ds",
+        "--force",
+    ]);
+    assert!(
+        !out.status.success(),
+        "cross-map name collision must fail even with --force"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("unique across skills and plugins"),
+        "stderr: {stderr}"
+    );
+    // ai.json must be untouched — the collision was caught before saving.
+    assert_eq!(
+        sb.read("ai.json"),
+        before,
+        "ai.json must not be rewritten when the add is rejected"
+    );
+    let manifest: serde_json::Value = serde_json::from_str(&sb.read("ai.json")).unwrap();
+    assert!(
+        manifest
+            .get("plugins")
+            .is_none_or(|p| p.get("ds").is_none()),
+        "no plugin `ds` should have been persisted: {manifest}"
+    );
+}
+
 /// Removing a non-existent plugin (or a skill via `--plugin`) is a clear error,
 /// not a silent success.
 #[test]
