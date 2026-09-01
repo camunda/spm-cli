@@ -14,7 +14,7 @@
 //! `spm scan` command. Both share the exact same rules, so the gate and the
 //! command can never disagree about what counts as suspicious.
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
 /// How dangerous a finding is. Ordered so `>=` comparisons express thresholds.
@@ -116,7 +116,7 @@ pub fn scan_path(root: &Path) -> Result<Vec<Finding>> {
     // reported path stays just the file name); a directory is walked.
     if root.is_file() {
         let base = root.parent().unwrap_or(root);
-        scan_file(base, root, &mut findings);
+        scan_file(base, root, &mut findings)?;
     } else {
         walk(root, root, &mut findings)?;
     }
@@ -130,12 +130,12 @@ pub fn scan_path(root: &Path) -> Result<Vec<Finding>> {
 }
 
 fn walk(root: &Path, dir: &Path, out: &mut Vec<Finding>) -> Result<()> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        // A missing directory just yields no findings — the loadability check in
-        // `skillcheck` is the one that speaks to "this skill isn't really here".
-        Err(_) => return Ok(()),
-    };
+    // Fail closed: a directory we cannot enumerate (permissions, a mid-scan
+    // removal, or a non-directory passed straight in) is surfaced as an error
+    // rather than a clean result, so an unreadable tree can never silently
+    // bypass `spm scan` or the pre-materialize gate.
+    let entries =
+        std::fs::read_dir(dir).with_context(|| format!("reading directory {}", dir.display()))?;
     for entry in entries {
         let entry = entry?;
         let name = entry.file_name();
@@ -149,42 +149,44 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<Finding>) -> Result<()> {
         let path = entry.path();
         if ft.is_dir() {
             walk(root, &path, out)?;
-        } else {
-            scan_file(root, &path, out);
+        } else if ft.is_file() {
+            scan_file(root, &path, out)?;
         }
+        // Non-regular files (FIFOs, sockets, device nodes) are skipped: they
+        // carry no skill content and opening one could block indefinitely.
     }
     Ok(())
 }
 
-fn scan_file(root: &Path, path: &Path, out: &mut Vec<Finding>) {
+fn scan_file(root: &Path, path: &Path, out: &mut Vec<Finding>) -> Result<()> {
     let rel = path.strip_prefix(root).unwrap_or(path).to_path_buf();
 
     // File-level (name/shape based) rules run regardless of whether the body is
     // valid UTF-8 text.
-    scan_filename(&rel, path, out);
+    scan_filename(&rel, path, out)?;
 
-    let bytes = match read_capped(path) {
-        Some(b) => b,
-        None => return,
-    };
+    // Fail closed on an unreadable file: a transient read error or a
+    // permission-denied file must not be reported as "nothing suspicious here".
+    let bytes = read_capped(path).with_context(|| format!("reading file {}", path.display()))?;
     // Binary blobs (NUL bytes / invalid UTF-8) carry no scannable instructions;
     // treat them as opaque so we don't emit garbage-line noise.
     let text = match std::str::from_utf8(&bytes) {
         Ok(t) if !t.as_bytes().contains(&0) => t,
-        _ => return,
+        _ => return Ok(()),
     };
 
     for (idx, line) in text.lines().enumerate() {
         scan_line(&rel, idx + 1, line, out);
     }
+    Ok(())
 }
 
-fn read_capped(path: &Path) -> Option<Vec<u8>> {
+fn read_capped(path: &Path) -> std::io::Result<Vec<u8>> {
     use std::io::Read;
-    let f = std::fs::File::open(path).ok()?;
+    let f = std::fs::File::open(path)?;
     let mut buf = Vec::new();
-    f.take(MAX_FILE_BYTES).read_to_end(&mut buf).ok()?;
-    Some(buf)
+    f.take(MAX_FILE_BYTES).read_to_end(&mut buf)?;
+    Ok(buf)
 }
 
 fn push(
@@ -239,7 +241,7 @@ const NPM_LIFECYCLE: &[&str] = &[
     "prepublishOnly",
 ];
 
-fn scan_filename(rel: &Path, abs: &Path, out: &mut Vec<Finding>) {
+fn scan_filename(rel: &Path, abs: &Path, out: &mut Vec<Finding>) -> Result<()> {
     let base = rel.file_name().and_then(|s| s.to_str()).unwrap_or_default();
 
     // A Makefile's default target runs on a bare `make`, so bundling one in a
@@ -275,32 +277,32 @@ fn scan_filename(rel: &Path, abs: &Path, out: &mut Vec<Finding>) {
 
     // npm lifecycle scripts (postinstall & friends) run on `npm install`.
     if base == "package.json" {
-        if let Some(bytes) = read_capped(abs) {
-            if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                if let Some(scripts) = json.get("scripts").and_then(|s| s.as_object()) {
-                    let hooks: Vec<&str> = NPM_LIFECYCLE
-                        .iter()
-                        .copied()
-                        .filter(|k| scripts.contains_key(*k))
-                        .collect();
-                    if !hooks.is_empty() {
-                        push(
-                            out,
-                            rel,
-                            None,
-                            "npm-lifecycle-script",
-                            Category::AutoRun,
-                            Severity::Medium,
-                            format!(
-                                "package.json defines auto-run script(s): {}",
-                                hooks.join(", ")
-                            ),
-                        );
-                    }
+        let bytes = read_capped(abs).with_context(|| format!("reading file {}", abs.display()))?;
+        if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+            if let Some(scripts) = json.get("scripts").and_then(|s| s.as_object()) {
+                let hooks: Vec<&str> = NPM_LIFECYCLE
+                    .iter()
+                    .copied()
+                    .filter(|k| scripts.contains_key(*k))
+                    .collect();
+                if !hooks.is_empty() {
+                    push(
+                        out,
+                        rel,
+                        None,
+                        "npm-lifecycle-script",
+                        Category::AutoRun,
+                        Severity::Medium,
+                        format!(
+                            "package.json defines auto-run script(s): {}",
+                            hooks.join(", ")
+                        ),
+                    );
                 }
             }
         }
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -883,7 +885,9 @@ mod tests {
     }
 
     #[test]
-    fn scanning_a_missing_directory_yields_no_findings() {
+    fn scanning_a_missing_directory_fails_closed() {
+        // Fail closed: an unreadable/missing tree must surface an error, not a
+        // clean pass that could silently bypass the gate.
         let missing = std::env::temp_dir().join(format!(
             "spm-scan-missing-{}-{}",
             std::process::id(),
@@ -892,8 +896,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let f = scan_path(&missing).unwrap();
-        assert!(f.is_empty(), "{f:?}");
+        assert!(scan_path(&missing).is_err());
     }
 
     #[test]
@@ -940,6 +943,25 @@ mod tests {
         let err = enforce("bad", &bad).unwrap_err().to_string();
         std::fs::remove_dir_all(&bad).unwrap();
         assert!(err.contains("failed the content scan"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_file_fails_closed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp_dir();
+        let file = dir.join("SKILL.md");
+        std::fs::write(&file, "hi\n").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // A process able to read despite mode 0 (e.g. running as root) can't
+        // exercise the fail-closed path — skip the assertion rather than fail.
+        let still_readable = std::fs::File::open(&file).is_ok();
+        let result = scan_path(&dir);
+        let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644));
+        std::fs::remove_dir_all(&dir).unwrap();
+        if !still_readable {
+            assert!(result.is_err(), "an unreadable file must fail closed");
+        }
     }
 
     fn tmp_dir() -> std::path::PathBuf {
