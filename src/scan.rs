@@ -690,7 +690,22 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
 pub const ALLOW_ENV: &str = "SPM_ALLOW_SUSPICIOUS";
 
 fn allow_suspicious() -> bool {
-    std::env::var_os(ALLOW_ENV).is_some_and(|v| v != "0" && !v.is_empty())
+    std::env::var_os(ALLOW_ENV).is_some_and(|v| value_enables_override(&v))
+}
+
+/// Only an explicit affirmative value enables the override. Treating "any
+/// non-empty, non-zero value" as on would silently downgrade the gate when a
+/// user sets `SPM_ALLOW_SUSPICIOUS=false`/`no`/`off` expecting it *disabled*, so
+/// everything outside this small allowlist is off.
+fn value_enables_override(v: &std::ffi::OsStr) -> bool {
+    v.to_str()
+        .map(|s| {
+            matches!(
+                s.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 /// Scan a freshly-fetched skill/plugin at `root` and enforce the gate: print
@@ -714,8 +729,8 @@ pub fn enforce(label: &str, root: &Path) -> Result<()> {
         return Ok(());
     }
     bail!(
-        "skill `{label}` failed the content scan: {blocking} blocking finding(s) above. \
-         Review the skill source; if you trust it, re-run with {ALLOW_ENV}=1 to override."
+        "`{label}` failed the content scan: {blocking} blocking finding(s) above. \
+         Review the source; if you trust it, re-run with {ALLOW_ENV}=1 to override."
     );
 }
 
@@ -1032,6 +1047,27 @@ mod tests {
         let err = enforce("bad", &bad).unwrap_err().to_string();
         std::fs::remove_dir_all(&bad).unwrap();
         assert!(err.contains("failed the content scan"), "{err}");
+        // Neutral wording: `enforce` runs for plugins too, so it must not
+        // hard-code "skill" in the failure message.
+        assert!(!err.contains("skill `"), "{err}");
+        assert!(err.contains("`bad`"), "{err}");
+    }
+
+    #[test]
+    fn override_env_only_enables_on_explicit_affirmative_values() {
+        use std::ffi::OsStr;
+        for on in ["1", "true", "TRUE", "yes", "on", " on ", "On"] {
+            assert!(
+                value_enables_override(OsStr::new(on)),
+                "{on:?} should enable"
+            );
+        }
+        for off in ["0", "", "false", "no", "off", "2", "disable", "nope"] {
+            assert!(
+                !value_enables_override(OsStr::new(off)),
+                "{off:?} should not enable"
+            );
+        }
     }
 
     #[cfg(unix)]
