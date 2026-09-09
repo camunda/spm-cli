@@ -149,17 +149,18 @@ pub(super) fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Re
                     .unwrap_or_default()
             );
         }
-        let bundled = crate::plugin::plugin_skills(&ensured.path)
+        let bundled = crate::plugin::plugin_skills(&ensured.path, &ensured.root)
             .with_context(|| format!("enumerating skills bundled in plugin `{name}`"))?;
         locked.bundled_skills = bundled.iter().map(|s| s.name.clone()).collect();
         // Scan the whole plugin tree (agents, scripts, hooks, bundled skills)
         // before any of it is materialized into an agent-discovered directory.
-        crate::scan::enforce(name, &ensured.path)
+        crate::scan::enforce(name, &ensured.path, &ensured.root)
             .with_context(|| format!("scanning plugin `{name}`"))?;
         plugin_skills.extend(bundled);
         plugins.push(MaterializedPlugin {
             name: name.clone(),
             path: ensured.path,
+            root: ensured.root,
         });
     }
 
@@ -182,15 +183,17 @@ pub(super) fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Re
             &locked.reference,
             locked.path.as_deref(),
             &ensured.path,
+            &ensured.root,
         );
         // Pre-materialize security gate: scan the fetched content before it is
         // copied into any agent-discovered directory. Blocks on high/critical
         // findings unless SPM_ALLOW_SUSPICIOUS is set.
-        crate::scan::enforce(name, &ensured.path)
+        crate::scan::enforce(name, &ensured.path, &ensured.root)
             .with_context(|| format!("scanning skill `{name}`"))?;
         materialized.push(MaterializedSkill {
             name: name.clone(),
             path: ensured.path,
+            root: ensured.root,
         });
     }
 

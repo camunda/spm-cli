@@ -5,6 +5,7 @@
 //! each vendor adapter, so the `SKILL.md` presence check is a single source of
 //! truth and is emitted once regardless of how many vendors are configured.
 
+use crate::fsutil;
 use std::path::Path;
 
 /// Inspect a materialized skill and print an actionable warning to stderr when
@@ -21,12 +22,13 @@ pub fn warn_if_not_loadable(
     reference: &str,
     subpath: Option<&str>,
     content: &Path,
+    boundary: &Path,
 ) {
-    if is_regular_file(&content.join("SKILL.md")) {
+    if is_materialized_file(&content.join("SKILL.md"), boundary) {
         return;
     }
 
-    let subskills = child_skills(content);
+    let subskills = child_skills(content, boundary);
     if subskills.is_empty() {
         eprintln!("warning: skill `{name}` has no SKILL.md at its root — agents may ignore it");
         return;
@@ -65,11 +67,11 @@ fn selector_flag(reference: &str) -> String {
 /// container?": both the no-SKILL.md suggestion above and `spm add --all` (which
 /// materializes every sub-skill at once) enumerate them the same way, so the two
 /// can never disagree about which directories count as skills.
-pub(crate) fn child_skills(dir: &Path) -> Vec<String> {
+pub(crate) fn child_skills(dir: &Path, boundary: &Path) -> Vec<String> {
     let mut names: Vec<String> = match std::fs::read_dir(dir) {
         Ok(entries) => entries
             .flatten()
-            .filter(|e| is_regular_file(&e.path().join("SKILL.md")))
+            .filter(|e| is_materialized_file(&e.path().join("SKILL.md"), boundary))
             .filter_map(|e| e.file_name().into_string().ok())
             .collect(),
         Err(_) => Vec::new(),
@@ -78,14 +80,23 @@ pub(crate) fn child_skills(dir: &Path) -> Vec<String> {
     names
 }
 
-/// True only for a real regular file — **not** a symlink (even one that resolves
-/// to a file). This mirrors `fsutil::copy_tree`, which skips symlinks: a
-/// symlinked `SKILL.md` is never copied into the vendor dir, so treating it as
-/// present here would wrongly suppress the "agents may ignore it" warning.
-fn is_regular_file(path: &Path) -> bool {
-    std::fs::symlink_metadata(path)
-        .map(|m| m.file_type().is_file())
-        .unwrap_or(false)
+/// True when `path` will be materialized as a regular file — either a real file,
+/// or a symlink whose target resolves to a file **inside** `boundary` (the repo
+/// checkout root). This mirrors [`fsutil::copy_tree`], which now follows
+/// in-checkout symlinks: a `SKILL.md` symlinked to another file in the same
+/// checkout *is* materialized, so it must count as present here (otherwise the
+/// "agents may ignore it" warning would fire even though the file lands). A
+/// symlink that escapes the checkout is skipped by the copy, so it is not
+/// counted here either — keeping this check and the copy in lockstep.
+fn is_materialized_file(path: &Path, boundary: &Path) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_file() => true,
+        Ok(m) if m.file_type().is_symlink() => fsutil::resolve_within(boundary, path)
+            .and_then(|target| std::fs::metadata(&target).ok())
+            .map(|target| target.is_file())
+            .unwrap_or(false),
+        _ => false,
+    }
 }
 
 /// Join an optional parent subpath with a child directory name using forward

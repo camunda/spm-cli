@@ -97,8 +97,9 @@ impl Sandbox {
     }
 
     /// Add, on `main`, a `linked/` skill dir whose `SKILL.md` is a **symlink**
-    /// (to a sibling regular file). Since `copy_tree` skips symlinks, the
-    /// materialized skill ends up with no `SKILL.md`, so spm must still warn.
+    /// to a sibling regular file inside the same checkout. Such an in-checkout
+    /// symlink is now followed by `copy_tree`, so the materialized skill *does*
+    /// get a `SKILL.md` and spm must not warn.
     #[cfg(unix)]
     fn add_symlinked_skill(&self) {
         let dir = self.skill_repo.join("linked");
@@ -107,6 +108,22 @@ impl Sandbox {
         std::os::unix::fs::symlink("real.md", dir.join("SKILL.md")).unwrap();
         self.git(&["add", "-A"]);
         self.git(&["commit", "-qm", "add symlinked skill"]);
+    }
+
+    /// Add, on `main`, an `escaping/` skill dir whose `SKILL.md` is a **symlink**
+    /// pointing at an absolute path *outside* the store checkout (a secret in the
+    /// sandbox root). `copy_tree` must never follow it, so the materialized skill
+    /// ends up with no `SKILL.md` (spm still warns) and the secret never lands in
+    /// the vendor dir.
+    #[cfg(unix)]
+    fn add_escaping_symlinked_skill(&self) {
+        let secret = self.root.join("secret-outside-checkout.md");
+        std::fs::write(&secret, "TOP SECRET\n").unwrap();
+        let dir = self.skill_repo.join("escaping");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink(&secret, dir.join("SKILL.md")).unwrap();
+        self.git(&["add", "-A"]);
+        self.git(&["commit", "-qm", "add escaping symlinked skill"]);
     }
 
     /// Add, on `main`, a `malicious/` skill whose `SKILL.md` bundles a
@@ -177,6 +194,59 @@ impl Sandbox {
         .unwrap();
         self.git(&["add", "-A"]);
         self.git(&["commit", "-qm", "add plugin"]);
+        "camunda-design-system".to_string()
+    }
+
+    /// Mirror `camunda/design-system`'s layout: a plugin subdir
+    /// (`plugins/cds`) whose `agents/`, `knowledge/`, and `skills/` are symlinks
+    /// to repo-root directories (`../../{agents,knowledge,skills}`). Those targets
+    /// live *outside* the declared plugin subdir but *inside* the checkout, so
+    /// spm must follow them and materialize the linked content. Returns the
+    /// plugin's internal name.
+    #[cfg(unix)]
+    fn add_symlinked_plugin(&self) -> String {
+        use std::os::unix::fs::symlink;
+        // Repo-root shared assets the plugin re-uses via symlinks.
+        for agent in ["dev", "migration", "spec-author", "ui-builder", "validator"] {
+            let dir = self.skill_repo.join("agents");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join(format!("{agent}.md")),
+                format!("---\nname: {agent}\n---\nI am the {agent} agent.\n"),
+            )
+            .unwrap();
+        }
+        let knowledge = self.skill_repo.join("knowledge");
+        std::fs::create_dir_all(&knowledge).unwrap();
+        std::fs::write(knowledge.join("guide.md"), "# Design guide\n").unwrap();
+        let skill = self.skill_repo.join("skills").join("composer");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: composer\ndescription: Compose things.\n---\nCompose.\n",
+        )
+        .unwrap();
+
+        // The plugin subdir: real files plus symlinks to the shared assets.
+        let pkg = self.skill_repo.join("plugins").join("cds");
+        let cp = pkg.join(".claude-plugin");
+        std::fs::create_dir_all(&cp).unwrap();
+        std::fs::write(
+            cp.join("plugin.json"),
+            r#"{ "name": "camunda-design-system", "version": "1.0.0", "skills": "./skills/" }
+"#,
+        )
+        .unwrap();
+        std::fs::write(pkg.join("hook-settings.json"), "{}\n").unwrap();
+        let scripts = pkg.join("scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(scripts.join("run.mjs"), "// script\n").unwrap();
+        symlink("../../agents", pkg.join("agents")).unwrap();
+        symlink("../../knowledge", pkg.join("knowledge")).unwrap();
+        symlink("../../skills", pkg.join("skills")).unwrap();
+
+        self.git(&["add", "-A"]);
+        self.git(&["commit", "-qm", "add symlinked plugin"]);
         "camunda-design-system".to_string()
     }
 
@@ -935,14 +1005,14 @@ fn missing_skill_md_without_subskills_warns_once_generically() {
 
 #[cfg(unix)]
 #[test]
-fn symlinked_skill_md_still_warns() {
+fn in_checkout_symlinked_skill_md_is_materialized() {
     let sb = Sandbox::new();
     sb.add_symlinked_skill();
     sb.ok(&["init", "--target", "copilot"]);
 
-    // `linked/SKILL.md` is a symlink, which copy_tree skips — so the vendor dir
-    // ends up with no SKILL.md. The check must not be fooled into silence by the
-    // symlink resolving to a file in the store.
+    // `linked/SKILL.md` is a symlink to a sibling file inside the same checkout,
+    // so copy_tree now follows it: the SKILL.md is materialized and no warning
+    // fires.
     let out = sb.spm(&[
         "add",
         &sb.skill_url(),
@@ -956,14 +1026,55 @@ fn symlinked_skill_md_still_warns() {
     assert!(out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        err.contains("has no SKILL.md at its root"),
-        "symlinked SKILL.md must still warn: {err}"
+        !err.contains("has no SKILL.md at its root"),
+        "in-checkout symlinked SKILL.md must be treated as present: {err}"
     );
-    // And nothing landed in the materialized dir root.
-    assert!(!sb
+    let materialized = sb
         .project
-        .join(".agents/skills/spm-managed-skills/linked/SKILL.md")
-        .exists());
+        .join(".agents/skills/spm-managed-skills/linked/SKILL.md");
+    assert!(
+        materialized.exists(),
+        "symlinked SKILL.md must be materialized"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&materialized).unwrap(),
+        "---\nname: linked\n---\n"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn escaping_symlinked_skill_md_is_skipped_and_warns() {
+    let sb = Sandbox::new();
+    sb.add_escaping_symlinked_skill();
+    sb.ok(&["init", "--target", "copilot"]);
+
+    // `escaping/SKILL.md` points outside the store checkout: copy_tree must not
+    // follow it. The vendor dir ends up with no SKILL.md (so spm warns) and the
+    // secret never lands there — the exfiltration boundary is preserved.
+    let out = sb.spm(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--path",
+        "escaping",
+        "--name",
+        "escaping",
+    ]);
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("has no SKILL.md at its root"),
+        "escaping symlinked SKILL.md must still warn: {err}"
+    );
+    let materialized = sb
+        .project
+        .join(".agents/skills/spm-managed-skills/escaping/SKILL.md");
+    assert!(
+        !materialized.exists(),
+        "an escaping symlink must never be materialized"
+    );
 }
 
 #[test]
@@ -2343,8 +2454,63 @@ fn plugin_install_materializes_agents_and_degrades_skills() {
     assert!(lock.contains("composer"), "composer recorded: {lock}");
 }
 
-/// A bundled skill whose name collides with a standalone skill is a hard error,
-/// not a silent overwrite.
+/// Acceptance test for the camunda/design-system case (issue #84): a plugin
+/// whose `agents/`, `knowledge/`, and `skills/` are symlinks to repo-root
+/// directories (outside the declared plugin subdir but inside the checkout)
+/// must have that symlinked content materialized, not silently skipped.
+#[cfg(unix)]
+#[test]
+fn plugin_with_in_checkout_symlinked_dirs_materializes_linked_content() {
+    let sb = Sandbox::new();
+    let plugin_name = sb.add_symlinked_plugin();
+    sb.ok(&["init", "--target", "claude", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["claude","copilot"],"plugins":{{"cds":{{"git":"{}","branch":"main","path":"plugins/cds"}}}}}}"#,
+            sb.skill_url()
+        ),
+    );
+
+    sb.ok(&["install"]);
+
+    let pdir = sb.project.join(".spm/claude-plugins/cds");
+    // All five agents reached via the `agents -> ../../agents` symlink land.
+    for agent in ["dev", "migration", "spec-author", "ui-builder", "validator"] {
+        assert!(
+            pdir.join(format!("agents/{agent}.md")).exists(),
+            "symlinked agent `{agent}` must be materialized"
+        );
+    }
+    // The knowledge dir (also symlinked) is materialized too.
+    assert!(
+        pdir.join("knowledge/guide.md").exists(),
+        "symlinked knowledge dir must be materialized"
+    );
+    // Real (non-symlinked) files still land as before.
+    assert!(
+        pdir.join("scripts/run.mjs").exists(),
+        "real plugin scripts materialized"
+    );
+    // The bundled skill reached through the `skills -> ../../skills` symlink is
+    // enumerated and degraded into the skills marketplaces.
+    assert!(
+        sb.project
+            .join(".agents/skills/spm-managed-skills/composer/SKILL.md")
+            .exists(),
+        "bundled skill (via symlinked skills dir) degraded into Copilot skills dir"
+    );
+
+    let market: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            sb.project
+                .join(".spm/claude-plugins/.claude-plugin/marketplace.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(market["plugins"][0]["name"], plugin_name);
+}
 #[test]
 fn plugin_bundled_skill_name_collision_is_rejected() {
     let sb = Sandbox::new();

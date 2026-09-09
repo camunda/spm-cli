@@ -27,7 +27,7 @@ pub fn copy_skills_into(dir: &Path, skills: &[MaterializedSkill]) -> Result<()> 
             std::fs::remove_dir_all(&dest)
                 .with_context(|| format!("clearing {}", dest.display()))?;
         }
-        fsutil::copy_tree(&s.path, &dest)
+        fsutil::copy_tree(&s.path, &dest, &s.root)
             .with_context(|| format!("copying skill `{}` into {}", s.name, dir.display()))?;
     }
     Ok(())
@@ -69,6 +69,7 @@ mod tests {
         MaterializedSkill {
             name: name.to_string(),
             path: src,
+            root: root.to_path_buf(),
         }
     }
 

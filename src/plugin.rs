@@ -67,7 +67,7 @@ pub fn plugin_name(root: &Path, fallback: &str) -> Result<String> {
 /// The skills dir is taken from `plugin.json`'s `skills` field (default
 /// `skills`) and validated to stay inside the plugin root. Returns an empty vec
 /// when the plugin declares no skills dir or it holds none.
-pub fn plugin_skills(root: &Path) -> Result<Vec<MaterializedSkill>> {
+pub fn plugin_skills(root: &Path, boundary: &Path) -> Result<Vec<MaterializedSkill>> {
     let meta = read_plugin_json(root)?;
     // Normalize the declared skills path (strip a leading `./`, trailing `/`).
     let rel = meta.skills.as_deref().unwrap_or("skills");
@@ -99,7 +99,11 @@ pub fn plugin_skills(root: &Path) -> Result<Vec<MaterializedSkill>> {
         // so it must pass the same escape checks as a manifest skill name.
         validate_skill_name(&name)
             .with_context(|| format!("bundled skill in plugin at {}", root.display()))?;
-        out.push(MaterializedSkill { name, path });
+        out.push(MaterializedSkill {
+            name,
+            path,
+            root: boundary.to_path_buf(),
+        });
     }
     Ok(out)
 }
@@ -149,7 +153,7 @@ mod tests {
     fn plugin_skills_enumerates_only_skill_dirs() {
         let root = scratch("skills");
         make_plugin(&root, r#"{"name":"p","skills":"./skills/"}"#, &["a", "b"]);
-        let mut got: Vec<String> = plugin_skills(&root)
+        let mut got: Vec<String> = plugin_skills(&root, &root)
             .unwrap()
             .into_iter()
             .map(|s| s.name)
@@ -164,7 +168,7 @@ mod tests {
         let root = scratch("default-dir");
         // No `skills` key → defaults to `skills/`.
         make_plugin(&root, r#"{"name":"p"}"#, &["only"]);
-        let got = plugin_skills(&root).unwrap();
+        let got = plugin_skills(&root, &root).unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].name, "only");
         std::fs::remove_dir_all(&root).unwrap();
@@ -173,7 +177,7 @@ mod tests {
         let bare = scratch("bare");
         std::fs::create_dir_all(bare.join(".claude-plugin")).unwrap();
         std::fs::write(bare.join(".claude-plugin/plugin.json"), r#"{"name":"p"}"#).unwrap();
-        assert!(plugin_skills(&bare).unwrap().is_empty());
+        assert!(plugin_skills(&bare, &bare).unwrap().is_empty());
         std::fs::remove_dir_all(&bare).unwrap();
     }
 }

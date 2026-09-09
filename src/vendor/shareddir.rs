@@ -209,6 +209,7 @@ mod tests {
         MaterializedSkill {
             name: name.to_string(),
             path: src,
+            root: root.to_path_buf(),
         }
     }
 

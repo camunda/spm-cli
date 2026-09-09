@@ -12,6 +12,9 @@ use std::path::{Path, PathBuf};
 pub struct MaterializedSkill {
     pub name: String,
     pub path: PathBuf,
+    /// Canonical repo checkout root that bounds symlink following when this
+    /// skill is copied into a vendor dir (see [`crate::store::Ensured::root`]).
+    pub root: PathBuf,
 }
 
 /// A resolved full plugin ready to be registered with a vendor that supports
@@ -21,6 +24,9 @@ pub struct MaterializedSkill {
 pub struct MaterializedPlugin {
     pub name: String,
     pub path: PathBuf,
+    /// Canonical repo checkout root that bounds symlink following when this
+    /// plugin is copied into a vendor dir (see [`crate::store::Ensured::root`]).
+    pub root: PathBuf,
 }
 
 /// A per-target snapshot of what is materialized in the *current* checkout vs.
