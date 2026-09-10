@@ -2,21 +2,35 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
 /// Resolve `link` (a symlink) and return its canonical target **iff** that
-/// target still resolves inside `boundary` (the repo checkout root). Returns
-/// `None` for a broken symlink or one whose target escapes the boundary — the
-/// caller then skips it, preserving the "never follow a symlink out of the
-/// checkout" security guarantee.
+/// target still resolves inside `boundary` (the repo checkout root) and does
+/// not reach into a `.git` directory. Returns `None` for a broken symlink, one
+/// whose target escapes the boundary, or one that resolves into `.git` — the
+/// caller then skips it, preserving both the "never follow a symlink out of the
+/// checkout" and the "never materialize `.git`" guarantees.
 ///
 /// `boundary` is canonicalized here so the containment check compares like for
 /// like on every platform (Windows verbatim `\\?\` prefixes included). This is
-/// the single source of truth for "does this symlink stay inside the checkout?",
-/// shared by the copy (`copy_tree`), the pre-materialize scan (`scan`), and the
-/// skill-loadability check (`skillcheck`), so they can never disagree about
-/// which symlinks are followed.
+/// the single source of truth for "does this symlink stay inside the checkout
+/// (and out of `.git`)?", shared by the copy (`copy_tree`), the pre-materialize
+/// scan (`scan`), and the skill-loadability check (`skillcheck`), so they can
+/// never disagree about which symlinks are followed.
+///
+/// The `.git` exclusion matters because `copy_tree`/`scan` skip a `.git` entry
+/// by *name* at every directory level, but a symlink target like `assets ->
+/// ../../.git` would otherwise slip past that filter and copy the whole repo
+/// metadata dir under an arbitrary name. Rejecting any resolved target with a
+/// `.git` path component (relative to the boundary) keeps the two filters in
+/// lockstep.
 pub fn resolve_within(boundary: &Path, link: &Path) -> Option<PathBuf> {
     let boundary = std::fs::canonicalize(boundary).ok()?;
     let target = std::fs::canonicalize(link).ok()?;
-    (target == boundary || target.starts_with(&boundary)).then_some(target)
+    // `strip_prefix` succeeds only when `target` is `boundary` itself (empty
+    // relative path) or lies within it — this is the containment check.
+    let rel = target.strip_prefix(&boundary).ok()?;
+    if rel.components().any(|c| c.as_os_str() == ".git") {
+        return None;
+    }
+    Some(target)
 }
 
 /// Recursively copy `src` dir into `dst`, skipping the `.git` directory.
@@ -186,6 +200,38 @@ mod tests {
         copy_tree(&plugin, &dst, &checkout).unwrap();
 
         assert!(dst.join("real.txt").exists());
+        std::fs::remove_dir_all(&checkout).ok();
+        std::fs::remove_dir_all(&dst_root).ok();
+    }
+
+    #[test]
+    fn skips_symlink_resolving_into_dotgit() {
+        // A symlink pointing at the checkout's `.git` resolves *inside* the
+        // boundary but must still be refused: copy_tree/scan skip `.git` by
+        // name, and following it via a symlink would copy the whole repo
+        // metadata dir under an arbitrary name.
+        let checkout = scratch("dotgit");
+        std::fs::create_dir_all(checkout.join(".git")).unwrap();
+        std::fs::write(checkout.join(".git/config"), "[core]\n").unwrap();
+        let plugin = checkout.join("plugins/p");
+        std::fs::create_dir_all(&plugin).unwrap();
+        std::fs::write(plugin.join("real.txt"), "real\n").unwrap();
+        symlink("../../.git", plugin.join("sneaky")).unwrap();
+        // Also a symlink to a file *inside* `.git`.
+        symlink("../../.git/config", plugin.join("cfg")).unwrap();
+
+        // resolve_within itself refuses both.
+        assert!(resolve_within(&checkout, &plugin.join("sneaky")).is_none());
+        assert!(resolve_within(&checkout, &plugin.join("cfg")).is_none());
+
+        let dst_root = scratch("dotgit-dst");
+        let dst = dst_root.join("out");
+        copy_tree(&plugin, &dst, &checkout).unwrap();
+
+        assert!(dst.join("real.txt").exists());
+        // Neither the `.git` dir nor any file inside it is materialized.
+        assert!(!dst.join("sneaky").exists());
+        assert!(!dst.join("cfg").exists());
         std::fs::remove_dir_all(&checkout).ok();
         std::fs::remove_dir_all(&dst_root).ok();
     }
