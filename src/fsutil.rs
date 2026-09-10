@@ -87,7 +87,9 @@ fn copy_dir(src: &Path, dst: &Path, boundary: &Path, stack: &mut Vec<PathBuf>) -
         );
         return Ok(());
     }
-    std::fs::create_dir_all(dst)?;
+    // Detect an in-boundary symlink cycle *before* creating the destination, so
+    // a skipped cycle entry (e.g. `loop -> .`) does not leave an empty
+    // placeholder directory in the materialized output.
     if stack.contains(&src_canon) {
         eprintln!(
             "warning: skipping already-visited directory `{}` (symlink cycle)",
@@ -95,6 +97,7 @@ fn copy_dir(src: &Path, dst: &Path, boundary: &Path, stack: &mut Vec<PathBuf>) -
         );
         return Ok(());
     }
+    std::fs::create_dir_all(dst)?;
     stack.push(src_canon);
 
     for entry in std::fs::read_dir(src)? {
@@ -224,6 +227,8 @@ mod tests {
         copy_tree(&plugin, &dst, &checkout).unwrap();
 
         assert!(dst.join("real.txt").exists());
+        // The skipped cycle entry must not leave an empty placeholder dir.
+        assert!(!dst.join("loop").exists());
         std::fs::remove_dir_all(&checkout).ok();
         std::fs::remove_dir_all(&dst_root).ok();
     }
