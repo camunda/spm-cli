@@ -131,7 +131,8 @@ mod tests {
         std::fs::write(plugin.join("real.txt"), "real\n").unwrap();
         symlink("../../agents", plugin.join("agents")).unwrap();
 
-        let dst = scratch("in-root-dst").join("out");
+        let dst_root = scratch("in-root-dst");
+        let dst = dst_root.join("out");
         copy_tree(&plugin, &dst, &checkout).unwrap();
 
         assert_eq!(
@@ -144,6 +145,7 @@ mod tests {
             "dev\n"
         );
         std::fs::remove_dir_all(&checkout).ok();
+        std::fs::remove_dir_all(&dst_root).ok();
     }
 
     #[test]
@@ -157,7 +159,8 @@ mod tests {
         std::fs::write(outside.join("secret.txt"), "TOP SECRET\n").unwrap();
         symlink(outside.join("secret.txt"), plugin.join("secret.txt")).unwrap();
 
-        let dst = scratch("escape-dst").join("out");
+        let dst_root = scratch("escape-dst");
+        let dst = dst_root.join("out");
         copy_tree(&plugin, &dst, &checkout).unwrap();
 
         assert!(dst.join("real.txt").exists());
@@ -165,6 +168,7 @@ mod tests {
         assert!(!dst.join("secret.txt").exists());
         std::fs::remove_dir_all(&checkout).ok();
         std::fs::remove_dir_all(&outside).ok();
+        std::fs::remove_dir_all(&dst_root).ok();
     }
 
     #[test]
@@ -177,10 +181,12 @@ mod tests {
         // inside the boundary. It must not send the copy into an infinite loop.
         symlink(".", plugin.join("loop")).unwrap();
 
-        let dst = scratch("cycle-dst").join("out");
+        let dst_root = scratch("cycle-dst");
+        let dst = dst_root.join("out");
         copy_tree(&plugin, &dst, &checkout).unwrap();
 
         assert!(dst.join("real.txt").exists());
         std::fs::remove_dir_all(&checkout).ok();
+        std::fs::remove_dir_all(&dst_root).ok();
     }
 }
