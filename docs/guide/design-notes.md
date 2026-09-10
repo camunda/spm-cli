@@ -41,8 +41,16 @@ re-implemented per vendor.
 
 ## Safe copies
 
-The recursive copy skips `.git` and does not follow symlinks — a skill repo can't
-smuggle files out of your tree through a crafted link.
+The recursive copy skips `.git` and follows a symlink **only when its target
+resolves inside the same store checkout** (the cloned repo). This lets a plugin
+re-use shared assets it symlinks elsewhere in its own repo (e.g.
+`plugins/x/agents -> ../../agents`) while still refusing to follow a link that
+escapes the checkout — so a skill repo can't smuggle files out of your tree
+through a crafted link like `SKILL.md -> ../../../.ssh/id_rsa`. The containment
+check compares canonical paths, so it behaves the same on Linux, macOS, and
+Windows; creating symlinks on Windows needs privilege, but *following* one that
+already exists in a checkout works identically. Symlink cycles that stay inside
+the checkout are detected and skipped rather than followed forever.
 
 ## Single source of truth
 

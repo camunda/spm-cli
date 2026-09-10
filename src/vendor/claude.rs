@@ -76,7 +76,7 @@ impl Vendor for Claude {
 
         for s in skills {
             let dest = skills_dir.join(&s.name);
-            fsutil::copy_tree(&s.path, &dest)
+            fsutil::copy_tree(&s.path, &dest, &s.root)
                 .with_context(|| format!("copying skill `{}` into plugin", s.name))?;
         }
 
@@ -174,7 +174,7 @@ impl Vendor for Claude {
         let mut entries: Vec<Value> = Vec::new();
         for p in plugins {
             let dest = market_dir.join(&p.name);
-            fsutil::copy_tree(&p.path, &dest)
+            fsutil::copy_tree(&p.path, &dest, &p.root)
                 .with_context(|| format!("copying plugin `{}` into marketplace", p.name))?;
             // The plugin's bundled skills are already served through the `spm`
             // skills marketplace (flattened into the ordinary skills list), so
@@ -387,6 +387,7 @@ mod tests {
         MaterializedSkill {
             name: name.to_string(),
             path: src,
+            root: root.to_path_buf(),
         }
     }
 

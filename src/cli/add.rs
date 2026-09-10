@@ -140,7 +140,7 @@ fn add_all(
     let locked =
         resolver::resolve(&container).context("resolving container to enumerate skills")?;
     let ensured = store::ensure(&locked).context("fetching container to enumerate skills")?;
-    let subs = crate::skillcheck::child_skills(&ensured.path);
+    let subs = crate::skillcheck::child_skills(&ensured.path, &ensured.root);
     if subs.is_empty() {
         bail!(
             "--path `{}` is not a container of skills (no immediate subdirectory has a SKILL.md). \

@@ -6,6 +6,11 @@ use std::path::{Path, PathBuf};
 pub struct Ensured {
     /// Absolute path to the skill content (repo root, or subdir if `path` is set).
     pub path: PathBuf,
+    /// Canonical path to the repo checkout root in the store. This is the
+    /// security boundary for symlink following: content materialized from
+    /// `path` may follow a symlink only when its target stays within `root`
+    /// (see [`crate::fsutil::copy_tree`]).
+    pub root: PathBuf,
     /// True if the repo was fetched now; false if already present in the store.
     pub fetched: bool,
 }
@@ -50,6 +55,7 @@ pub fn ensure(locked: &LockedSkill) -> Result<Ensured> {
     }
     Ok(Ensured {
         path: content_canon,
+        root: repo_canon,
         fetched,
     })
 }

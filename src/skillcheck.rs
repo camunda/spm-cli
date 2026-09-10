@@ -5,6 +5,7 @@
 //! each vendor adapter, so the `SKILL.md` presence check is a single source of
 //! truth and is emitted once regardless of how many vendors are configured.
 
+use crate::fsutil;
 use std::path::Path;
 
 /// Inspect a materialized skill and print an actionable warning to stderr when
@@ -21,12 +22,14 @@ pub fn warn_if_not_loadable(
     reference: &str,
     subpath: Option<&str>,
     content: &Path,
+    boundary: &Path,
 ) {
-    if is_regular_file(&content.join("SKILL.md")) {
+    let boundary_canon = std::fs::canonicalize(boundary).unwrap_or_else(|_| boundary.to_path_buf());
+    if is_materialized_file(&content.join("SKILL.md"), &boundary_canon) {
         return;
     }
 
-    let subskills = child_skills(content);
+    let subskills = child_skills(content, boundary);
     if subskills.is_empty() {
         eprintln!("warning: skill `{name}` has no SKILL.md at its root — agents may ignore it");
         return;
@@ -65,11 +68,15 @@ fn selector_flag(reference: &str) -> String {
 /// container?": both the no-SKILL.md suggestion above and `spm add --all` (which
 /// materializes every sub-skill at once) enumerate them the same way, so the two
 /// can never disagree about which directories count as skills.
-pub(crate) fn child_skills(dir: &Path) -> Vec<String> {
+pub(crate) fn child_skills(dir: &Path, boundary: &Path) -> Vec<String> {
+    // Canonicalize the boundary once (fall back to the raw path if it cannot be
+    // resolved — this is a warn-only path, never a gate) so the per-entry
+    // `SKILL.md` checks below only canonicalize each entry, not the boundary.
+    let boundary_canon = std::fs::canonicalize(boundary).unwrap_or_else(|_| boundary.to_path_buf());
     let mut names: Vec<String> = match std::fs::read_dir(dir) {
         Ok(entries) => entries
             .flatten()
-            .filter(|e| is_regular_file(&e.path().join("SKILL.md")))
+            .filter(|e| is_materialized_file(&e.path().join("SKILL.md"), &boundary_canon))
             .filter_map(|e| e.file_name().into_string().ok())
             .collect(),
         Err(_) => Vec::new(),
@@ -78,13 +85,27 @@ pub(crate) fn child_skills(dir: &Path) -> Vec<String> {
     names
 }
 
-/// True only for a real regular file — **not** a symlink (even one that resolves
-/// to a file). This mirrors `fsutil::copy_tree`, which skips symlinks: a
-/// symlinked `SKILL.md` is never copied into the vendor dir, so treating it as
-/// present here would wrongly suppress the "agents may ignore it" warning.
-fn is_regular_file(path: &Path) -> bool {
-    std::fs::symlink_metadata(path)
-        .map(|m| m.file_type().is_file())
+/// True when `path` will be materialized as a regular file by
+/// [`fsutil::copy_tree`] — i.e. it resolves, through any intermediate symlinks,
+/// to a regular file that stays **inside** `boundary_canon` (the *canonical*
+/// repo checkout root) and out of `.git`. Routing the whole path through
+/// [`fsutil::resolve_within_canonical`] — rather than a shallow
+/// `symlink_metadata` on the final component — is what keeps this in lockstep
+/// with the copy: an escaping *intermediate* directory symlink (e.g. `dir ->
+/// /etc`, then `dir/SKILL.md`) canonicalizes outside the boundary, so it is
+/// *not* counted here, exactly as copy_tree refuses to descend into it. An
+/// in-checkout `SKILL.md` (real, or a symlink to another in-checkout file)
+/// counts as present so the "agents may ignore it" warning does not fire even
+/// though the file lands.
+///
+/// `boundary_canon` must already be canonical. This is the single source of
+/// truth for "will this file be materialized?", shared with
+/// [`crate::plugin::plugin_skills`] so bundled-skill enumeration cannot count a
+/// `SKILL.md` the copy would skip.
+pub(crate) fn is_materialized_file(path: &Path, boundary_canon: &Path) -> bool {
+    fsutil::resolve_within_canonical(boundary_canon, path)
+        .and_then(|target| std::fs::metadata(&target).ok())
+        .map(|meta| meta.is_file())
         .unwrap_or(false)
 }
 
