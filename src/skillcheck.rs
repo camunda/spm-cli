@@ -97,7 +97,12 @@ pub(crate) fn child_skills(dir: &Path, boundary: &Path) -> Vec<String> {
 /// in-checkout `SKILL.md` (real, or a symlink to another in-checkout file)
 /// counts as present so the "agents may ignore it" warning does not fire even
 /// though the file lands.
-fn is_materialized_file(path: &Path, boundary_canon: &Path) -> bool {
+///
+/// `boundary_canon` must already be canonical. This is the single source of
+/// truth for "will this file be materialized?", shared with
+/// [`crate::plugin::plugin_skills`] so bundled-skill enumeration cannot count a
+/// `SKILL.md` the copy would skip.
+pub(crate) fn is_materialized_file(path: &Path, boundary_canon: &Path) -> bool {
     fsutil::resolve_within_canonical(boundary_canon, path)
         .and_then(|target| std::fs::metadata(&target).ok())
         .map(|meta| meta.is_file())

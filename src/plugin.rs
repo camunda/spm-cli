@@ -123,7 +123,14 @@ pub fn plugin_skills(root: &Path, boundary: &Path) -> Result<Vec<MaterializedSki
             );
             continue;
         }
-        if !path.is_dir() || !path.join("SKILL.md").is_file() {
+        // `is_file()` would follow a `SKILL.md` symlink boundary-unaware and
+        // could count a skill whose SKILL.md escapes the checkout (or reaches
+        // into `.git`) — which copy_tree/scan would refuse to materialize,
+        // desyncing enumeration from what lands. Route it through the same
+        // boundary-aware predicate the copy uses.
+        if !path.is_dir()
+            || !crate::skillcheck::is_materialized_file(&path.join("SKILL.md"), &boundary_canon)
+        {
             continue;
         }
         let name = path
@@ -279,6 +286,37 @@ mod tests {
 
         // The escaping skills dir is refused wholesale; nothing is enumerated.
         assert!(plugin_skills(&root, &checkout).unwrap().is_empty());
+
+        std::fs::remove_dir_all(&checkout).ok();
+        std::fs::remove_dir_all(&outside).ok();
+    }
+
+    /// An in-checkout skill dir whose `SKILL.md` is itself a symlink escaping
+    /// the checkout must not be enumerated: copy_tree/scan would refuse to
+    /// materialize that SKILL.md, so counting it would desync enumeration from
+    /// what actually lands.
+    #[cfg(unix)]
+    #[test]
+    fn plugin_skills_ignores_skill_with_escaping_symlinked_skill_md() {
+        use std::os::unix::fs::symlink;
+        let checkout = scratch("md-escape-checkout");
+        let root = checkout.join("plugin");
+        make_plugin(&root, r#"{"name":"p","skills":"./skills/"}"#, &["real"]);
+        // `evil` is a real in-checkout dir, but its SKILL.md escapes the checkout.
+        let evil = root.join("skills").join("evil");
+        std::fs::create_dir_all(&evil).unwrap();
+        let outside = scratch("md-escape-outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("SKILL.md"), "---\nname: evil\n---\n").unwrap();
+        symlink(outside.join("SKILL.md"), evil.join("SKILL.md")).unwrap();
+
+        let got: Vec<String> = plugin_skills(&root, &checkout)
+            .unwrap()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        // Only `real` is enumerated; `evil` is skipped (its SKILL.md escapes).
+        assert_eq!(got, vec!["real".to_string()]);
 
         std::fs::remove_dir_all(&checkout).ok();
         std::fs::remove_dir_all(&outside).ok();
