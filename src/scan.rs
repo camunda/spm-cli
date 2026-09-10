@@ -128,6 +128,11 @@ pub fn scan_path(root: &Path) -> Result<Vec<Finding>> {
 /// pre-materialize gate ([`enforce`]).
 pub fn scan_within(root: &Path, boundary: &Path) -> Result<Vec<Finding>> {
     let mut findings = Vec::new();
+    // Canonicalize the boundary once up front (fail closed on an unreadable
+    // boundary) so the per-directory containment checks below only canonicalize
+    // the directory being visited, not the boundary each time.
+    let boundary = std::fs::canonicalize(boundary)
+        .with_context(|| format!("resolving checkout boundary {}", boundary.display()))?;
     // Fail closed when the scan root itself is a symlink: `is_file()` /
     // `read_dir()` would follow it and traverse outside the intended tree,
     // contradicting the no-escape guarantee. `symlink_metadata` does not
@@ -151,7 +156,7 @@ pub fn scan_within(root: &Path, boundary: &Path) -> Result<Vec<Finding>> {
         scan_file(&rel, root, &mut findings)?;
     } else {
         let mut stack: Vec<PathBuf> = Vec::new();
-        walk(Path::new(""), root, boundary, &mut stack, &mut findings)?;
+        walk(Path::new(""), root, &boundary, &mut stack, &mut findings)?;
     }
     findings.sort_by(|a, b| {
         b.severity
@@ -164,9 +169,10 @@ pub fn scan_within(root: &Path, boundary: &Path) -> Result<Vec<Finding>> {
 
 /// Walk `dir`, reporting each file at its *materialized* location `rel` (the
 /// path relative to the scan root, which follows the symlink layout rather than
-/// the symlink target's real location). `boundary` bounds symlink following and
-/// `stack` holds the canonical directories on the active recursion path so an
-/// in-boundary symlink cycle is broken rather than followed forever.
+/// the symlink target's real location). `boundary` is the *canonical* checkout
+/// root that bounds symlink following, and `stack` holds the canonical
+/// directories on the active recursion path so an in-boundary symlink cycle is
+/// broken rather than followed forever.
 fn walk(
     rel: &Path,
     dir: &Path,
@@ -174,17 +180,21 @@ fn walk(
     stack: &mut Vec<PathBuf>,
     out: &mut Vec<Finding>,
 ) -> Result<()> {
+    // Canonicalize the directory first. A genuine IO/permission error fails
+    // closed via `?`, so an unreadable directory is surfaced as an error rather
+    // than silently skipped — distinct from the *escape* check below, which is a
+    // deliberate skip. Conflating the two (as a bare `resolve_within` would)
+    // would let an unreadable tree bypass the pre-materialize gate.
+    let dir_canon = std::fs::canonicalize(dir)
+        .with_context(|| format!("resolving directory {}", dir.display()))?;
     // Validate the directory we are about to walk — not just symlink entries —
     // against the checkout boundary *before* enumerating it, so a symlinked
     // directory whose target escapes the checkout (or reaches into `.git`) is
     // never read at all. copy_tree applies the identical guard, so the scan
-    // descends into exactly the directories the copy will materialize. The
-    // returned canonical path backs cycle detection and is the path we actually
-    // read from.
-    let dir_canon = match crate::fsutil::resolve_within(boundary, dir) {
-        Some(canon) => canon,
-        None => return Ok(()),
-    };
+    // descends into exactly the directories the copy will materialize.
+    if !crate::fsutil::contains(boundary, &dir_canon) {
+        return Ok(());
+    }
     if stack.contains(&dir_canon) {
         return Ok(());
     }
@@ -208,7 +218,7 @@ fn walk(
             // Follow only when the target stays inside the checkout — matching
             // copy_tree, so we scan exactly what will be materialized. A symlink
             // that escapes (or is broken) is not materialized, so not scanned.
-            if let Some(target) = crate::fsutil::resolve_within(boundary, &entry.path()) {
+            if let Some(target) = crate::fsutil::resolve_within_canonical(boundary, &entry.path()) {
                 let meta = std::fs::metadata(&target)
                     .with_context(|| format!("resolving symlink target {}", target.display()))?;
                 if meta.is_dir() {

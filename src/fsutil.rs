@@ -2,18 +2,23 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
 /// Resolve `link` (a symlink) and return its canonical target **iff** that
-/// target still resolves inside `boundary` (the repo checkout root) and does
-/// not reach into a `.git` directory. Returns `None` for a broken symlink, one
-/// whose target escapes the boundary, or one that resolves into `.git` — the
-/// caller then skips it, preserving both the "never follow a symlink out of the
-/// checkout" and the "never materialize `.git`" guarantees.
+/// target still resolves inside `boundary` (the *canonical* repo checkout root)
+/// and does not reach into a `.git` directory. Returns `None` for a broken
+/// symlink, one whose target escapes the boundary, or one that resolves into
+/// `.git` — the caller then skips it, preserving both the "never follow a
+/// symlink out of the checkout" and the "never materialize `.git`" guarantees.
 ///
-/// `boundary` is canonicalized here so the containment check compares like for
-/// like on every platform (Windows verbatim `\\?\` prefixes included). This is
-/// the single source of truth for "does this symlink stay inside the checkout
-/// (and out of `.git`)?", shared by the copy (`copy_tree`), the pre-materialize
-/// scan (`scan`), and the skill-loadability check (`skillcheck`), so they can
-/// never disagree about which symlinks are followed.
+/// The caller supplies an already-canonical `boundary` so only the link target
+/// is canonicalized. Hot traversal paths (`copy_tree`, `scan`, `skillcheck`,
+/// `plugin_skills`) canonicalize the boundary once up front — it comes from
+/// [`crate::store::Ensured::root`], which is already canonical — and call this
+/// per entry to avoid re-canonicalizing the boundary on every filesystem entry.
+///
+/// This is the single source of truth for "does this symlink stay inside the
+/// checkout (and out of `.git`)?", shared by the copy (`copy_tree`), the
+/// pre-materialize scan (`scan`), the skill-loadability check (`skillcheck`),
+/// and bundled-skill enumeration (`plugin_skills`), so they can never disagree
+/// about which symlinks are followed.
 ///
 /// The `.git` exclusion matters because `copy_tree`/`scan` skip a `.git` entry
 /// by *name* at every directory level, but a symlink target like `assets ->
@@ -21,20 +26,19 @@ use std::path::{Path, PathBuf};
 /// metadata dir under an arbitrary name. Rejecting any resolved target with a
 /// `.git` path component (relative to the boundary) keeps the two filters in
 /// lockstep.
-pub fn resolve_within(boundary: &Path, link: &Path) -> Option<PathBuf> {
-    let boundary = std::fs::canonicalize(boundary).ok()?;
+pub(crate) fn resolve_within_canonical(boundary: &Path, link: &Path) -> Option<PathBuf> {
     let target = std::fs::canonicalize(link).ok()?;
-    contains(&boundary, &target).then_some(target)
+    contains(boundary, &target).then_some(target)
 }
 
 /// Whether `candidate` (a *canonical* path) lies within `boundary` (also
 /// canonical) and does not reach into a `.git` directory. This is the raw
-/// containment predicate behind [`resolve_within`]; callers that have already
-/// canonicalized both paths (the copy/scan traversals) use it directly to
-/// validate *every* directory they descend into — not just symlink entries — so
-/// a symlinked *root* (a bundled skill/plugin dir that is itself a symlink)
+/// containment predicate behind [`resolve_within_canonical`]; callers that have
+/// already canonicalized both paths (the copy/scan traversals) use it directly
+/// to validate *every* directory they descend into — not just symlink entries —
+/// so a symlinked *root* (a bundled skill/plugin dir that is itself a symlink)
 /// cannot smuggle its target's contents past the boundary.
-fn contains(boundary: &Path, candidate: &Path) -> bool {
+pub(crate) fn contains(boundary: &Path, candidate: &Path) -> bool {
     match candidate.strip_prefix(boundary) {
         // `strip_prefix` succeeds only when `candidate` is `boundary` itself
         // (empty relative path) or lies within it.
@@ -111,7 +115,7 @@ fn copy_dir(src: &Path, dst: &Path, boundary: &Path, stack: &mut Vec<PathBuf>) -
         let from = entry.path();
         let to = dst.join(&name);
         if ft.is_symlink() {
-            match resolve_within(boundary, &from) {
+            match resolve_within_canonical(boundary, &from) {
                 Some(target) => {
                     // `metadata` follows the symlink to classify its target.
                     let meta = std::fs::metadata(&target).with_context(|| {
@@ -122,6 +126,7 @@ fn copy_dir(src: &Path, dst: &Path, boundary: &Path, stack: &mut Vec<PathBuf>) -
                     } else if meta.is_file() {
                         std::fs::copy(&target, &to)?;
                     }
+                    // Non-regular symlink targets are skipped (see below).
                 }
                 None => {
                     eprintln!(
@@ -134,9 +139,13 @@ fn copy_dir(src: &Path, dst: &Path, boundary: &Path, stack: &mut Vec<PathBuf>) -
         }
         if ft.is_dir() {
             copy_dir(&from, &to, boundary, stack)?;
-        } else {
+        } else if ft.is_file() {
             std::fs::copy(&from, &to)?;
         }
+        // Non-regular files (FIFOs, sockets, device nodes) are skipped rather
+        // than copied: `std::fs::copy` would error and abort the whole install,
+        // and they carry no skill content. This mirrors `scan`, which also skips
+        // them, so the copy and the scan agree on what is materializable.
     }
 
     stack.pop();
@@ -249,9 +258,10 @@ mod tests {
         // Also a symlink to a file *inside* `.git`.
         symlink("../../.git/config", plugin.join("cfg")).unwrap();
 
-        // resolve_within itself refuses both.
-        assert!(resolve_within(&checkout, &plugin.join("sneaky")).is_none());
-        assert!(resolve_within(&checkout, &plugin.join("cfg")).is_none());
+        // resolve_within_canonical itself refuses both.
+        let checkout_canon = std::fs::canonicalize(&checkout).unwrap();
+        assert!(resolve_within_canonical(&checkout_canon, &plugin.join("sneaky")).is_none());
+        assert!(resolve_within_canonical(&checkout_canon, &plugin.join("cfg")).is_none());
 
         let dst_root = scratch("dotgit-dst");
         let dst = dst_root.join("out");
@@ -278,9 +288,10 @@ mod tests {
         let link = checkout.join("link");
         symlink(&outside, &link).unwrap();
 
-        // resolve_within refuses it, and copy_tree (called with the symlinked
-        // root) materializes nothing from outside.
-        assert!(resolve_within(&checkout, &link).is_none());
+        // resolve_within_canonical refuses it, and copy_tree (called with the
+        // symlinked root) materializes nothing from outside.
+        let checkout_canon = std::fs::canonicalize(&checkout).unwrap();
+        assert!(resolve_within_canonical(&checkout_canon, &link).is_none());
         let dst_root = scratch("root-escape-dst");
         let dst = dst_root.join("out");
         copy_tree(&link, &dst, &checkout).unwrap();
@@ -295,18 +306,49 @@ mod tests {
     fn skips_file_reached_via_escaping_intermediate_dir_symlink() {
         // `dir -> outside` (escaping), then `dir/SKILL.md` is a real file in the
         // outside dir. A shallow check on the final component would follow the
-        // intermediate symlink and treat it as in-checkout; resolve_within
-        // canonicalizes the whole path and refuses it, matching copy_tree, which
-        // never descends into the escaping dir.
+        // intermediate symlink and treat it as in-checkout;
+        // resolve_within_canonical canonicalizes the whole path and refuses it,
+        // matching copy_tree, which never descends into the escaping dir.
         let checkout = scratch("mid-escape");
         std::fs::create_dir_all(&checkout).unwrap();
         let outside = scratch("mid-escape-outside");
         std::fs::write(outside.join("SKILL.md"), "secret\n").unwrap();
         symlink(&outside, checkout.join("dir")).unwrap();
 
-        assert!(resolve_within(&checkout, &checkout.join("dir/SKILL.md")).is_none());
+        let checkout_canon = std::fs::canonicalize(&checkout).unwrap();
+        assert!(
+            resolve_within_canonical(&checkout_canon, &checkout.join("dir/SKILL.md")).is_none()
+        );
 
         std::fs::remove_dir_all(&checkout).ok();
         std::fs::remove_dir_all(&outside).ok();
+    }
+
+    #[test]
+    fn skips_non_regular_file_without_aborting() {
+        // A FIFO (or socket/device node) in the source tree must be *skipped*,
+        // not fed to `std::fs::copy` — which would error and abort the whole
+        // install. The rest of the tree must still materialize.
+        let checkout = scratch("fifo");
+        let plugin = checkout.join("p");
+        std::fs::create_dir_all(&plugin).unwrap();
+        std::fs::write(plugin.join("real.txt"), "real\n").unwrap();
+        let fifo = plugin.join("pipe");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("spawn mkfifo");
+        assert!(status.success(), "mkfifo failed");
+
+        let dst_root = scratch("fifo-dst");
+        let dst = dst_root.join("out");
+        // Must not abort even though `pipe` is a FIFO.
+        copy_tree(&plugin, &dst, &checkout).unwrap();
+
+        assert!(dst.join("real.txt").exists());
+        // The non-regular file is not materialized.
+        assert!(!dst.join("pipe").exists());
+        std::fs::remove_dir_all(&checkout).ok();
+        std::fs::remove_dir_all(&dst_root).ok();
     }
 }

@@ -80,6 +80,26 @@ pub fn plugin_skills(root: &Path, boundary: &Path) -> Result<Vec<MaterializedSki
         return Ok(Vec::new());
     }
 
+    // Canonicalize the boundary once (fail closed on an unreadable boundary) so
+    // the per-entry containment checks only canonicalize the entry, not the
+    // boundary each time.
+    let boundary_canon = std::fs::canonicalize(boundary)
+        .with_context(|| format!("resolving checkout boundary {}", boundary.display()))?;
+
+    // Guard the skills dir *itself* before enumerating it: if it resolves
+    // outside the checkout (e.g. it is a symlink whose target escapes) or into
+    // `.git`, refuse to `read_dir` it at all — otherwise enumeration would
+    // traverse outside the boundary even though scan/copy_tree would never
+    // materialize it. An in-checkout symlinked skills dir (e.g. design-system's
+    // `skills -> ../../skills`) resolves inside and is allowed.
+    if crate::fsutil::resolve_within_canonical(&boundary_canon, &skills_dir).is_none() {
+        eprintln!(
+            "warning: skipping plugin skills dir `{}` (resolves outside the checkout)",
+            skills_dir.display()
+        );
+        return Ok(Vec::new());
+    }
+
     let mut out = Vec::new();
     let mut entries: Vec<PathBuf> = std::fs::read_dir(&skills_dir)
         .with_context(|| format!("reading {}", skills_dir.display()))?
@@ -94,7 +114,9 @@ pub fn plugin_skills(root: &Path, boundary: &Path) -> Result<Vec<MaterializedSki
         // actually lands. `is_dir()`/`is_file()` below follow symlinks, so this
         // guard has to run first. A real (non-symlink) dir is its own canonical
         // target and always passes.
-        if is_symlink(&path) && crate::fsutil::resolve_within(boundary, &path).is_none() {
+        if is_symlink(&path)
+            && crate::fsutil::resolve_within_canonical(&boundary_canon, &path).is_none()
+        {
             eprintln!(
                 "warning: skipping bundled skill dir `{}` (resolves outside the checkout)",
                 path.display()
@@ -226,6 +248,37 @@ mod tests {
             .collect();
         // Only the in-checkout `real` skill is enumerated; `evil` is skipped.
         assert_eq!(got, vec!["real".to_string()]);
+
+        std::fs::remove_dir_all(&checkout).ok();
+        std::fs::remove_dir_all(&outside).ok();
+    }
+
+    /// The *skills dir itself* being a symlink whose target escapes the checkout
+    /// must be refused before `read_dir`: enumeration must never traverse
+    /// outside the boundary even though scan/copy_tree would refuse to
+    /// materialize it. Yields an empty list, not an error.
+    #[cfg(unix)]
+    #[test]
+    fn plugin_skills_ignores_escaping_symlinked_skills_dir() {
+        use std::os::unix::fs::symlink;
+        let checkout = scratch("dir-escape-checkout");
+        let root = checkout.join("plugin");
+        let cp = root.join(".claude-plugin");
+        std::fs::create_dir_all(&cp).unwrap();
+        std::fs::write(
+            cp.join("plugin.json"),
+            r#"{"name":"p","skills":"./skills/"}"#,
+        )
+        .unwrap();
+        // The skills dir points at an out-of-checkout tree holding a real skill.
+        let outside = scratch("dir-escape-outside");
+        let evil = outside.join("evil");
+        std::fs::create_dir_all(&evil).unwrap();
+        std::fs::write(evil.join("SKILL.md"), "---\nname: evil\n---\n").unwrap();
+        symlink(&outside, root.join("skills")).unwrap();
+
+        // The escaping skills dir is refused wholesale; nothing is enumerated.
+        assert!(plugin_skills(&root, &checkout).unwrap().is_empty());
 
         std::fs::remove_dir_all(&checkout).ok();
         std::fs::remove_dir_all(&outside).ok();
