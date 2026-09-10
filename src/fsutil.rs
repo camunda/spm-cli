@@ -24,13 +24,23 @@ use std::path::{Path, PathBuf};
 pub fn resolve_within(boundary: &Path, link: &Path) -> Option<PathBuf> {
     let boundary = std::fs::canonicalize(boundary).ok()?;
     let target = std::fs::canonicalize(link).ok()?;
-    // `strip_prefix` succeeds only when `target` is `boundary` itself (empty
-    // relative path) or lies within it — this is the containment check.
-    let rel = target.strip_prefix(&boundary).ok()?;
-    if rel.components().any(|c| c.as_os_str() == ".git") {
-        return None;
+    contains(&boundary, &target).then_some(target)
+}
+
+/// Whether `candidate` (a *canonical* path) lies within `boundary` (also
+/// canonical) and does not reach into a `.git` directory. This is the raw
+/// containment predicate behind [`resolve_within`]; callers that have already
+/// canonicalized both paths (the copy/scan traversals) use it directly to
+/// validate *every* directory they descend into — not just symlink entries — so
+/// a symlinked *root* (a bundled skill/plugin dir that is itself a symlink)
+/// cannot smuggle its target's contents past the boundary.
+fn contains(boundary: &Path, candidate: &Path) -> bool {
+    match candidate.strip_prefix(boundary) {
+        // `strip_prefix` succeeds only when `candidate` is `boundary` itself
+        // (empty relative path) or lies within it.
+        Ok(rel) => !rel.components().any(|c| c.as_os_str() == ".git"),
+        Err(_) => false,
     }
-    Some(target)
 }
 
 /// Recursively copy `src` dir into `dst`, skipping the `.git` directory.
@@ -42,7 +52,10 @@ pub fn resolve_within(boundary: &Path, link: &Path) -> Option<PathBuf> {
 /// A symlink whose target escapes the checkout — the classic `SKILL.md ->
 /// ../../../.ssh/id_rsa` exfiltration attempt — is skipped, so the security
 /// boundary is preserved: content outside the checkout is never copied into the
-/// vendor dir where an agent might read it.
+/// vendor dir where an agent might read it. The same guard applies to the copy
+/// *root* itself: if `src` (or any directory reached while recursing) resolves
+/// outside `boundary`, it is skipped rather than traversed — so a bundled
+/// skill/plugin directory that is itself a symlink cannot bypass the boundary.
 ///
 /// Symlink cycles that stay inside the boundary (e.g. `loop -> .`) are detected
 /// via the set of canonical directories on the active recursion path and
@@ -53,17 +66,28 @@ pub fn resolve_within(boundary: &Path, link: &Path) -> Option<PathBuf> {
 /// contains in-repo symlinks materializes identically. The containment check
 /// compares canonical paths, which is cross-platform safe.
 pub fn copy_tree(src: &Path, dst: &Path, boundary: &Path) -> Result<()> {
+    let boundary = std::fs::canonicalize(boundary)
+        .with_context(|| format!("resolving checkout boundary `{}`", boundary.display()))?;
     let mut stack: Vec<PathBuf> = Vec::new();
-    copy_dir(src, dst, boundary, &mut stack)
+    copy_dir(src, dst, &boundary, &mut stack)
 }
 
 fn copy_dir(src: &Path, dst: &Path, boundary: &Path, stack: &mut Vec<PathBuf>) -> Result<()> {
-    std::fs::create_dir_all(dst)?;
-
     // Track the canonical path of every directory currently on the recursion
     // stack so a symlink pointing back at an ancestor can't spin forever.
     let src_canon = std::fs::canonicalize(src)
         .with_context(|| format!("resolving copy source `{}`", src.display()))?;
+    // Harden the *root*: not just symlink entries but the directory we are about
+    // to descend into must stay inside the checkout (and out of `.git`). A
+    // symlinked copy root pointing outside the boundary is refused here.
+    if !contains(boundary, &src_canon) {
+        eprintln!(
+            "warning: skipping directory `{}` (resolves outside the checkout)",
+            src.display()
+        );
+        return Ok(());
+    }
+    std::fs::create_dir_all(dst)?;
     if stack.contains(&src_canon) {
         eprintln!(
             "warning: skipping already-visited directory `{}` (symlink cycle)",
@@ -234,5 +258,50 @@ mod tests {
         assert!(!dst.join("cfg").exists());
         std::fs::remove_dir_all(&checkout).ok();
         std::fs::remove_dir_all(&dst_root).ok();
+    }
+
+    #[test]
+    fn skips_symlinked_copy_root_escaping_boundary() {
+        // The *copy root itself* is a symlink whose target lies outside the
+        // checkout. copy_tree must refuse to traverse it — otherwise a bundled
+        // skill/plugin dir that is a symlink could exfiltrate arbitrary content.
+        let checkout = scratch("root-escape");
+        std::fs::create_dir_all(&checkout).unwrap();
+        let outside = scratch("root-escape-outside");
+        std::fs::write(outside.join("secret.txt"), "TOP SECRET\n").unwrap();
+        // `link` lives inside the checkout but points at the outside dir.
+        let link = checkout.join("link");
+        symlink(&outside, &link).unwrap();
+
+        // resolve_within refuses it, and copy_tree (called with the symlinked
+        // root) materializes nothing from outside.
+        assert!(resolve_within(&checkout, &link).is_none());
+        let dst_root = scratch("root-escape-dst");
+        let dst = dst_root.join("out");
+        copy_tree(&link, &dst, &checkout).unwrap();
+        assert!(!dst.join("secret.txt").exists());
+
+        std::fs::remove_dir_all(&checkout).ok();
+        std::fs::remove_dir_all(&outside).ok();
+        std::fs::remove_dir_all(&dst_root).ok();
+    }
+
+    #[test]
+    fn skips_file_reached_via_escaping_intermediate_dir_symlink() {
+        // `dir -> outside` (escaping), then `dir/SKILL.md` is a real file in the
+        // outside dir. A shallow check on the final component would follow the
+        // intermediate symlink and treat it as in-checkout; resolve_within
+        // canonicalizes the whole path and refuses it, matching copy_tree, which
+        // never descends into the escaping dir.
+        let checkout = scratch("mid-escape");
+        std::fs::create_dir_all(&checkout).unwrap();
+        let outside = scratch("mid-escape-outside");
+        std::fs::write(outside.join("SKILL.md"), "secret\n").unwrap();
+        symlink(&outside, checkout.join("dir")).unwrap();
+
+        assert!(resolve_within(&checkout, &checkout.join("dir/SKILL.md")).is_none());
+
+        std::fs::remove_dir_all(&checkout).ok();
+        std::fs::remove_dir_all(&outside).ok();
     }
 }

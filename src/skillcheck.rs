@@ -80,23 +80,22 @@ pub(crate) fn child_skills(dir: &Path, boundary: &Path) -> Vec<String> {
     names
 }
 
-/// True when `path` will be materialized as a regular file — either a real file,
-/// or a symlink whose target resolves to a file **inside** `boundary` (the repo
-/// checkout root). This mirrors [`fsutil::copy_tree`], which now follows
-/// in-checkout symlinks: a `SKILL.md` symlinked to another file in the same
-/// checkout *is* materialized, so it must count as present here (otherwise the
-/// "agents may ignore it" warning would fire even though the file lands). A
-/// symlink that escapes the checkout is skipped by the copy, so it is not
-/// counted here either — keeping this check and the copy in lockstep.
+/// True when `path` will be materialized as a regular file by
+/// [`fsutil::copy_tree`] — i.e. it resolves, through any intermediate symlinks,
+/// to a regular file that stays **inside** `boundary` (the repo checkout root)
+/// and out of `.git`. Routing the whole path through
+/// [`fsutil::resolve_within`] — rather than a shallow `symlink_metadata` on the
+/// final component — is what keeps this in lockstep with the copy: an escaping
+/// *intermediate* directory symlink (e.g. `dir -> /etc`, then `dir/SKILL.md`)
+/// canonicalizes outside the boundary, so it is *not* counted here, exactly as
+/// copy_tree refuses to descend into it. An in-checkout `SKILL.md` (real, or a
+/// symlink to another in-checkout file) counts as present so the "agents may
+/// ignore it" warning does not fire even though the file lands.
 fn is_materialized_file(path: &Path, boundary: &Path) -> bool {
-    match std::fs::symlink_metadata(path) {
-        Ok(m) if m.file_type().is_file() => true,
-        Ok(m) if m.file_type().is_symlink() => fsutil::resolve_within(boundary, path)
-            .and_then(|target| std::fs::metadata(&target).ok())
-            .map(|target| target.is_file())
-            .unwrap_or(false),
-        _ => false,
-    }
+    fsutil::resolve_within(boundary, path)
+        .and_then(|target| std::fs::metadata(&target).ok())
+        .map(|meta| meta.is_file())
+        .unwrap_or(false)
 }
 
 /// Join an optional parent subpath with a child directory name using forward

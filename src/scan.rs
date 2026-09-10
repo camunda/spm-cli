@@ -181,9 +181,16 @@ fn walk(
     let entries =
         std::fs::read_dir(dir).with_context(|| format!("reading directory {}", dir.display()))?;
 
-    // Guard against symlink cycles that stay inside the boundary.
-    let dir_canon = std::fs::canonicalize(dir)
-        .with_context(|| format!("resolving directory {}", dir.display()))?;
+    // Validate the directory we are about to walk — not just symlink entries —
+    // against the checkout boundary, so a symlinked directory whose target
+    // escapes the checkout (or reaches into `.git`) is skipped rather than
+    // scanned. copy_tree applies the identical guard, so the scan descends into
+    // exactly the directories the copy will materialize. The returned canonical
+    // path also backs cycle detection below.
+    let dir_canon = match crate::fsutil::resolve_within(boundary, dir) {
+        Some(canon) => canon,
+        None => return Ok(()),
+    };
     if stack.contains(&dir_canon) {
         return Ok(());
     }
