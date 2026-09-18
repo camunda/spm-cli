@@ -1,5 +1,10 @@
 # spm — skill package manager
 
+[![CI](https://github.com/camunda/spm-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/camunda/spm-cli/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/spm-cli.svg)](https://crates.io/crates/spm-cli)
+[![npm](https://img.shields.io/npm/v/@camunda8/spm.svg)](https://www.npmjs.com/package/@camunda8/spm)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 Declare AI skills as git dependencies in `ai.json`, and `spm` wires them into your
 AI tool (Claude Code and GitHub Copilot CLI) **without ever committing skills to
 your repo**. Anything spm materializes into the working tree is gitignored — no
