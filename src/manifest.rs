@@ -162,6 +162,24 @@ pub fn validate_skill_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Reject a `commit` selector that is not a full 40-character hex SHA.
+///
+/// The root `ai.json` is guarded by the JSON schema, whose `commit` pattern
+/// (`^[0-9a-fA-F]{40}$`) is the only thing keeping an untrusted commit string
+/// out of the store path: `resolver::resolve` feeds a `commit` selector verbatim
+/// into `store_key`, which appends it into a directory name that `store::ensure`
+/// joins onto the store root and recursively removes/rewrites. A *nested*
+/// (`DependencyManifest`) spec bypasses that schema, so a hostile dependency
+/// could otherwise smuggle slashes or `..` into the store path via the commit
+/// field. Enforce the same shape here (case-insensitively, before the resolver
+/// lowercases it) so nested specs get identical protection.
+pub fn validate_commit_selector(commit: &str) -> Result<()> {
+    if commit.len() != 40 || !commit.chars().all(|c| c.is_ascii_hexdigit()) {
+        bail!("invalid commit `{commit}`: expected a full 40-character hexadecimal SHA");
+    }
+    Ok(())
+}
+
 /// Reject a skill `path` that could escape the fetched repo root. The subdir is
 /// joined onto the store checkout (`repo_dir.join(path)`); without this a hostile
 /// manifest could use an absolute path or `..` to read arbitrary files off the
@@ -289,6 +307,14 @@ impl DependencyManifest {
                 validate_subpath(sub)
                     .with_context(|| format!("skill `{name}` in nested {}", p.display()))?;
             }
+            // The root schema constrains `commit` to a full hex SHA; nested
+            // manifests skip the schema, so enforce it here before the value can
+            // reach `resolver::resolve`/`store_key` and become part of a store
+            // path (see `validate_commit_selector`).
+            if let Some(commit) = &spec.commit {
+                validate_commit_selector(commit)
+                    .with_context(|| format!("skill `{name}` in nested {}", p.display()))?;
+            }
         }
         Ok(dep)
     }
@@ -362,6 +388,52 @@ mod tests {
     fn validate_subpath_accepts_plain_relative_path() {
         assert!(validate_subpath("skills/greet").is_ok());
         assert!(validate_subpath(".").is_ok());
+    }
+
+    /// A nested manifest bypasses the root JSON schema, so a `commit` selector
+    /// that is not a full hex SHA (here one carrying path separators aimed at
+    /// the store path) must be rejected by `DependencyManifest::load` before it
+    /// can reach `resolver::resolve`/`store_key`.
+    #[test]
+    fn dependency_manifest_rejects_non_sha_commit() {
+        let dir = std::env::temp_dir().join(format!(
+            "spm-depman-badcommit-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            Manifest::path_in(&dir),
+            r#"{"skills":{"evil":{"git":"u","commit":"../../../../etc/evil"}}}"#,
+        )
+        .unwrap();
+        let err = DependencyManifest::load(&dir).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("40-character hexadecimal SHA"),
+            "{err:#}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn validate_commit_selector_accepts_both_cases_and_rejects_bad() {
+        assert!(validate_commit_selector(&"a".repeat(40)).is_ok());
+        assert!(
+            validate_commit_selector(&"A".repeat(40)).is_ok(),
+            "case-insensitive"
+        );
+        assert!(validate_commit_selector("abc123").is_err(), "too short");
+        assert!(
+            validate_commit_selector(&"g".repeat(40)).is_err(),
+            "non-hex"
+        );
+        assert!(
+            validate_commit_selector(&format!("{}/x", "a".repeat(38))).is_err(),
+            "path separator"
+        );
     }
 
     /// A dependency's own `ai.json` parses leniently: no `targets` required, and
