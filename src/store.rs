@@ -272,6 +272,7 @@ mod tests {
             path: None,
             store: crate::lockfile::store_key(&format!("file://{}", src.display()), &sha),
             bundled_skills: Vec::new(),
+            requested_by: Vec::new(),
         };
 
         with_spm_home(&home, || {
@@ -308,6 +309,7 @@ mod tests {
             path: Some("does/not/exist".into()),
             store: crate::lockfile::store_key(&git_url, &sha),
             bundled_skills: Vec::new(),
+            requested_by: Vec::new(),
         };
 
         with_spm_home(&home, || {
@@ -369,6 +371,7 @@ mod tests {
             path: Some("escape".into()),
             store: crate::lockfile::store_key(&git_url, &sha),
             bundled_skills: Vec::new(),
+            requested_by: Vec::new(),
         };
 
         with_spm_home(&home, || {
