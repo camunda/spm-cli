@@ -83,14 +83,20 @@ struct Resolved {
 /// Normalize a git URL for transitive identity purposes only (cycle stack,
 /// dedup map, conflict key, and the name-synthesis hash). This intentionally
 /// does **not** feed [`store_key`]/store dedup — that is an orthogonal,
-/// pre-existing behavior. The normalization: strip a trailing `/` and `.git`,
-/// then lowercase the scheme + authority while preserving the path's case
-/// (paths are case-sensitive on the server; hosts are not).
+/// pre-existing behavior. The normalization: strip a trailing `/`, strip a
+/// trailing `.git` **only for remote sources**, then lowercase the scheme +
+/// authority while preserving the path's case (paths are case-sensitive on the
+/// server; hosts are not).
+///
+/// The `.git` suffix is a *remote*-repo spelling convention: `github.com/o/r`
+/// and `github.com/o/r.git` name the same server-side repository. For a local
+/// source — a `file://` URL or a bare filesystem path — `repo.git` and `repo`
+/// can be two genuinely distinct directories, so stripping the suffix there
+/// would fuse unrelated skills into one transitive identity (silently deduping
+/// them or flagging a phantom conflict). We therefore preserve `.git` for local
+/// and `file://` sources and only strip it for remote URL forms.
 pub fn normalize_git(url: &str) -> String {
-    let mut s = url.trim();
-    s = s.trim_end_matches('/');
-    s = s.strip_suffix(".git").unwrap_or(s);
-    s = s.trim_end_matches('/');
+    let s = url.trim().trim_end_matches('/');
 
     if let Some(idx) = s.find("://") {
         // scheme://authority/path
@@ -99,6 +105,12 @@ pub fn normalize_git(url: &str) -> String {
         let (authority, path) = match rest.find('/') {
             Some(p) => (&rest[..p], &rest[p..]),
             None => (rest, ""),
+        };
+        // Preserve `.git` for local `file://` sources; strip it for remote ones.
+        let path = if scheme.eq_ignore_ascii_case("file") {
+            path.to_string()
+        } else {
+            strip_git_suffix(path)
         };
         format!(
             "{}://{}{}",
@@ -111,15 +123,27 @@ pub fn normalize_git(url: &str) -> String {
         // colon precedes the first slash — otherwise it's a plain path.
         let before_colon = &s[..idx];
         if !before_colon.contains('/') {
+            // A remote scp target — strip the `.git` convention.
             let authority = before_colon;
-            let path = &s[idx..];
+            let path = strip_git_suffix(&s[idx..]);
             format!("{}{}", authority.to_ascii_lowercase(), path)
         } else {
+            // A bare local path that happens to contain a colon — keep `.git`.
             s.to_string()
         }
     } else {
+        // A bare local filesystem path — `repo.git` and `repo` are distinct
+        // directories, so preserve the suffix.
         s.to_string()
     }
+}
+
+/// Strip a single trailing `.git` (and any trailing `/`) from a **remote** repo
+/// path component. Applied only to remote sources — see [`normalize_git`] for
+/// why local/`file://` sources must keep the suffix.
+fn strip_git_suffix(path: &str) -> String {
+    let p = path.trim_end_matches('/');
+    p.strip_suffix(".git").unwrap_or(p).to_string()
 }
 
 /// Canonicalize a validated subpath into a stable lexical identity string.
@@ -542,6 +566,40 @@ mod tests {
         assert_eq!(
             normalize_git("file:///home/User/Repo"),
             "file:///home/User/Repo"
+        );
+    }
+
+    #[test]
+    fn normalize_preserves_git_suffix_for_local_and_file_sources() {
+        // `repo.git` and `repo` can be two distinct local directories, so the
+        // `.git` suffix must survive for both bare paths and `file://` URLs —
+        // otherwise unrelated skills fuse into one transitive identity.
+        assert_eq!(normalize_git("/tmp/repo.git"), "/tmp/repo.git");
+        assert_ne!(normalize_git("/tmp/repo.git"), normalize_git("/tmp/repo"));
+        assert_eq!(
+            normalize_git("file:///tmp/repo.git"),
+            "file:///tmp/repo.git"
+        );
+        assert_ne!(
+            normalize_git("file:///tmp/repo.git"),
+            normalize_git("file:///tmp/repo")
+        );
+        // A trailing slash is still trimmed, but the suffix stays.
+        assert_eq!(
+            normalize_git("file:///tmp/repo.git/"),
+            "file:///tmp/repo.git"
+        );
+    }
+
+    #[test]
+    fn normalize_still_strips_git_suffix_for_remote_sources() {
+        assert_eq!(
+            normalize_git("https://github.com/o/r.git"),
+            normalize_git("https://github.com/o/r")
+        );
+        assert_eq!(
+            normalize_git("git@github.com:o/r.git"),
+            "git@github.com:o/r"
         );
     }
 
