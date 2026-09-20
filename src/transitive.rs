@@ -80,6 +80,26 @@ struct Resolved {
     out_idx: Option<usize>,
 }
 
+/// Mutable state threaded through the recursive [`visit`] walk: the DFS stack of
+/// identities on the current branch, the global dedup/conflict map, and the
+/// growing output. Bundled into one value so the traversal function stays within
+/// a sane argument count (and reads as "walk state + this node") instead of
+/// passing each accumulator by hand.
+struct Walk {
+    stack: Vec<(Key, String)>,
+    resolved: std::collections::HashMap<Key, Resolved>,
+    out: Output,
+}
+
+/// One side of a version conflict — the reference/commit an identity was (or
+/// would be) resolved at, plus the requester chain that led there. Grouping the
+/// two symmetric sides keeps [`conflict_error`] to a readable argument list.
+struct ConflictSide<'a> {
+    reference: &'a str,
+    commit: &'a str,
+    chain: &'a [String],
+}
+
 /// Normalize a git URL for transitive identity purposes only (cycle stack,
 /// dedup map, conflict key, and the name-synthesis hash). This intentionally
 /// does **not** feed [`store_key`]/store dedup — that is an orthogonal,
@@ -256,10 +276,6 @@ fn nested_manifest_path(content: &Path, root: &Path) -> Result<Option<PathBuf>> 
 /// in) recursively resolve and materialize the skills their nested `ai.json`
 /// files declare.
 pub fn expand(direct: &BTreeMap<String, LockedSkill>, ctx: &Ctx) -> Result<Output> {
-    let mut out = Output {
-        materialized: Vec::new(),
-        transitive: Vec::new(),
-    };
     let mut resolved: std::collections::HashMap<Key, Resolved> = std::collections::HashMap::new();
 
     // Seed the dedup/conflict map with the direct skills. Two direct skills that
@@ -274,12 +290,16 @@ pub fn expand(direct: &BTreeMap<String, LockedSkill>, ctx: &Ctx) -> Result<Outpu
                 if existing.commit != locked.commit {
                     return Err(conflict_error(
                         &key,
-                        &existing.reference,
-                        &existing.commit,
-                        &existing.chain,
-                        &locked.reference,
-                        &locked.commit,
-                        std::slice::from_ref(name),
+                        ConflictSide {
+                            reference: &existing.reference,
+                            commit: &existing.commit,
+                            chain: &existing.chain,
+                        },
+                        ConflictSide {
+                            reference: &locked.reference,
+                            commit: &locked.commit,
+                            chain: std::slice::from_ref(name),
+                        },
                     ));
                 }
             } else {
@@ -298,21 +318,22 @@ pub fn expand(direct: &BTreeMap<String, LockedSkill>, ctx: &Ctx) -> Result<Outpu
 
     // Walk each direct skill as a DFS root. BTreeMap iteration is sorted, so the
     // traversal order — and therefore every synthesized name and provenance
-    // chain — is deterministic across runs.
+    // chain — is deterministic across runs. The DFS stack is balanced (every
+    // push is popped) by the time a root returns, so one `Walk` is reused across
+    // roots, carrying the shared dedup map and accumulated output.
+    let mut w = Walk {
+        stack: Vec::new(),
+        resolved,
+        out: Output {
+            materialized: Vec::new(),
+            transitive: Vec::new(),
+        },
+    };
     for (name, locked) in direct {
-        let mut stack: Vec<(Key, String)> = Vec::new();
-        visit(
-            name,
-            locked,
-            0,
-            &mut stack,
-            &mut resolved,
-            &mut out,
-            direct,
-            ctx,
-        )?;
+        visit(&mut w, name, locked, 0, direct, ctx)?;
     }
 
+    let mut out = w.out;
     // Stable committed lockfile: provenance lists must not churn with traversal
     // order.
     for (_, l) in &mut out.transitive {
@@ -322,14 +343,11 @@ pub fn expand(direct: &BTreeMap<String, LockedSkill>, ctx: &Ctx) -> Result<Outpu
     Ok(out)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn visit(
+    w: &mut Walk,
     name: &str,
     locked: &LockedSkill,
     depth: usize,
-    stack: &mut Vec<(Key, String)>,
-    resolved: &mut std::collections::HashMap<Key, Resolved>,
-    out: &mut Output,
     direct: &BTreeMap<String, LockedSkill>,
     ctx: &Ctx,
 ) -> Result<()> {
@@ -352,7 +370,7 @@ fn visit(
     );
     crate::scan::enforce(name, &ensured.path, &ensured.root)
         .with_context(|| format!("scanning skill `{name}`"))?;
-    out.materialized.push(MaterializedSkill {
+    w.out.materialized.push(MaterializedSkill {
         name: name.to_string(),
         path: ensured.path.clone(),
         root: ensured.root.clone(),
@@ -378,7 +396,7 @@ fn visit(
         return Ok(());
     }
     if depth >= MAX_DEPTH {
-        let mut chain: Vec<String> = stack.iter().map(|(_, n)| n.clone()).collect();
+        let mut chain: Vec<String> = w.stack.iter().map(|(_, n)| n.clone()).collect();
         chain.push(name.to_string());
         bail!(
             "transitive dependency depth cap ({MAX_DEPTH}) exceeded at: {}\n\
@@ -389,7 +407,7 @@ fn visit(
     }
 
     let self_key = key_of(&locked.git, &locked.path);
-    stack.push((self_key, name.to_string()));
+    w.stack.push((self_key, name.to_string()));
 
     for (declared, spec) in &dep.skills {
         spec.version()
@@ -397,9 +415,9 @@ fn visit(
         let ckey = key_of(&spec.git, &spec.path);
 
         // Cycle: the child identity is an ancestor still on the current branch.
-        if let Some(pos) = stack.iter().position(|(k, _)| k == &ckey) {
-            let mut chain: Vec<String> = stack[pos..].iter().map(|(_, n)| n.clone()).collect();
-            chain.push(format!("{declared} (= {})", stack[pos].1));
+        if let Some(pos) = w.stack.iter().position(|(k, _)| k == &ckey) {
+            let mut chain: Vec<String> = w.stack[pos..].iter().map(|(_, n)| n.clone()).collect();
+            chain.push(format!("{declared} (= {})", w.stack[pos].1));
             bail!(
                 "dependency cycle detected: {}\n\
                  `{}` (git `{}`{}) transitively depends on itself",
@@ -415,7 +433,7 @@ fn visit(
 
         // Already resolved elsewhere in the graph: a diamond (dedup) or a
         // version conflict.
-        if let Some(existing) = resolved.get(&ckey) {
+        if let Some(existing) = w.resolved.get(&ckey) {
             // Reuse the already-resolved commit when this edge requests the same
             // reference the node was resolved at: the identity + reference match,
             // so re-resolving would only repeat a remote lookup — and worse, a
@@ -428,23 +446,28 @@ fn visit(
                 let child = resolve_child(spec, ctx)
                     .with_context(|| format!("resolving nested skill `{declared}` of `{name}`"))?;
                 if existing.commit != child.commit {
-                    let mut cur_chain: Vec<String> = stack.iter().map(|(_, n)| n.clone()).collect();
+                    let mut cur_chain: Vec<String> =
+                        w.stack.iter().map(|(_, n)| n.clone()).collect();
                     cur_chain.push(declared.clone());
                     return Err(conflict_error(
                         &ckey,
-                        &existing.reference,
-                        &existing.commit,
-                        &existing.chain,
-                        &child.reference,
-                        &child.commit,
-                        &cur_chain,
+                        ConflictSide {
+                            reference: &existing.reference,
+                            commit: &existing.commit,
+                            chain: &existing.chain,
+                        },
+                        ConflictSide {
+                            reference: &child.reference,
+                            commit: &child.commit,
+                            chain: &cur_chain,
+                        },
                     ));
                 }
             }
             // Same identity, no conflict: a diamond. Record this requester on
             // the shared transitive entry (directs keep an empty requested_by).
             if let Some(idx) = existing.out_idx {
-                out.transitive[idx].1.requested_by.push(name.to_string());
+                w.out.transitive[idx].1.requested_by.push(name.to_string());
             }
             continue;
         }
@@ -455,7 +478,7 @@ fn visit(
         let synth = synth_name(name, declared, &ckey);
         validate_skill_name(&synth)
             .with_context(|| format!("synthesized name for nested skill `{declared}`"))?;
-        if direct.contains_key(&synth) || out.transitive.iter().any(|(n, _)| n == &synth) {
+        if direct.contains_key(&synth) || w.out.transitive.iter().any(|(n, _)| n == &synth) {
             bail!(
                 "transitive skill name collision: `{synth}` (from `{declared}` required by \
                  `{name}`) already names another skill — pin one of the conflicting \
@@ -464,10 +487,10 @@ fn visit(
         }
         child.requested_by = vec![name.to_string()];
 
-        let mut child_chain: Vec<String> = stack.iter().map(|(_, n)| n.clone()).collect();
+        let mut child_chain: Vec<String> = w.stack.iter().map(|(_, n)| n.clone()).collect();
         child_chain.push(synth.clone());
-        let idx = out.transitive.len();
-        resolved.insert(
+        let idx = w.out.transitive.len();
+        w.resolved.insert(
             ckey,
             Resolved {
                 commit: child.commit.clone(),
@@ -476,11 +499,11 @@ fn visit(
                 out_idx: Some(idx),
             },
         );
-        out.transitive.push((synth.clone(), child.clone()));
-        visit(&synth, &child, depth + 1, stack, resolved, out, direct, ctx)?;
+        w.out.transitive.push((synth.clone(), child.clone()));
+        visit(w, &synth, &child, depth + 1, direct, ctx)?;
     }
 
-    stack.pop();
+    w.stack.pop();
     Ok(())
 }
 
@@ -513,16 +536,7 @@ fn resolve_child(spec: &SkillSpec, ctx: &Ctx) -> Result<LockedSkill> {
     resolver::resolve(spec)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn conflict_error(
-    key: &Key,
-    ref_a: &str,
-    commit_a: &str,
-    chain_a: &[String],
-    ref_b: &str,
-    commit_b: &str,
-    chain_b: &[String],
-) -> anyhow::Error {
+fn conflict_error(key: &Key, a: ConflictSide, b: ConflictSide) -> anyhow::Error {
     let short = |c: &str| c[..c.len().min(8)].to_string();
     let path_note = key
         .1
@@ -531,14 +545,16 @@ fn conflict_error(
         .unwrap_or_default();
     anyhow::anyhow!(
         "version conflict: `{}`{} is required at two different commits:\n  \
-         {ref_a} @ {} (via {})\n  {ref_b} @ {} (via {})\n\
+         {} @ {} (via {})\n  {} @ {} (via {})\n\
          resolve it by pinning both requesters to the same ref, or removing one dependency",
         key.0,
         path_note,
-        short(commit_a),
-        chain_str(chain_a),
-        short(commit_b),
-        chain_str(chain_b),
+        a.reference,
+        short(a.commit),
+        chain_str(a.chain),
+        b.reference,
+        short(b.commit),
+        chain_str(b.chain),
     )
 }
 
