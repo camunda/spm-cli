@@ -183,13 +183,18 @@ pub(super) fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Re
     )?;
     let mut materialized: Vec<MaterializedSkill> = expansion.materialized;
     // Fold the transitively-resolved skills into `ai.lock`. A synthesized name
-    // colliding with a directly-declared skill is a hard error (the synthesized
-    // names are hash-suffixed to make this astronomically unlikely).
+    // colliding with a directly-declared dependency is a hard error (the
+    // synthesized names are hash-suffixed to make this astronomically unlikely).
+    // `skills` and `plugins` share one flat dependency-name namespace (enforced
+    // at manifest load, see `manifest.rs`), so the name must be free in *both*
+    // lock maps — a transitive skill colliding with a root plugin would write
+    // the same name into both maps and make `list`/`update <name>` ambiguous.
     for (tname, tlocked) in expansion.transitive {
-        if lock.skills.contains_key(&tname) {
+        if lock.skills.contains_key(&tname) || lock.plugins.contains_key(&tname) {
             bail!(
                 "transitive skill name collision: `{tname}` clashes with a directly-declared \
-                 skill — rename the direct skill or pin the dependency that brings it in"
+                 skill or plugin — rename the direct dependency or pin the dependency that \
+                 brings it in"
             );
         }
         println!(
