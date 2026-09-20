@@ -80,6 +80,25 @@ Version selectors (exactly one per skill):
 
 `path` (optional) selects a subdirectory — for monorepos holding many skills.
 
+### Transitive dependencies (`resolveTransitive`)
+
+By default spm only resolves the skills you list. Set the top-level
+`"resolveTransitive": true` and each resolved skill's **own** co-located
+`ai.json` is read recursively, pulling in the skills *it* declares alongside
+yours (deduplicated, cycle-safe, with a depth cap):
+
+```json
+{ "targets": ["claude"], "resolveTransitive": true, "skills": { "toolkit": { "git": "https://github.com/org/toolkit", "tag": "v2.0.0" } } }
+```
+
+It is **opt-in** because skills can carry executable agent instructions, so
+auto-fetching repos you never named is a larger supply-chain surface. The flag is
+read only from your root manifest — a dependency can't re-enable it — and every
+fetched skill still passes the content scan before its nested manifest is read.
+Two skills requiring the same repo at different commits is a hard error. See the
+[Transitive Skill Dependencies guide](docs/guide/transitive-dependencies.md) for
+naming, provenance (`spm list`/`status`), and conflict resolution.
+
 ### Full plugins (`plugins`)
 
 Alongside individual `skills`, `ai.json` can depend on a **full Claude Code

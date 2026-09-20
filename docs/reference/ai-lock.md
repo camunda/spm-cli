@@ -25,6 +25,15 @@ the same way, and `ai.lock` additionally records each plugin's **bundled skill
 set** so `spm status` can tell the materialized plugin skills apart from stale
 leftovers.
 
+## Transitive skills
+
+When [`resolveTransitive`](/reference/ai-json#resolvetransitive) is enabled, the
+skills discovered in dependencies' nested `ai.json` files are pinned into the
+**same flat `skills` map**. Each such entry carries a `requested_by` list naming
+the direct dependency(ies) that pulled it in (sorted and deduplicated so the
+committed lockfile stays stable). A directly-declared skill omits the field. See
+[Transitive Skill Dependencies](/guide/transitive-dependencies).
+
 ## Commit it
 
 Commit **both** `ai.json` and `ai.lock`. Never commit the materialized skills —

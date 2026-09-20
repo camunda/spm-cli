@@ -95,8 +95,16 @@ pub(super) fn status(scope: &Scope) -> Result<()> {
                 if missing {
                     incomplete = true;
                 }
+                // Annotate a transitively-resolved skill with its requester(s)
+                // so `spm status` surfaces the dependency graph, not just names.
+                let via = lock
+                    .skills
+                    .get(name)
+                    .filter(|l| !l.requested_by.is_empty())
+                    .map(|l| format!("  (transitive; via {})", l.requested_by.join(", ")))
+                    .unwrap_or_default();
                 println!(
-                    "  {name:<width$}  {}",
+                    "  {name:<width$}  {}{via}",
                     if missing { "MISSING" } else { "ok" }
                 );
             }

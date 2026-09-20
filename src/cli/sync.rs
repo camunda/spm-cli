@@ -2,7 +2,7 @@ use crate::lockfile::Lockfile;
 use crate::manifest::Manifest;
 use crate::scope::Scope;
 use crate::vendor::{MaterializedPlugin, MaterializedSkill};
-use crate::{resolver, store};
+use crate::{resolver, store, transitive};
 use anyhow::{bail, Context, Result};
 
 /// Core pipeline shared by add/remove/update/install:
@@ -164,37 +164,39 @@ pub(super) fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Re
         });
     }
 
-    // Populate the store and collect absolute paths for the vendor.
+    // Populate the store, run the security gate, and collect absolute paths for
+    // the vendors — recursing into nested `ai.json` dependencies when the root
+    // manifest opts in (`resolveTransitive`). Transitive skills are folded into
+    // the same flat list every vendor consumes and pinned into `ai.lock`
+    // alongside the directly-declared ones.
     if !manifest.skills.is_empty() {
         println!("fetching skills into store");
     }
-    let mut materialized: Vec<MaterializedSkill> = Vec::new();
-    for (name, locked) in &lock.skills {
-        let ensured = store::ensure(locked).with_context(|| format!("fetching skill `{name}`"))?;
+    let expansion = transitive::expand(
+        &lock.skills,
+        &transitive::Ctx {
+            prev: &prev.skills,
+            resolve_transitive: manifest.resolve_transitive,
+            refresh: force_refresh && only.is_none(),
+            width,
+        },
+    )?;
+    let mut materialized: Vec<MaterializedSkill> = expansion.materialized;
+    // Fold the transitively-resolved skills into `ai.lock`. A synthesized name
+    // colliding with a directly-declared skill is a hard error (the synthesized
+    // names are hash-suffixed to make this astronomically unlikely).
+    for (tname, tlocked) in expansion.transitive {
+        if lock.skills.contains_key(&tname) {
+            bail!(
+                "transitive skill name collision: `{tname}` clashes with a directly-declared \
+                 skill — rename the direct skill or pin the dependency that brings it in"
+            );
+        }
         println!(
-            "  {name:<width$}  {}",
-            if ensured.fetched { "fetched" } else { "cached" }
+            "  {tname:<width$}  transitive (via {})",
+            tlocked.requested_by.join(", ")
         );
-        // Single source of truth for the "is this actually a loadable skill?"
-        // check — run once here rather than per-vendor.
-        crate::skillcheck::warn_if_not_loadable(
-            name,
-            &locked.git,
-            &locked.reference,
-            locked.path.as_deref(),
-            &ensured.path,
-            &ensured.root,
-        );
-        // Pre-materialize security gate: scan the fetched content before it is
-        // copied into any agent-discovered directory. Blocks on high/critical
-        // findings unless SPM_ALLOW_SUSPICIOUS is set.
-        crate::scan::enforce(name, &ensured.path, &ensured.root)
-            .with_context(|| format!("scanning skill `{name}`"))?;
-        materialized.push(MaterializedSkill {
-            name: name.clone(),
-            path: ensured.path,
-            root: ensured.root,
-        });
+        lock.skills.insert(tname, tlocked);
     }
 
     // Flatten plugin-bundled skills into the same list every vendor consumes, so

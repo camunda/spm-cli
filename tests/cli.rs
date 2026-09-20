@@ -3014,3 +3014,389 @@ fn scan_command_scans_a_single_file() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("curl-pipe-shell"), "{stdout}");
 }
+
+// ---------------------------------------------------------------------------
+// Transitive skill dependencies (issue #68).
+// ---------------------------------------------------------------------------
+
+/// Run `git <args>` in `dir` with a pinned, hermetic identity (matches the
+/// Sandbox's own git helper) so these repo builders are independent of the
+/// developer's global git config.
+#[cfg(test)]
+fn git_in(dir: &Path, args: &[&str]) {
+    let ok = Command::new("git")
+        .args([
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "tag.gpgSign=false",
+        ])
+        .args(args)
+        .current_dir(dir)
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "git {args:?} failed in {}", dir.display());
+}
+
+/// Build a throwaway single-commit git repo at `dir` containing `files`
+/// (relative path -> contents), committed on branch `main`. Returns its
+/// `file://` URL (forward-slashed, JSON-safe).
+#[cfg(test)]
+fn make_repo(dir: &Path, files: &[(&str, &str)]) -> String {
+    std::fs::create_dir_all(dir).unwrap();
+    for (rel, body) in files {
+        let p = dir.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, body).unwrap();
+    }
+    git_in(dir, &["init", "-q", "-b", "main"]);
+    git_in(dir, &["add", "-A"]);
+    git_in(dir, &["commit", "-qm", "initial"]);
+    format!("file://{}", dir.display().to_string().replace('\\', "/"))
+}
+
+/// Names of the immediate skill subdirectories a Copilot install materializes.
+#[cfg(test)]
+fn copilot_skill_dirs(sb: &Sandbox) -> Vec<String> {
+    let dir = sb.project.join(".agents/skills/spm-managed-skills");
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter(|e| e.path().is_dir())
+                .map(|e| e.file_name().into_string().unwrap())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+/// With the opt-in flag *off* (the default), a resolved skill's own nested
+/// `ai.json` is ignored entirely — behavior is exactly as before.
+#[test]
+fn transitive_disabled_by_default_ignores_nested_ai_json() {
+    let sb = Sandbox::new();
+    let leaf = make_repo(
+        &sb.root.join("leaf"),
+        &[("SKILL.md", "---\nname: leaf\n---\nLeaf skill.\n")],
+    );
+    let top = make_repo(
+        &sb.root.join("top"),
+        &[
+            ("SKILL.md", "---\nname: top\n---\nTop skill.\n"),
+            (
+                "ai.json",
+                &format!(r#"{{"skills":{{"leaf":{{"git":"{leaf}","branch":"main"}}}}}}"#),
+            ),
+        ],
+    );
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"skills":{{"top":{{"git":"{top}","branch":"main"}}}}}}"#
+        ),
+    );
+    sb.ok(&["install"]);
+
+    assert_eq!(
+        copilot_skill_dirs(&sb),
+        vec!["top".to_string()],
+        "nested ai.json must be ignored when resolveTransitive is off"
+    );
+    let lock = sb.read("ai.lock");
+    assert!(
+        !lock.contains("requested_by"),
+        "no provenance without opt-in"
+    );
+}
+
+/// With `resolveTransitive: true`, a skill's nested `ai.json` dependency is
+/// fetched, scanned, and materialized for *every* configured target, and pinned
+/// into `ai.lock` with provenance.
+#[test]
+fn transitive_resolves_and_materializes_for_all_targets() {
+    let sb = Sandbox::new();
+    let leaf = make_repo(
+        &sb.root.join("leaf"),
+        &[("SKILL.md", "---\nname: leaf\n---\nLeaf skill.\n")],
+    );
+    let top = make_repo(
+        &sb.root.join("top"),
+        &[
+            ("SKILL.md", "---\nname: top\n---\nTop skill.\n"),
+            (
+                "ai.json",
+                &format!(r#"{{"skills":{{"leaf":{{"git":"{leaf}","branch":"main"}}}}}}"#),
+            ),
+        ],
+    );
+    sb.ok(&["init", "--target", "claude", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["claude","copilot"],"resolveTransitive":true,"skills":{{"top":{{"git":"{top}","branch":"main"}}}}}}"#
+        ),
+    );
+    let out = sb.ok(&["install"]);
+    assert!(out.contains("transitive (via top)"), "{out}");
+
+    // Copilot: both the direct `top` and the synthesized transitive leaf dir.
+    let dirs = copilot_skill_dirs(&sb);
+    assert!(dirs.contains(&"top".to_string()), "{dirs:?}");
+    let leaf_dir = dirs
+        .iter()
+        .find(|n| n.starts_with("top__leaf-"))
+        .unwrap_or_else(|| panic!("no transitive leaf dir in {dirs:?}"));
+    assert!(sb
+        .project
+        .join(".agents/skills/spm-managed-skills")
+        .join(leaf_dir)
+        .join("SKILL.md")
+        .exists());
+
+    // Claude: the same two skills land in its project-local marketplace.
+    let cdir = sb.claude_market_dir().join("plugin/skills");
+    assert!(cdir.join("top/SKILL.md").exists(), "claude top");
+    assert!(cdir.join(leaf_dir).join("SKILL.md").exists(), "claude leaf");
+
+    // ai.lock records the transitive entry with one-hop provenance.
+    let lock: serde_json::Value = serde_json::from_str(&sb.read("ai.lock")).unwrap();
+    let entry = &lock["skills"][leaf_dir];
+    assert_eq!(entry["requested_by"], serde_json::json!(["top"]), "{lock}");
+}
+
+/// A diamond (two requesters reaching the same repo+ref) resolves the shared
+/// skill exactly once, with both requesters recorded in `requested_by`.
+#[test]
+fn transitive_diamond_resolves_shared_skill_once() {
+    let sb = Sandbox::new();
+    let shared = make_repo(
+        &sb.root.join("shared"),
+        &[("SKILL.md", "---\nname: shared\n---\nShared.\n")],
+    );
+    let dep_json = format!(r#"{{"skills":{{"shared":{{"git":"{shared}","branch":"main"}}}}}}"#);
+    let left = make_repo(
+        &sb.root.join("left"),
+        &[
+            ("SKILL.md", "---\nname: left\n---\nLeft.\n"),
+            ("ai.json", &dep_json),
+        ],
+    );
+    let right = make_repo(
+        &sb.root.join("right"),
+        &[
+            ("SKILL.md", "---\nname: right\n---\nRight.\n"),
+            ("ai.json", &dep_json),
+        ],
+    );
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{"left":{{"git":"{left}","branch":"main"}},"right":{{"git":"{right}","branch":"main"}}}}}}"#
+        ),
+    );
+    sb.ok(&["install"]);
+
+    let dirs = copilot_skill_dirs(&sb);
+    let shared_dirs: Vec<&String> = dirs.iter().filter(|n| n.contains("__shared-")).collect();
+    assert_eq!(
+        shared_dirs.len(),
+        1,
+        "shared skill must be materialized exactly once: {dirs:?}"
+    );
+    let lock: serde_json::Value = serde_json::from_str(&sb.read("ai.lock")).unwrap();
+    let entry = &lock["skills"][shared_dirs[0]];
+    assert_eq!(
+        entry["requested_by"],
+        serde_json::json!(["left", "right"]),
+        "both requesters recorded, sorted+deduped: {lock}"
+    );
+}
+
+/// A dependency cycle (A -> B -> A) is detected and reported, not looped into a
+/// stack overflow.
+#[test]
+fn transitive_cycle_is_detected() {
+    let sb = Sandbox::new();
+    let a_dir = sb.root.join("cyc-a");
+    let b_dir = sb.root.join("cyc-b");
+    let a_url = format!("file://{}", a_dir.display().to_string().replace('\\', "/"));
+    let b_url = format!("file://{}", b_dir.display().to_string().replace('\\', "/"));
+    make_repo(
+        &a_dir,
+        &[
+            ("SKILL.md", "---\nname: a\n---\nA.\n"),
+            (
+                "ai.json",
+                &format!(r#"{{"skills":{{"b":{{"git":"{b_url}","branch":"main"}}}}}}"#),
+            ),
+        ],
+    );
+    make_repo(
+        &b_dir,
+        &[
+            ("SKILL.md", "---\nname: b\n---\nB.\n"),
+            (
+                "ai.json",
+                &format!(r#"{{"skills":{{"a":{{"git":"{a_url}","branch":"main"}}}}}}"#),
+            ),
+        ],
+    );
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{"a":{{"git":"{a_url}","branch":"main"}}}}}}"#
+        ),
+    );
+    let out = sb.spm(&["install"]);
+    assert!(!out.status.success(), "a cycle must fail the install");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("dependency cycle detected"), "{err}");
+}
+
+/// Two requesters that pull the same repo at different commits is a version
+/// conflict, reported with both requesters rather than silently picking one.
+#[test]
+fn transitive_version_conflict_is_reported() {
+    let sb = Sandbox::new();
+    // A shared repo with two branches at different commits.
+    let shared_dir = sb.root.join("conflict-shared");
+    let shared = make_repo(
+        &shared_dir,
+        &[("SKILL.md", "---\nname: shared\n---\nv1.\n")],
+    );
+    git_in(&shared_dir, &["checkout", "-q", "-b", "other"]);
+    std::fs::write(shared_dir.join("SKILL.md"), "---\nname: shared\n---\nv2.\n").unwrap();
+    git_in(&shared_dir, &["add", "-A"]);
+    git_in(&shared_dir, &["commit", "-qm", "second"]);
+
+    let left = make_repo(
+        &sb.root.join("cf-left"),
+        &[
+            ("SKILL.md", "---\nname: left\n---\nLeft.\n"),
+            (
+                "ai.json",
+                &format!(r#"{{"skills":{{"shared":{{"git":"{shared}","branch":"main"}}}}}}"#),
+            ),
+        ],
+    );
+    let right = make_repo(
+        &sb.root.join("cf-right"),
+        &[
+            ("SKILL.md", "---\nname: right\n---\nRight.\n"),
+            (
+                "ai.json",
+                &format!(r#"{{"skills":{{"shared":{{"git":"{shared}","branch":"other"}}}}}}"#),
+            ),
+        ],
+    );
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{"left":{{"git":"{left}","branch":"main"}},"right":{{"git":"{right}","branch":"main"}}}}}}"#
+        ),
+    );
+    let out = sb.spm(&["install"]);
+    assert!(!out.status.success(), "a version conflict must fail");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("version conflict"), "{err}");
+    assert!(
+        err.contains("left") && err.contains("right"),
+        "names both requesters: {err}"
+    );
+}
+
+/// A dependency's own `ai.json` may not carry `resolveTransitive` — recursion is
+/// governed solely by the root project, so a nested flag is a hard error.
+#[test]
+fn nested_resolve_transitive_flag_is_rejected() {
+    let sb = Sandbox::new();
+    let leaf = make_repo(
+        &sb.root.join("nt-leaf"),
+        &[("SKILL.md", "---\nname: leaf\n---\nLeaf.\n")],
+    );
+    let top = make_repo(
+        &sb.root.join("nt-top"),
+        &[
+            ("SKILL.md", "---\nname: top\n---\nTop.\n"),
+            (
+                "ai.json",
+                &format!(
+                    r#"{{"resolveTransitive":true,"skills":{{"leaf":{{"git":"{leaf}","branch":"main"}}}}}}"#
+                ),
+            ),
+        ],
+    );
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{"top":{{"git":"{top}","branch":"main"}}}}}}"#
+        ),
+    );
+    let out = sb.spm(&["install"]);
+    assert!(
+        !out.status.success(),
+        "nested resolveTransitive must be rejected"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("resolveTransitive"), "{err}");
+}
+
+/// `spm list` and `spm status` surface transitive provenance.
+#[test]
+fn list_and_status_show_transitive_provenance() {
+    let sb = Sandbox::new();
+    let leaf = make_repo(
+        &sb.root.join("prov-leaf"),
+        &[("SKILL.md", "---\nname: leaf\n---\nLeaf.\n")],
+    );
+    let top = make_repo(
+        &sb.root.join("prov-top"),
+        &[
+            ("SKILL.md", "---\nname: top\n---\nTop.\n"),
+            (
+                "ai.json",
+                &format!(r#"{{"skills":{{"leaf":{{"git":"{leaf}","branch":"main"}}}}}}"#),
+            ),
+        ],
+    );
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{"top":{{"git":"{top}","branch":"main"}}}}}}"#
+        ),
+    );
+    sb.ok(&["install"]);
+
+    let list = sb.ok(&["list"]);
+    assert!(list.contains("transitive skills:"), "{list}");
+    assert!(list.contains("via top"), "{list}");
+
+    let status = sb.ok(&["status"]);
+    assert!(status.contains("transitive; via top"), "{status}");
+}
+
+/// The schema accepts `resolveTransitive` on the root manifest.
+#[test]
+fn schema_accepts_resolve_transitive_flag() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        r#"{"targets":["copilot"],"resolveTransitive":false,"skills":{}}"#,
+    );
+    // A manifest-reading command must accept the flag without a schema error.
+    let out = sb.ok(&["list"]);
+    assert!(out.contains("no skills"), "{out}");
+}

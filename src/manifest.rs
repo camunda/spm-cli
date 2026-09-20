@@ -10,6 +10,18 @@ pub const MANIFEST_FILE: &str = "ai.json";
 pub struct Manifest {
     /// Target vendors, e.g. `["claude", "copilot"]`.
     pub targets: Vec<String>,
+    /// Opt-in gate for transitive dependency resolution. When `true`, spm reads
+    /// each resolved skill's own co-located `ai.json` and recursively resolves
+    /// the skills it declares. Default `false`: nested manifests are ignored and
+    /// behavior is exactly as before. Read **only** from the root project's own
+    /// manifest — a dependency's nested `ai.json` cannot re-enable recursion
+    /// (that field is rejected there), so a single opt-out at the root is final.
+    #[serde(
+        default,
+        rename = "resolveTransitive",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub resolve_transitive: bool,
     #[serde(default, deserialize_with = "deserialize_unique_skills")]
     pub skills: BTreeMap<String, SkillSpec>,
     /// Full-plugin dependencies (agents/MCP servers/hooks/scripts + bundled
@@ -230,6 +242,58 @@ impl Manifest {
     }
 }
 
+/// A dependency's own `ai.json`, parsed with a deliberately lenient shape.
+///
+/// A skill repo consumed as a transitive dependency may ship an `ai.json` whose
+/// only purpose is to declare *further* skills. Unlike the root project's
+/// manifest it is **not** required to list `targets` (transitive skills always
+/// inherit the root's targets), and its `plugins` map is ignored in v1 (a plugin
+/// pulls a much bigger blast radius — agents/hooks/MCP/scripts — so it is out of
+/// scope for automatic transitive fetching). A nested `resolveTransitive` is
+/// rejected outright: recursion is governed solely by the *root* project's flag,
+/// so a dependency author gets a clear signal the field does nothing here (and a
+/// malicious dependency cannot re-enable resolution the root opted out of).
+#[derive(Debug, Clone, Deserialize)]
+pub struct DependencyManifest {
+    #[serde(default, deserialize_with = "deserialize_unique_skills")]
+    pub skills: BTreeMap<String, SkillSpec>,
+}
+
+impl DependencyManifest {
+    /// Load the nested manifest co-located with a resolved skill's content
+    /// (`<dir>/ai.json`). The caller is responsible for only invoking this when
+    /// the file exists — a missing file is a normal "no transitive deps" case,
+    /// not an error.
+    pub fn load(dir: &Path) -> Result<Self> {
+        let p = Manifest::path_in(dir);
+        let text = std::fs::read_to_string(&p)
+            .with_context(|| format!("reading nested {MANIFEST_FILE} at {}", p.display()))?;
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .with_context(|| format!("parsing nested {}", p.display()))?;
+        if value.get("resolveTransitive").is_some() {
+            bail!(
+                "nested {} at {}: `resolveTransitive` is not allowed in a dependency's manifest — \
+                 transitive resolution is controlled only by the root project's ai.json; \
+                 remove it here (it has no effect)",
+                MANIFEST_FILE,
+                p.display()
+            );
+        }
+        // Deserialize from the raw text (not `value`) so duplicate skill keys in
+        // the nested manifest are still rejected, exactly as `Manifest::load` does.
+        let dep: Self = serde_json::from_str(&text)
+            .with_context(|| format!("parsing nested {}", p.display()))?;
+        for (name, spec) in &dep.skills {
+            validate_skill_name(name).with_context(|| format!("in nested {}", p.display()))?;
+            if let Some(sub) = &spec.path {
+                validate_subpath(sub)
+                    .with_context(|| format!("skill `{name}` in nested {}", p.display()))?;
+            }
+        }
+        Ok(dep)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,5 +362,53 @@ mod tests {
     fn validate_subpath_accepts_plain_relative_path() {
         assert!(validate_subpath("skills/greet").is_ok());
         assert!(validate_subpath(".").is_ok());
+    }
+
+    /// A dependency's own `ai.json` parses leniently: no `targets` required, and
+    /// `plugins`/`targets` keys are ignored (transitive skills inherit the root's
+    /// targets, and nested plugins are out of scope in v1).
+    #[test]
+    fn dependency_manifest_parses_skills_and_ignores_targets_and_plugins() {
+        let dir = std::env::temp_dir().join(format!(
+            "spm-depman-lenient-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            Manifest::path_in(&dir),
+            r#"{"targets":["claude"],"plugins":{"p":{"git":"u","branch":"main"}},"skills":{"leaf":{"git":"u","branch":"main"}}}"#,
+        )
+        .unwrap();
+        let dep = DependencyManifest::load(&dir).unwrap();
+        assert_eq!(dep.skills.len(), 1);
+        assert!(dep.skills.contains_key("leaf"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A nested `resolveTransitive` is a hard error — recursion is controlled
+    /// only by the root project's manifest.
+    #[test]
+    fn dependency_manifest_rejects_nested_resolve_transitive() {
+        let dir = std::env::temp_dir().join(format!(
+            "spm-depman-nested-flag-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            Manifest::path_in(&dir),
+            r#"{"resolveTransitive":true,"skills":{}}"#,
+        )
+        .unwrap();
+        let err = DependencyManifest::load(&dir).unwrap_err();
+        assert!(format!("{err:#}").contains("resolveTransitive"), "{err:#}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
