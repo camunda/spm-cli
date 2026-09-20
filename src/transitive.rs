@@ -32,6 +32,7 @@ use crate::store;
 use crate::vendor::MaterializedSkill;
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
+use std::path::{Component, Path, PathBuf};
 
 /// Hard cap on transitive recursion depth, independent of the opt-in flag. A
 /// backstop against a pathological (or hostile) dependency graph: even with the
@@ -121,8 +122,35 @@ pub fn normalize_git(url: &str) -> String {
     }
 }
 
+/// Canonicalize a validated subpath into a stable lexical identity string.
+///
+/// `validate_subpath` (run before any spec reaches here) already rejects
+/// absolute paths and `..`, but it *permits* `.` components and repeated or
+/// trailing separators — so `skills/x`, `skills/./x`, `skills//x`, and
+/// `skills/x/` all name the same content while producing different raw strings.
+/// Using the raw string as the transitive identity would let those spellings
+/// dodge dedup/version-conflict detection and materialize the same skill twice.
+/// Fold every root-equivalent form (`.`, empty, `None`) to `None` and join the
+/// remaining `Normal` components with `/` so identity is spelling-independent.
+fn canonical_subpath(path: &Option<String>) -> Option<String> {
+    let raw = path.as_deref()?;
+    let parts: Vec<std::borrow::Cow<str>> = Path::new(raw)
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(s) => Some(s.to_string_lossy()),
+            // CurDir dropped; validate_subpath already rejected the rest.
+            _ => None,
+        })
+        .collect();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("/"))
+    }
+}
+
 fn key_of(git: &str, path: &Option<String>) -> Key {
-    (normalize_git(git), path.clone())
+    (normalize_git(git), canonical_subpath(path))
 }
 
 /// Short, stable hex hash of a skill's normalized identity, for name synthesis.
@@ -148,6 +176,36 @@ fn synth_name(requester: &str, declared: &str, key: &Key) -> String {
 
 fn chain_str(chain: &[String]) -> String {
     chain.join(" -> ")
+}
+
+/// Locate this skill's co-located nested `ai.json`, requiring it to resolve
+/// **inside** the checkout boundary (`root`).
+///
+/// The content scanner (`scan::enforce`) deliberately skips a symlink whose
+/// target escapes `root` (or reaches into `.git`) — so a hostile repository
+/// could hide its nested manifest behind such a link, have it skipped by the
+/// scan, and yet still have it read here, bypassing the scan-before-recurse
+/// guarantee and triggering arbitrary dependency fetches. Reuse the single
+/// boundary-aware resolver (`fsutil::resolve_within_canonical`, shared with the
+/// copy/scan traversals) so the manifest we read is exactly the content the scan
+/// covered. Returns `None` when there is simply no nested manifest; errors when
+/// one exists but escapes the boundary.
+fn nested_manifest_path(content: &Path, root: &Path) -> Result<Option<PathBuf>> {
+    let nested = Manifest::path_in(content);
+    // `exists()` follows symlinks: a broken/absent link reads as "no manifest".
+    if !nested.exists() {
+        return Ok(None);
+    }
+    match crate::fsutil::resolve_within_canonical(root, &nested) {
+        Some(p) => Ok(Some(p)),
+        None => bail!(
+            "nested {} at {} resolves outside the skill checkout (a symlink escaping the \
+             checkout boundary, or into `.git`); refusing to read it — it would bypass the \
+             content scan that guards transitive resolution",
+            crate::manifest::MANIFEST_FILE,
+            nested.display()
+        ),
+    }
 }
 
 /// Fetch, security-scan, and materialize every direct skill, then (when opted
@@ -262,8 +320,9 @@ fn visit(
 
     // Only the `ai.json` co-located with this skill's own content is read — never
     // a fallback to a monorepo's repo-root manifest for a subdir-pinned skill.
-    let nested = Manifest::path_in(&ensured.path);
-    if !nested.exists() {
+    // Require it to resolve inside the checkout boundary so a symlinked manifest
+    // the scanner skipped cannot smuggle in unscanned transitive dependencies.
+    if nested_manifest_path(&ensured.path, &ensured.root)?.is_none() {
         return Ok(());
     }
     let dep = DependencyManifest::load(&ensured.path)
@@ -497,5 +556,89 @@ mod tests {
         let k1 = ("https://github.com/o/r".to_string(), None);
         let k2 = ("https://github.com/o/other".to_string(), None);
         assert_ne!(short_hash(&k1), short_hash(&k2));
+    }
+
+    #[test]
+    fn canonical_subpath_folds_equivalent_spellings() {
+        let want = Some("skills/x".to_string());
+        assert_eq!(canonical_subpath(&Some("skills/x".into())), want);
+        assert_eq!(canonical_subpath(&Some("skills/./x".into())), want);
+        assert_eq!(canonical_subpath(&Some("skills//x".into())), want);
+        assert_eq!(canonical_subpath(&Some("skills/x/".into())), want);
+        assert_eq!(canonical_subpath(&Some("./skills/x".into())), want);
+    }
+
+    #[test]
+    fn canonical_subpath_folds_root_equivalent_forms_to_none() {
+        assert_eq!(canonical_subpath(&None), None);
+        assert_eq!(canonical_subpath(&Some(".".into())), None);
+        assert_eq!(canonical_subpath(&Some("".into())), None);
+        assert_eq!(canonical_subpath(&Some("./".into())), None);
+    }
+
+    /// `skills/x` and `skills/./x` name the same content, so their transitive
+    /// identity key must be equal — otherwise dedup/version-conflict detection
+    /// can be bypassed and the same skill materialized twice.
+    #[test]
+    fn key_of_dedups_dot_component_paths() {
+        let git = "https://github.com/o/r";
+        assert_eq!(
+            key_of(git, &Some("skills/x".into())),
+            key_of(git, &Some("skills/./x".into()))
+        );
+    }
+
+    /// A nested `ai.json` that is a symlink escaping the checkout boundary must
+    /// be refused — the scanner skips such a link, so reading it here would
+    /// bypass the scan-before-recurse guarantee.
+    #[cfg(unix)]
+    #[test]
+    fn nested_manifest_path_rejects_symlink_escaping_boundary() {
+        use std::os::unix::fs::symlink;
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!(
+            "spm-transitive-nested-escape-{}-{nanos}",
+            std::process::id()
+        ));
+        let checkout = base.join("checkout");
+        std::fs::create_dir_all(&checkout).unwrap();
+        // A real manifest living outside the checkout — the exfiltration target.
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("ai.json"), r#"{"skills":{}}"#).unwrap();
+        // Inside the checkout, `ai.json` is a symlink to the outside manifest.
+        symlink(outside.join("ai.json"), checkout.join("ai.json")).unwrap();
+
+        let root = std::fs::canonicalize(&checkout).unwrap();
+        let err = nested_manifest_path(&root, &root).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("outside the skill checkout"),
+            "{err:#}"
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// A regular, in-boundary nested `ai.json` is accepted, and a checkout with
+    /// no manifest reads as "no transitive deps".
+    #[test]
+    fn nested_manifest_path_accepts_in_boundary_and_absent() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let checkout = std::env::temp_dir().join(format!(
+            "spm-transitive-nested-ok-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&checkout).unwrap();
+        let root = std::fs::canonicalize(&checkout).unwrap();
+        assert_eq!(nested_manifest_path(&root, &root).unwrap(), None);
+
+        std::fs::write(root.join("ai.json"), r#"{"skills":{}}"#).unwrap();
+        assert!(nested_manifest_path(&root, &root).unwrap().is_some());
+        std::fs::remove_dir_all(&checkout).ok();
     }
 }

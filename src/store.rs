@@ -17,6 +17,13 @@ pub struct Ensured {
 
 /// Ensure the repo@commit for `locked` is present in the global store, fetching if needed.
 pub fn ensure(locked: &LockedSkill) -> Result<Ensured> {
+    // Defense in depth: `store` and `commit` are appended into filesystem paths
+    // that get recursively removed and rewritten below. Every construction path
+    // (lockfile load, direct/plugin resolve, and transitive resolve) is expected
+    // to hand us an already-validated entry, but re-validate at this single choke
+    // point so no path can inject a separator or `..` into the store location.
+    crate::lockfile::validate_commit(&locked.commit)?;
+    crate::lockfile::validate_store_key(&locked.store)?;
     let repo_dir = paths::store_dir()?.join(&locked.store);
 
     let fetched = !git::is_at_commit(&repo_dir, &locked.commit);
