@@ -33,10 +33,34 @@ fn git(args: &[&str], cwd: Option<&Path>) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Reject a value that git could misinterpret as a command-line option.
+///
+/// Repository URLs and refspecs come straight from (possibly hostile) manifests
+/// and are passed to `git` as positional arguments. git parses with getopt, which
+/// treats **any** argument beginning with `-` as an option no matter where it sits
+/// on the line — so a value like `--upload-pack=touch /tmp/pwned` would run an
+/// attacker-chosen command instead of being read as a repository or ref. No
+/// legitimate URL or git ref name begins with `-`, so refusing that shape here is
+/// the single choke point that closes option injection for every caller (root,
+/// nested/transitive, and plugin specs alike), independent of the git version.
+fn reject_option_like(kind: &str, value: &str) -> Result<()> {
+    if value.starts_with('-') {
+        bail!(
+            "refusing to pass option-like {kind} `{value}` to git: values beginning with `-` \
+             could be misinterpreted as git options"
+        );
+    }
+    Ok(())
+}
+
 /// Resolve remote refs to a commit SHA without cloning. Pass multiple refspecs
 /// (e.g. a tag and its `^{}` peel) — the peeled/dereferenced commit wins, so
 /// annotated tags resolve to the underlying commit rather than the tag object.
 pub fn ls_remote(url: &str, refspecs: &[&str]) -> Result<String> {
+    reject_option_like("repository URL", url)?;
+    for refspec in refspecs {
+        reject_option_like("ref", refspec)?;
+    }
     let mut args = vec!["ls-remote", url];
     args.extend_from_slice(refspecs);
     let out = git(&args, None)?;
@@ -69,6 +93,7 @@ pub fn is_at_commit(dir: &Path, sha: &str) -> bool {
 /// fetch-by-SHA (not all enable `uploadpack.allowAnySHA1InWant`), falls back to
 /// a full fetch. `dest` is created if missing.
 pub fn fetch_commit(url: &str, sha: &str, dest: &Path) -> Result<()> {
+    reject_option_like("repository URL", url)?;
     std::fs::create_dir_all(dest)?;
     git(&["init", "-q"], Some(dest))?;
     // Remote may already exist if a prior attempt was interrupted.
@@ -195,5 +220,29 @@ mod tests {
 
         std::fs::remove_dir_all(&src).unwrap();
         std::fs::remove_dir_all(&dest).unwrap();
+    }
+
+    /// A hostile manifest could set the repository URL (or a ref) to an
+    /// option-like string such as `--upload-pack=…`; git would parse it as an
+    /// option and run an attacker-chosen command. Both remote entry points must
+    /// refuse a value beginning with `-` *before* spawning git — no network or
+    /// filesystem side effect may occur.
+    #[test]
+    fn remote_ops_reject_option_like_values() {
+        let evil = "--upload-pack=touch /tmp/spm-pwned";
+        let err = ls_remote(evil, &["refs/heads/main"]).unwrap_err();
+        assert!(format!("{err}").contains("option-like"), "{err}");
+
+        let err = ls_remote("file:///tmp/repo", &["--upload-pack=evil"]).unwrap_err();
+        assert!(format!("{err}").contains("option-like"), "{err}");
+
+        let dest = scratch("evil-fetch-dest");
+        let err = fetch_commit(evil, &"a".repeat(40), &dest).unwrap_err();
+        assert!(format!("{err}").contains("option-like"), "{err}");
+        // The guard runs before any `create_dir_all`, so nothing was written.
+        assert!(
+            !dest.exists(),
+            "fetch_commit must not touch the fs for a rejected URL"
+        );
     }
 }

@@ -369,22 +369,32 @@ fn visit(
         // Already resolved elsewhere in the graph: a diamond (dedup) or a
         // version conflict.
         if let Some(existing) = resolved.get(&ckey) {
-            let child = resolve_child(spec, ctx)
-                .with_context(|| format!("resolving nested skill `{declared}` of `{name}`"))?;
-            if existing.commit != child.commit {
-                let mut cur_chain: Vec<String> = stack.iter().map(|(_, n)| n.clone()).collect();
-                cur_chain.push(declared.clone());
-                return Err(conflict_error(
-                    &ckey,
-                    &existing.reference,
-                    &existing.commit,
-                    &existing.chain,
-                    &child.reference,
-                    &child.commit,
-                    &cur_chain,
-                ));
+            // Reuse the already-resolved commit when this edge requests the same
+            // reference the node was resolved at: the identity + reference match,
+            // so re-resolving would only repeat a remote lookup — and worse, a
+            // moving ref (branch, or a retagged tag) could resolve to a different
+            // commit the second time and report a *phantom* version conflict for
+            // what is really one shared node. Only when a genuinely different
+            // reference is requested do we resolve again, to detect a real conflict.
+            let requested = spec.version()?.label();
+            if requested != existing.reference {
+                let child = resolve_child(spec, ctx)
+                    .with_context(|| format!("resolving nested skill `{declared}` of `{name}`"))?;
+                if existing.commit != child.commit {
+                    let mut cur_chain: Vec<String> = stack.iter().map(|(_, n)| n.clone()).collect();
+                    cur_chain.push(declared.clone());
+                    return Err(conflict_error(
+                        &ckey,
+                        &existing.reference,
+                        &existing.commit,
+                        &existing.chain,
+                        &child.reference,
+                        &child.commit,
+                        &cur_chain,
+                    ));
+                }
             }
-            // Same identity + same commit: a diamond. Record this requester on
+            // Same identity, no conflict: a diamond. Record this requester on
             // the shared transitive entry (directs keep an empty requested_by).
             if let Some(idx) = existing.out_idx {
                 out.transitive[idx].1.requested_by.push(name.to_string());
