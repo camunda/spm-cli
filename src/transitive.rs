@@ -122,7 +122,12 @@ pub fn normalize_git(url: &str) -> String {
         // scp-style `user@host:path` (no scheme). Only treat as scp when the
         // colon precedes the first slash — otherwise it's a plain path.
         let before_colon = &s[..idx];
-        if !before_colon.contains('/') {
+        if is_windows_drive_prefix(s) {
+            // A bare Windows path like `C:\work\repo.git`: the single-letter
+            // "authority" is a drive letter, not an scp host. Treat it as a local
+            // path so `repo.git` and `repo` stay distinct identities.
+            s.to_string()
+        } else if !before_colon.contains('/') {
             // A remote scp target — strip the `.git` convention.
             let authority = before_colon;
             let path = strip_git_suffix(&s[idx..]);
@@ -146,6 +151,21 @@ fn strip_git_suffix(path: &str) -> String {
     p.strip_suffix(".git").unwrap_or(p).to_string()
 }
 
+/// Does `s` start with a Windows drive-letter prefix (`C:\…` or `C:/…`)?
+///
+/// A bare local Windows path like `C:\work\repo.git` otherwise reaches the
+/// scp-style branch of [`normalize_git`] with a single-letter "authority" (`C`)
+/// and gets its `.git` suffix stripped, fusing `C:\work\repo.git` and
+/// `C:\work\repo` into one identity. Detecting the drive prefix keeps it a local
+/// path (suffix preserved). Requiring a path separator after the colon avoids
+/// misclassifying a genuine single-letter scp host (`h:path`).
+fn is_windows_drive_prefix(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(
+        (chars.next(), chars.next(), chars.next()),
+        (Some(letter), Some(':'), Some('\\' | '/')) if letter.is_ascii_alphabetic()
+    )
+}
 /// Canonicalize a validated subpath into a stable lexical identity string.
 ///
 /// `validate_subpath` (run before any spec reaches here) already rejects
@@ -346,10 +366,13 @@ fn visit(
     // a fallback to a monorepo's repo-root manifest for a subdir-pinned skill.
     // Require it to resolve inside the checkout boundary so a symlinked manifest
     // the scanner skipped cannot smuggle in unscanned transitive dependencies.
-    if nested_manifest_path(&ensured.path, &ensured.root)?.is_none() {
+    let Some(manifest_path) = nested_manifest_path(&ensured.path, &ensured.root)? else {
         return Ok(());
-    }
-    let dep = DependencyManifest::load(&ensured.path)
+    };
+    // Read the boundary-checked, symlink-resolved path itself — not
+    // `ensured.path/ai.json` re-derived — so a symlink swapped in after the
+    // check cannot redirect the load to an outside, unscanned manifest.
+    let dep = DependencyManifest::load_file(&manifest_path)
         .with_context(|| format!("reading nested dependencies of `{name}`"))?;
     if dep.skills.is_empty() {
         return Ok(());
@@ -549,6 +572,28 @@ mod tests {
             normalize_git("git@GitHub.com:Org/Repo.git"),
             "git@github.com:Org/Repo"
         );
+    }
+
+    #[test]
+    fn normalize_treats_windows_drive_path_as_local() {
+        // A bare Windows path must NOT be misread as an scp target: its drive
+        // letter is a single-letter "authority", so stripping `.git` would fuse
+        // `C:\work\repo.git` and `C:\work\repo` into one identity.
+        assert_eq!(
+            normalize_git(r"C:\work\repo.git"),
+            r"C:\work\repo.git",
+            "drive-letter path keeps its .git suffix and case"
+        );
+        assert_ne!(
+            normalize_git(r"C:\work\repo.git"),
+            normalize_git(r"C:\work\repo"),
+            "distinct local dirs stay distinct identities"
+        );
+        // Forward-slash drive paths (`C:/…`) are treated the same.
+        assert_eq!(normalize_git("D:/work/repo.git"), "D:/work/repo.git");
+        // A genuine single-letter scp host (no path separator after the colon)
+        // is still scp — the `.git` convention is stripped.
+        assert_eq!(normalize_git("h:Org/Repo.git"), "h:Org/Repo");
     }
 
     #[test]

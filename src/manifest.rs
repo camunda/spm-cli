@@ -278,13 +278,20 @@ pub struct DependencyManifest {
 }
 
 impl DependencyManifest {
-    /// Load the nested manifest co-located with a resolved skill's content
+    /// Load the nested manifest from an explicit, already-validated file path
     /// (`<dir>/ai.json`). The caller is responsible for only invoking this when
     /// the file exists — a missing file is a normal "no transitive deps" case,
     /// not an error.
-    pub fn load(dir: &Path) -> Result<Self> {
-        let p = Manifest::path_in(dir);
-        let text = std::fs::read_to_string(&p)
+    ///
+    /// The transitive resolver validates the nested `ai.json` against the
+    /// checkout boundary *before* reading it and gets back a canonical,
+    /// symlink-resolved path (see `transitive::nested_manifest_path`). Reading
+    /// that exact path — rather than re-deriving `<dir>/ai.json` and letting the
+    /// loader follow the on-disk symlink a second time — closes the TOCTOU window
+    /// where the symlink could be swapped between the boundary check and the read
+    /// to smuggle in an outside, unscanned manifest.
+    pub fn load_file(p: &Path) -> Result<Self> {
+        let text = std::fs::read_to_string(p)
             .with_context(|| format!("reading nested {MANIFEST_FILE} at {}", p.display()))?;
         let value: serde_json::Value = serde_json::from_str(&text)
             .with_context(|| format!("parsing nested {}", p.display()))?;
@@ -392,7 +399,7 @@ mod tests {
 
     /// A nested manifest bypasses the root JSON schema, so a `commit` selector
     /// that is not a full hex SHA (here one carrying path separators aimed at
-    /// the store path) must be rejected by `DependencyManifest::load` before it
+    /// the store path) must be rejected by `DependencyManifest::load_file` before it
     /// can reach `resolver::resolve`/`store_key`.
     #[test]
     fn dependency_manifest_rejects_non_sha_commit() {
@@ -410,7 +417,7 @@ mod tests {
             r#"{"skills":{"evil":{"git":"u","commit":"../../../../etc/evil"}}}"#,
         )
         .unwrap();
-        let err = DependencyManifest::load(&dir).unwrap_err();
+        let err = DependencyManifest::load_file(&Manifest::path_in(&dir)).unwrap_err();
         assert!(
             format!("{err:#}").contains("40-character hexadecimal SHA"),
             "{err:#}"
@@ -455,7 +462,7 @@ mod tests {
             r#"{"targets":["claude"],"plugins":{"p":{"git":"u","branch":"main"}},"skills":{"leaf":{"git":"u","branch":"main"}}}"#,
         )
         .unwrap();
-        let dep = DependencyManifest::load(&dir).unwrap();
+        let dep = DependencyManifest::load_file(&Manifest::path_in(&dir)).unwrap();
         assert_eq!(dep.skills.len(), 1);
         assert!(dep.skills.contains_key("leaf"));
         std::fs::remove_dir_all(&dir).unwrap();
@@ -479,8 +486,43 @@ mod tests {
             r#"{"resolveTransitive":true,"skills":{}}"#,
         )
         .unwrap();
-        let err = DependencyManifest::load(&dir).unwrap_err();
+        let err = DependencyManifest::load_file(&Manifest::path_in(&dir)).unwrap_err();
         assert!(format!("{err:#}").contains("resolveTransitive"), "{err:#}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `load_file` reads the exact path it is handed — not a `<dir>/ai.json`
+    /// re-derived from a directory. The transitive resolver relies on this to
+    /// read the boundary-checked, symlink-resolved manifest path instead of
+    /// re-following the on-disk `ai.json` symlink (which a swap could redirect
+    /// to an outside, unscanned manifest after the boundary check).
+    #[test]
+    fn dependency_manifest_load_file_reads_the_given_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "spm-depman-loadfile-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // The real, validated manifest lives at a non-default filename; the
+        // default `ai.json` slot holds a decoy the loader must NOT read.
+        let validated = dir.join("validated.json");
+        std::fs::write(
+            &validated,
+            r#"{"skills":{"real":{"git":"u","branch":"main"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            Manifest::path_in(&dir),
+            r#"{"skills":{"decoy":{"git":"u","branch":"main"}}}"#,
+        )
+        .unwrap();
+        let dep = DependencyManifest::load_file(&validated).unwrap();
+        assert!(dep.skills.contains_key("real"), "reads the given path");
+        assert!(!dep.skills.contains_key("decoy"), "ignores <dir>/ai.json");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

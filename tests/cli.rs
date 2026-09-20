@@ -3262,6 +3262,65 @@ fn transitive_cycle_is_detected() {
     assert!(err.contains("dependency cycle detected"), "{err}");
 }
 
+/// A transitive dependency chain deeper than the hard depth cap fails fast with
+/// a clear error instead of resolving unbounded nesting. Guards the depth-cap
+/// boundary that the cycle/diamond tests do not exercise.
+#[test]
+fn transitive_depth_cap_is_enforced() {
+    let sb = Sandbox::new();
+    // Build a linear chain d0 -> d1 -> ... -> d11, each declaring the next.
+    // With the cap at 8, resolution must bail before reaching the deepest node.
+    const LEVELS: usize = 12;
+    let dirs: Vec<_> = (0..LEVELS)
+        .map(|i| sb.root.join(format!("depth-{i}")))
+        .collect();
+    let urls: Vec<String> = dirs
+        .iter()
+        .map(|d| format!("file://{}", d.display().to_string().replace('\\', "/")))
+        .collect();
+    for i in 0..LEVELS {
+        let mut files = vec![(
+            "SKILL.md".to_string(),
+            format!("---\nname: d{i}\n---\nLevel {i}.\n"),
+        )];
+        if i + 1 < LEVELS {
+            files.push((
+                "ai.json".to_string(),
+                format!(
+                    r#"{{"skills":{{"d{next}":{{"git":"{url}","branch":"main"}}}}}}"#,
+                    next = i + 1,
+                    url = urls[i + 1]
+                ),
+            ));
+        }
+        let refs: Vec<(&str, &str)> = files
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        make_repo(&dirs[i], &refs);
+    }
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{"d0":{{"git":"{}","branch":"main"}}}}}}"#,
+            urls[0]
+        ),
+    );
+    let out = sb.spm(&["install"]);
+    assert!(
+        !out.status.success(),
+        "an over-deep chain must fail the install"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("depth cap"), "reports the depth cap: {err}");
+    // The deepest node must never be materialized — resolution stops at the cap.
+    assert!(
+        !copilot_skill_dirs(&sb).iter().any(|n| n.contains("d11")),
+        "the beyond-cap node must not be materialized"
+    );
+}
+
 /// Two requesters that pull the same repo at different commits is a version
 /// conflict, reported with both requesters rather than silently picking one.
 #[test]
