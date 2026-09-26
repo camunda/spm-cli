@@ -3446,6 +3446,55 @@ fn list_and_status_show_transitive_provenance() {
     assert!(status.contains("transitive; via top"), "{status}");
 }
 
+/// A direct skill whose reused lock entry carries stale `requested_by`
+/// provenance — e.g. it was a synthesized transitive entry before being promoted
+/// to a direct dependency — must be re-normalized to a provenance-free direct
+/// entry on the next sync. `spm status`/`list` key "transitive" purely on a
+/// non-empty `requested_by`, so a stale value would misreport a declared skill
+/// as transitive.
+#[test]
+fn reused_direct_entry_drops_stale_transitive_provenance() {
+    let sb = Sandbox::new();
+    let leaf = make_repo(
+        &sb.root.join("stale-prov-leaf"),
+        &[("SKILL.md", "---\nname: leaf\n---\nLeaf.\n")],
+    );
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"skills":{{"leaf":{{"git":"{leaf}","branch":"main"}}}}}}"#
+        ),
+    );
+    sb.ok(&["install"]);
+
+    // Simulate a lock whose direct `leaf` entry carries stale provenance (as if
+    // it had been a synthesized transitive entry promoted to a direct dep).
+    let mut lock: serde_json::Value = serde_json::from_str(&sb.read("ai.lock")).unwrap();
+    lock["skills"]["leaf"]["requested_by"] = serde_json::json!(["ghost"]);
+    std::fs::write(
+        sb.project.join("ai.lock"),
+        serde_json::to_string_pretty(&lock).unwrap(),
+    )
+    .unwrap();
+
+    // Re-sync: the entry is reused (spec unchanged) and must be re-normalized.
+    sb.ok(&["install"]);
+
+    let lock: serde_json::Value = serde_json::from_str(&sb.read("ai.lock")).unwrap();
+    let prov = &lock["skills"]["leaf"]["requested_by"];
+    assert!(
+        prov.is_null() || *prov == serde_json::json!([]),
+        "direct entry must not keep stale provenance: {lock}"
+    );
+
+    let status = sb.ok(&["status"]);
+    assert!(
+        !status.contains("transitive; via"),
+        "direct skill must not be reported as transitive: {status}"
+    );
+}
+
 /// The schema accepts `resolveTransitive` on the root manifest.
 #[test]
 fn schema_accepts_resolve_transitive_flag() {

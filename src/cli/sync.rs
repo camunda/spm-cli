@@ -86,13 +86,20 @@ pub(super) fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Re
             !refresh && l.git == spec.git && l.reference == reference && l.path == spec.path
         });
 
-        let (locked, how) = match reuse {
+        let (mut locked, how) = match reuse {
             Some(l) => (l, "locked"),
             None => (
                 resolver::resolve(spec).with_context(|| format!("resolving skill `{name}`"))?,
                 "resolved",
             ),
         };
+        // A direct dependency never carries transitive provenance. Clear any
+        // `requested_by` a reused entry may have inherited — e.g. a lock whose
+        // entry was previously a synthesized transitive skill before being
+        // promoted to a direct dependency — so `spm status`/`list` (which key
+        // "transitive" purely on a non-empty `requested_by`) never misreport a
+        // direct skill as transitive. Freshly resolved entries are already empty.
+        locked.requested_by.clear();
         let short = &locked.commit[..locked.commit.len().min(8)];
         println!("  {name:<width$}  {reference} @ {short}  ({how})");
         lock.skills.insert(name.clone(), locked);

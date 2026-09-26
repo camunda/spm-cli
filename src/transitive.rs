@@ -20,6 +20,15 @@
 //!   cycle, and detects a version conflict when the same identity would need two
 //!   different commits.
 //!
+//! Direct roots are additionally **pre-seeded** into the resolved map before the
+//! walk (see [`expand`]): every directly-declared skill is a fixed install
+//! point, so a transitive back-edge whose identity lands on a root is satisfied
+//! by that root and resolves as a diamond (dedup), not a cycle. The DFS stack is
+//! therefore **not** the sole cycle authority — a cycle routed through a direct
+//! root terminates at the pre-seeded root by design, and only a cycle wholly
+//! among non-root (transitive) identities is reported as a hard `dependency
+//! cycle` error.
+//!
 //! A transitively-resolved skill's materialized name is synthesized
 //! deterministically as `{requester}__{declared}-{short_hash}` so it is stable
 //! across runs (letting the sync reuse fast-path key on it), collision-resistant
@@ -283,6 +292,13 @@ pub fn expand(direct: &BTreeMap<String, LockedSkill>, ctx: &Ctx) -> Result<Outpu
     // transitive resolution is in play (the same skill would resolve two ways).
     // Only relevant when opted in — with the flag off the map is never consulted
     // (a leaf `visit` returns before recursing), so behavior is exactly as before.
+    //
+    // Pre-seeding also fixes each direct root as an install point: a later
+    // transitive edge whose identity matches a root dedups against this
+    // pre-seeded entry (a diamond) instead of tripping the DFS-stack cycle guard
+    // — a direct root legitimately satisfies and terminates a back-edge to
+    // itself. Consequently only a cycle wholly among non-root transitive
+    // identities reaches the stack guard and hard-errors.
     if ctx.resolve_transitive {
         for (name, locked) in direct {
             let key = key_of(&locked.git, &locked.path);
@@ -464,8 +480,13 @@ fn visit(
                     ));
                 }
             }
-            // Same identity, no conflict: a diamond. Record this requester on
-            // the shared transitive entry (directs keep an empty requested_by).
+            // Same identity, no conflict: a diamond. This also covers an edge
+            // that lands on a *pre-seeded direct root*: the root is a fixed
+            // install point that satisfies the back-edge, so it dedups here
+            // rather than tripping the DFS-stack cycle guard above. Record this
+            // requester on the shared transitive entry (directs keep an empty
+            // requested_by — a root is pre-seeded with `out_idx: None`, so a
+            // root diamond appends nothing).
             if let Some(idx) = existing.out_idx {
                 w.out.transitive[idx].1.requested_by.push(name.to_string());
             }
