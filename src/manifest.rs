@@ -10,6 +10,18 @@ pub const MANIFEST_FILE: &str = "ai.json";
 pub struct Manifest {
     /// Target vendors, e.g. `["claude", "copilot"]`.
     pub targets: Vec<String>,
+    /// Opt-in gate for transitive dependency resolution. When `true`, spm reads
+    /// each resolved skill's own co-located `ai.json` and recursively resolves
+    /// the skills it declares. Default `false`: nested manifests are ignored and
+    /// behavior is exactly as before. Read **only** from the root project's own
+    /// manifest — a dependency's nested `ai.json` cannot re-enable recursion
+    /// (that field is rejected there), so a single opt-out at the root is final.
+    #[serde(
+        default,
+        rename = "resolveTransitive",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub resolve_transitive: bool,
     #[serde(default, deserialize_with = "deserialize_unique_skills")]
     pub skills: BTreeMap<String, SkillSpec>,
     /// Full-plugin dependencies (agents/MCP servers/hooks/scripts + bundled
@@ -150,6 +162,24 @@ pub fn validate_skill_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Reject a `commit` selector that is not a full 40-character hex SHA.
+///
+/// The root `ai.json` is guarded by the JSON schema, whose `commit` pattern
+/// (`^[0-9a-fA-F]{40}$`) is the only thing keeping an untrusted commit string
+/// out of the store path: `resolver::resolve` feeds a `commit` selector verbatim
+/// into `store_key`, which appends it into a directory name that `store::ensure`
+/// joins onto the store root and recursively removes/rewrites. A *nested*
+/// (`DependencyManifest`) spec bypasses that schema, so a hostile dependency
+/// could otherwise smuggle slashes or `..` into the store path via the commit
+/// field. Enforce the same shape here (case-insensitively, before the resolver
+/// lowercases it) so nested specs get identical protection.
+pub fn validate_commit_selector(commit: &str) -> Result<()> {
+    if commit.len() != 40 || !commit.chars().all(|c| c.is_ascii_hexdigit()) {
+        bail!("invalid commit `{commit}`: expected a full 40-character hexadecimal SHA");
+    }
+    Ok(())
+}
+
 /// Reject a skill `path` that could escape the fetched repo root. The subdir is
 /// joined onto the store checkout (`repo_dir.join(path)`); without this a hostile
 /// manifest could use an absolute path or `..` to read arbitrary files off the
@@ -230,6 +260,73 @@ impl Manifest {
     }
 }
 
+/// A dependency's own `ai.json`, parsed with a deliberately lenient shape.
+///
+/// A skill repo consumed as a transitive dependency may ship an `ai.json` whose
+/// only purpose is to declare *further* skills. Unlike the root project's
+/// manifest it is **not** required to list `targets` (transitive skills always
+/// inherit the root's targets), and its `plugins` map is ignored in v1 (a plugin
+/// pulls a much bigger blast radius — agents/hooks/MCP/scripts — so it is out of
+/// scope for automatic transitive fetching). A nested `resolveTransitive` is
+/// rejected outright: recursion is governed solely by the *root* project's flag,
+/// so a dependency author gets a clear signal the field does nothing here (and a
+/// malicious dependency cannot re-enable resolution the root opted out of).
+#[derive(Debug, Clone, Deserialize)]
+pub struct DependencyManifest {
+    #[serde(default, deserialize_with = "deserialize_unique_skills")]
+    pub skills: BTreeMap<String, SkillSpec>,
+}
+
+impl DependencyManifest {
+    /// Load the nested manifest from an explicit, already-validated file path
+    /// (`<dir>/ai.json`). The caller is responsible for only invoking this when
+    /// the file exists — a missing file is a normal "no transitive deps" case,
+    /// not an error.
+    ///
+    /// The transitive resolver validates the nested `ai.json` against the
+    /// checkout boundary *before* reading it and gets back a canonical,
+    /// symlink-resolved path (see `transitive::nested_manifest_path`). Reading
+    /// that exact path — rather than re-deriving `<dir>/ai.json` and letting the
+    /// loader follow the on-disk symlink a second time — closes the TOCTOU window
+    /// where the symlink could be swapped between the boundary check and the read
+    /// to smuggle in an outside, unscanned manifest.
+    pub fn load_file(p: &Path) -> Result<Self> {
+        let text = std::fs::read_to_string(p)
+            .with_context(|| format!("reading nested {MANIFEST_FILE} at {}", p.display()))?;
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .with_context(|| format!("parsing nested {}", p.display()))?;
+        if value.get("resolveTransitive").is_some() {
+            bail!(
+                "nested {} at {}: `resolveTransitive` is not allowed in a dependency's manifest — \
+                 transitive resolution is controlled only by the root project's ai.json; \
+                 remove it here (it has no effect)",
+                MANIFEST_FILE,
+                p.display()
+            );
+        }
+        // Deserialize from the raw text (not `value`) so duplicate skill keys in
+        // the nested manifest are still rejected, exactly as `Manifest::load` does.
+        let dep: Self = serde_json::from_str(&text)
+            .with_context(|| format!("parsing nested {}", p.display()))?;
+        for (name, spec) in &dep.skills {
+            validate_skill_name(name).with_context(|| format!("in nested {}", p.display()))?;
+            if let Some(sub) = &spec.path {
+                validate_subpath(sub)
+                    .with_context(|| format!("skill `{name}` in nested {}", p.display()))?;
+            }
+            // The root schema constrains `commit` to a full hex SHA; nested
+            // manifests skip the schema, so enforce it here before the value can
+            // reach `resolver::resolve`/`store_key` and become part of a store
+            // path (see `validate_commit_selector`).
+            if let Some(commit) = &spec.commit {
+                validate_commit_selector(commit)
+                    .with_context(|| format!("skill `{name}` in nested {}", p.display()))?;
+            }
+        }
+        Ok(dep)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,5 +395,134 @@ mod tests {
     fn validate_subpath_accepts_plain_relative_path() {
         assert!(validate_subpath("skills/greet").is_ok());
         assert!(validate_subpath(".").is_ok());
+    }
+
+    /// A nested manifest bypasses the root JSON schema, so a `commit` selector
+    /// that is not a full hex SHA (here one carrying path separators aimed at
+    /// the store path) must be rejected by `DependencyManifest::load_file` before it
+    /// can reach `resolver::resolve`/`store_key`.
+    #[test]
+    fn dependency_manifest_rejects_non_sha_commit() {
+        let dir = std::env::temp_dir().join(format!(
+            "spm-depman-badcommit-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            Manifest::path_in(&dir),
+            r#"{"skills":{"evil":{"git":"u","commit":"../../../../etc/evil"}}}"#,
+        )
+        .unwrap();
+        let err = DependencyManifest::load_file(&Manifest::path_in(&dir)).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("40-character hexadecimal SHA"),
+            "{err:#}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn validate_commit_selector_accepts_both_cases_and_rejects_bad() {
+        assert!(validate_commit_selector(&"a".repeat(40)).is_ok());
+        assert!(
+            validate_commit_selector(&"A".repeat(40)).is_ok(),
+            "case-insensitive"
+        );
+        assert!(validate_commit_selector("abc123").is_err(), "too short");
+        assert!(
+            validate_commit_selector(&"g".repeat(40)).is_err(),
+            "non-hex"
+        );
+        assert!(
+            validate_commit_selector(&format!("{}/x", "a".repeat(38))).is_err(),
+            "path separator"
+        );
+    }
+
+    /// A dependency's own `ai.json` parses leniently: no `targets` required, and
+    /// `plugins`/`targets` keys are ignored (transitive skills inherit the root's
+    /// targets, and nested plugins are out of scope in v1).
+    #[test]
+    fn dependency_manifest_parses_skills_and_ignores_targets_and_plugins() {
+        let dir = std::env::temp_dir().join(format!(
+            "spm-depman-lenient-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            Manifest::path_in(&dir),
+            r#"{"targets":["claude"],"plugins":{"p":{"git":"u","branch":"main"}},"skills":{"leaf":{"git":"u","branch":"main"}}}"#,
+        )
+        .unwrap();
+        let dep = DependencyManifest::load_file(&Manifest::path_in(&dir)).unwrap();
+        assert_eq!(dep.skills.len(), 1);
+        assert!(dep.skills.contains_key("leaf"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A nested `resolveTransitive` is a hard error — recursion is controlled
+    /// only by the root project's manifest.
+    #[test]
+    fn dependency_manifest_rejects_nested_resolve_transitive() {
+        let dir = std::env::temp_dir().join(format!(
+            "spm-depman-nested-flag-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            Manifest::path_in(&dir),
+            r#"{"resolveTransitive":true,"skills":{}}"#,
+        )
+        .unwrap();
+        let err = DependencyManifest::load_file(&Manifest::path_in(&dir)).unwrap_err();
+        assert!(format!("{err:#}").contains("resolveTransitive"), "{err:#}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `load_file` reads the exact path it is handed — not a `<dir>/ai.json`
+    /// re-derived from a directory. The transitive resolver relies on this to
+    /// read the boundary-checked, symlink-resolved manifest path instead of
+    /// re-following the on-disk `ai.json` symlink (which a swap could redirect
+    /// to an outside, unscanned manifest after the boundary check).
+    #[test]
+    fn dependency_manifest_load_file_reads_the_given_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "spm-depman-loadfile-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // The real, validated manifest lives at a non-default filename; the
+        // default `ai.json` slot holds a decoy the loader must NOT read.
+        let validated = dir.join("validated.json");
+        std::fs::write(
+            &validated,
+            r#"{"skills":{"real":{"git":"u","branch":"main"}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            Manifest::path_in(&dir),
+            r#"{"skills":{"decoy":{"git":"u","branch":"main"}}}"#,
+        )
+        .unwrap();
+        let dep = DependencyManifest::load_file(&validated).unwrap();
+        assert!(dep.skills.contains_key("real"), "reads the given path");
+        assert!(!dep.skills.contains_key("decoy"), "ignores <dir>/ai.json");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

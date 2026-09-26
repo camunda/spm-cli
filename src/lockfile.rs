@@ -58,6 +58,14 @@ pub struct LockedSkill {
     /// ordinary `skills` entry, so it is omitted from those.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bundled_skills: Vec<String>,
+    /// Provenance for a transitively-resolved skill: the local name(s) of the
+    /// direct dependency(ies) that pulled it in (a top-level manifest key, or
+    /// another transitive skill's synthesized name). Empty for a normal,
+    /// directly-declared skill, so it is omitted from those. Always kept sorted
+    /// and deduplicated so the committed `ai.lock` is stable across runs
+    /// regardless of traversal order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requested_by: Vec<String>,
 }
 
 impl Lockfile {
@@ -124,6 +132,13 @@ fn validate_locked_map(map: &BTreeMap<String, LockedSkill>, kind: &str) -> Resul
         for s in &l.bundled_skills {
             crate::manifest::validate_skill_name(s)
                 .with_context(|| format!("{kind} `{name}`: bundled skill name"))?;
+        }
+        // `requested_by` provenance names are rendered by `spm list`/`status`
+        // and identify other lock entries; a hand-edited `ai.lock` could inject
+        // a path-separator name here too, so hold it to the same rule.
+        for r in &l.requested_by {
+            crate::manifest::validate_skill_name(r)
+                .with_context(|| format!("{kind} `{name}`: requested_by name"))?;
         }
     }
     Ok(())
@@ -256,6 +271,7 @@ mod tests {
                 path: None,
                 store: "totally-not-the-derived-key".into(),
                 bundled_skills: Vec::new(),
+                requested_by: Vec::new(),
             },
         );
         let lock = Lockfile {
@@ -284,6 +300,7 @@ mod tests {
                 path: None,
                 store: store_key(git, &sha),
                 bundled_skills: vec!["../evil".into()],
+                requested_by: Vec::new(),
             },
         );
         let lock = Lockfile {
@@ -311,6 +328,7 @@ mod tests {
                 path: None,
                 store: store_key(git, &sha),
                 bundled_skills: Vec::new(),
+                requested_by: Vec::new(),
             },
         );
         let lock = Lockfile {
@@ -342,5 +360,101 @@ mod tests {
             store_key("https://github.com/a/repo", sha),
             store_key("https://github.com/b/repo", sha)
         );
+    }
+
+    /// A transitively-resolved skill's `requested_by` provenance round-trips
+    /// through serialization, and a directly-declared skill (empty vec) omits it
+    /// entirely so ordinary lockfiles stay unchanged.
+    #[test]
+    fn requested_by_round_trips_and_is_omitted_when_empty() {
+        let git = "https://example.com/repo.git";
+        let sha = "e".repeat(40);
+        let mut skills = BTreeMap::new();
+        skills.insert(
+            "direct".to_string(),
+            LockedSkill {
+                git: git.into(),
+                reference: "branch:main".into(),
+                commit: sha.clone(),
+                path: None,
+                store: store_key(git, &sha),
+                bundled_skills: Vec::new(),
+                requested_by: Vec::new(),
+            },
+        );
+        skills.insert(
+            "top__leaf-deadbeef".to_string(),
+            LockedSkill {
+                git: git.into(),
+                reference: "branch:main".into(),
+                commit: sha.clone(),
+                path: Some("leaf".into()),
+                store: store_key(git, &sha),
+                bundled_skills: Vec::new(),
+                requested_by: vec!["top".into()],
+            },
+        );
+        let lock = Lockfile {
+            skills,
+            ..Default::default()
+        };
+        let json = serde_json::to_string_pretty(&lock).unwrap();
+        // The empty-provenance direct entry omits the key; the transitive one keeps it.
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed["skills"]["direct"].get("requested_by").is_none());
+        assert_eq!(
+            parsed["skills"]["top__leaf-deadbeef"]["requested_by"],
+            serde_json::json!(["top"])
+        );
+        // Round-trips back to the same in-memory shape (and passes validation).
+        let back: Lockfile = serde_json::from_str(&json).unwrap();
+        back.validate().unwrap();
+        assert_eq!(
+            back.skills["top__leaf-deadbeef"].requested_by,
+            vec!["top".to_string()]
+        );
+        assert!(back.skills["direct"].requested_by.is_empty());
+    }
+
+    /// An older `ai.lock` written before the provenance field existed loads
+    /// cleanly, defaulting `requested_by` to empty (backward compatibility).
+    #[test]
+    fn lockfile_without_requested_by_loads() {
+        let git = "https://example.com/repo.git";
+        let sha = "f".repeat(40);
+        let text = format!(
+            r#"{{"skills":{{"greet":{{"git":"{git}","reference":"branch:main","commit":"{sha}","store":"{}"}}}}}}"#,
+            store_key(git, &sha)
+        );
+        let lock: Lockfile = serde_json::from_str(&text).unwrap();
+        lock.validate().unwrap();
+        assert!(lock.skills["greet"].requested_by.is_empty());
+    }
+
+    /// A hand-edited `ai.lock` injecting a path separator into `requested_by`
+    /// (which `spm list`/`status` render) is rejected on load.
+    #[test]
+    fn validate_rejects_requested_by_with_path_separator() {
+        let git = "https://example.com/repo.git";
+        let sha = "a".repeat(40);
+        let mut skills = BTreeMap::new();
+        skills.insert(
+            "leaf".to_string(),
+            LockedSkill {
+                git: git.into(),
+                reference: "branch:main".into(),
+                commit: sha.clone(),
+                path: None,
+                store: store_key(git, &sha),
+                bundled_skills: Vec::new(),
+                requested_by: vec!["../evil".into()],
+            },
+        );
+        let lock = Lockfile {
+            skills,
+            ..Default::default()
+        };
+        let err = lock.validate().unwrap_err();
+        assert!(format!("{err:#}").contains("invalid skill name"), "{err:#}");
     }
 }

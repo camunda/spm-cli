@@ -19,6 +19,25 @@ pub(super) fn list(scope: &Scope) -> Result<()> {
             .unwrap_or_else(|| "not installed".into());
         println!("{name:<24} {}  ({pinned})", spec.git);
     }
+    // Transitively-resolved skills live in `ai.lock` but not the manifest; list
+    // them under their direct requester(s) so the dependency graph is visible.
+    let transitive: Vec<(&String, &crate::lockfile::LockedSkill)> = lock
+        .skills
+        .iter()
+        .filter(|(name, l)| !l.requested_by.is_empty() && !manifest.skills.contains_key(*name))
+        .collect();
+    if !transitive.is_empty() {
+        println!("\ntransitive skills:");
+        for (name, l) in transitive {
+            println!(
+                "{name:<24} {}  ({} @ {}; via {})",
+                l.git,
+                l.reference,
+                &l.commit[..l.commit.len().min(8)],
+                l.requested_by.join(", ")
+            );
+        }
+    }
     for (name, spec) in &manifest.plugins {
         let pinned = lock
             .plugins

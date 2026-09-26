@@ -1,0 +1,817 @@
+//! Transitive skill-dependency resolution.
+//!
+//! When the root project opts in (`resolveTransitive: true` in its `ai.json`),
+//! every skill spm resolves may itself ship an `ai.json` co-located with its
+//! content, declaring *further* skills. This module walks that graph: it fetches
+//! each resolved skill into the store, runs the content scan **before** reading
+//! its nested manifest, and recursively resolves the skills that manifest
+//! declares — folding everything into the same flat, deduplicated list every
+//! vendor consumes.
+//!
+//! Identity for cycle detection, dedup, and version-conflict detection is the
+//! normalized `(git, path)` pair (see [`normalize_git`]) — never the raw URL
+//! string or the dependency-author-controlled skill name. Two structures guard
+//! the walk:
+//!
+//! - a **DFS stack** of the identities on the current recursion branch, which
+//!   catches a true cycle (A → B → A) and yields a readable chain; and
+//! - a **global resolved map** keyed by the same identity, which lets a diamond
+//!   (A → D, A → C → D) resolve `D` exactly once without mistaking it for a
+//!   cycle, and detects a version conflict when the same identity would need two
+//!   different commits.
+//!
+//! Direct roots are additionally **pre-seeded** into the resolved map before the
+//! walk (see [`expand`]): every directly-declared skill is a fixed install
+//! point, so a transitive back-edge whose identity lands on a root is satisfied
+//! by that root and resolves as a diamond (dedup), not a cycle. The DFS stack is
+//! therefore **not** the sole cycle authority — a cycle routed through a direct
+//! root terminates at the pre-seeded root by design, and only a cycle wholly
+//! among non-root (transitive) identities is reported as a hard `dependency
+//! cycle` error.
+//!
+//! A transitively-resolved skill's materialized name is synthesized
+//! deterministically as `{requester}__{declared}-{short_hash}` so it is stable
+//! across runs (letting the sync reuse fast-path key on it), collision-resistant
+//! across unrelated dependencies, and free of path separators.
+
+use crate::lockfile::{store_key, LockedSkill};
+use crate::manifest::{validate_skill_name, DependencyManifest, Manifest, SkillSpec};
+use crate::resolver;
+use crate::store;
+use crate::vendor::MaterializedSkill;
+use anyhow::{bail, Context, Result};
+use std::collections::BTreeMap;
+use std::path::{Component, Path, PathBuf};
+
+/// Hard cap on transitive recursion depth, independent of the opt-in flag. A
+/// backstop against a pathological (or hostile) dependency graph: even with the
+/// cycle guard, a very deep legitimate chain would fetch a repo per level, so we
+/// refuse past this and tell the user which chain hit the limit.
+pub const MAX_DEPTH: usize = 8;
+
+/// Identity of a resolvable skill for transitive bookkeeping: the normalized git
+/// URL plus the optional in-repo subpath. Two entries with the same git but a
+/// different `path` are different skills (the monorepo-of-skills layout) and
+/// never conflict.
+type Key = (String, Option<String>);
+
+/// Inputs the walk needs from the surrounding sync.
+pub struct Ctx<'a> {
+    /// The previous lockfile's skill entries, consulted to reuse a pinned commit
+    /// for an unchanged transitive child (avoiding an `ls-remote` every sync).
+    pub prev: &'a BTreeMap<String, LockedSkill>,
+    /// Whether transitive resolution is enabled (root manifest's flag).
+    pub resolve_transitive: bool,
+    /// Re-resolve transitive children to their latest commit. This is a single
+    /// global flag, set only by a bare `spm update` (no name) — see the
+    /// `resolve_child` doc for why a single-name `spm update <name>`
+    /// deliberately leaves it `false` and does not cascade into the named
+    /// root's transitive frontier.
+    pub refresh: bool,
+    /// Column width for the aligned per-skill fetch output.
+    pub width: usize,
+}
+
+/// Result of the walk: the flattened, deduplicated skill list to hand to the
+/// vendors, plus the transitive lock entries to fold into `ai.lock`.
+pub struct Output {
+    pub materialized: Vec<MaterializedSkill>,
+    /// Synthesized-name → locked entry for every transitively-resolved skill.
+    pub transitive: Vec<(String, LockedSkill)>,
+}
+
+/// One resolved identity in the global dedup/conflict map.
+struct Resolved {
+    commit: String,
+    reference: String,
+    /// Names, from a direct root down to this node, at first resolution — used to
+    /// render a readable requester chain in a conflict error.
+    chain: Vec<String>,
+    /// Index into [`Output::transitive`] for a transitive node, so a later
+    /// diamond edge can append its requester to `requested_by`. `None` for a
+    /// directly-declared skill (those keep an empty `requested_by`).
+    out_idx: Option<usize>,
+}
+
+/// Mutable state threaded through the recursive [`visit`] walk: the DFS stack of
+/// identities on the current branch, the global dedup/conflict map, and the
+/// growing output. Bundled into one value so the traversal function stays within
+/// a sane argument count (and reads as "walk state + this node") instead of
+/// passing each accumulator by hand.
+struct Walk {
+    stack: Vec<(Key, String)>,
+    resolved: std::collections::HashMap<Key, Resolved>,
+    out: Output,
+}
+
+/// One side of a version conflict — the reference/commit an identity was (or
+/// would be) resolved at, plus the requester chain that led there. Grouping the
+/// two symmetric sides keeps [`conflict_error`] to a readable argument list.
+struct ConflictSide<'a> {
+    reference: &'a str,
+    commit: &'a str,
+    chain: &'a [String],
+}
+
+/// Normalize a git URL for transitive identity purposes only (cycle stack,
+/// dedup map, conflict key, and the name-synthesis hash). This intentionally
+/// does **not** feed [`store_key`]/store dedup — that is an orthogonal,
+/// pre-existing behavior. The normalization: strip a trailing `/`, strip a
+/// trailing `.git` **only for remote sources**, then lowercase the scheme +
+/// authority while preserving the path's case (paths are case-sensitive on the
+/// server; hosts are not).
+///
+/// The `.git` suffix is a *remote*-repo spelling convention: `github.com/o/r`
+/// and `github.com/o/r.git` name the same server-side repository. For a local
+/// source — a `file://` URL or a bare filesystem path — `repo.git` and `repo`
+/// can be two genuinely distinct directories, so stripping the suffix there
+/// would fuse unrelated skills into one transitive identity (silently deduping
+/// them or flagging a phantom conflict). We therefore preserve `.git` for local
+/// and `file://` sources and only strip it for remote URL forms.
+pub fn normalize_git(url: &str) -> String {
+    let s = url.trim().trim_end_matches('/');
+
+    if let Some(idx) = s.find("://") {
+        // scheme://authority/path
+        let scheme = &s[..idx];
+        let rest = &s[idx + 3..];
+        let (authority, path) = match rest.find('/') {
+            Some(p) => (&rest[..p], &rest[p..]),
+            None => (rest, ""),
+        };
+        // Preserve `.git` for local `file://` sources; strip it for remote ones.
+        let path = if scheme.eq_ignore_ascii_case("file") {
+            path.to_string()
+        } else {
+            strip_git_suffix(path)
+        };
+        format!(
+            "{}://{}{}",
+            scheme.to_ascii_lowercase(),
+            authority.to_ascii_lowercase(),
+            path
+        )
+    } else if let Some(idx) = s.find(':') {
+        // scp-style `user@host:path` (no scheme). Only treat as scp when the
+        // colon precedes the first slash — otherwise it's a plain path.
+        let before_colon = &s[..idx];
+        if is_windows_drive_prefix(s) {
+            // A bare Windows path like `C:\work\repo.git`: the single-letter
+            // "authority" is a drive letter, not an scp host. Treat it as a local
+            // path so `repo.git` and `repo` stay distinct identities.
+            s.to_string()
+        } else if !before_colon.contains('/') {
+            // A remote scp target — strip the `.git` convention.
+            let authority = before_colon;
+            let path = strip_git_suffix(&s[idx..]);
+            format!("{}{}", authority.to_ascii_lowercase(), path)
+        } else {
+            // A bare local path that happens to contain a colon — keep `.git`.
+            s.to_string()
+        }
+    } else {
+        // A bare local filesystem path — `repo.git` and `repo` are distinct
+        // directories, so preserve the suffix.
+        s.to_string()
+    }
+}
+
+/// Strip a single trailing `.git` (and any trailing `/`) from a **remote** repo
+/// path component. Applied only to remote sources — see [`normalize_git`] for
+/// why local/`file://` sources must keep the suffix.
+fn strip_git_suffix(path: &str) -> String {
+    let p = path.trim_end_matches('/');
+    p.strip_suffix(".git").unwrap_or(p).to_string()
+}
+
+/// Does `s` start with a Windows drive-letter prefix (`C:\…` or `C:/…`)?
+///
+/// A bare local Windows path like `C:\work\repo.git` otherwise reaches the
+/// scp-style branch of [`normalize_git`] with a single-letter "authority" (`C`)
+/// and gets its `.git` suffix stripped, fusing `C:\work\repo.git` and
+/// `C:\work\repo` into one identity. Detecting the drive prefix keeps it a local
+/// path (suffix preserved). Requiring a path separator after the colon avoids
+/// misclassifying a genuine single-letter scp host (`h:path`).
+fn is_windows_drive_prefix(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(
+        (chars.next(), chars.next(), chars.next()),
+        (Some(letter), Some(':'), Some('\\' | '/')) if letter.is_ascii_alphabetic()
+    )
+}
+/// Canonicalize a validated subpath into a stable lexical identity string.
+///
+/// `validate_subpath` (run before any spec reaches here) already rejects
+/// absolute paths and `..`, but it *permits* `.` components and repeated or
+/// trailing separators — so `skills/x`, `skills/./x`, `skills//x`, and
+/// `skills/x/` all name the same content while producing different raw strings.
+/// Using the raw string as the transitive identity would let those spellings
+/// dodge dedup/version-conflict detection and materialize the same skill twice.
+/// Fold every root-equivalent form (`.`, empty, `None`) to `None` and join the
+/// remaining `Normal` components with `/` so identity is spelling-independent.
+fn canonical_subpath(path: &Option<String>) -> Option<String> {
+    let raw = path.as_deref()?;
+    let parts: Vec<std::borrow::Cow<str>> = Path::new(raw)
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(s) => Some(s.to_string_lossy()),
+            // CurDir dropped; validate_subpath already rejected the rest.
+            _ => None,
+        })
+        .collect();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("/"))
+    }
+}
+
+fn key_of(git: &str, path: &Option<String>) -> Key {
+    (normalize_git(git), canonical_subpath(path))
+}
+
+/// Short, stable hex hash of a skill's normalized identity, for name synthesis.
+fn short_hash(key: &Key) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let feed = |h: &mut u64, bytes: &[u8]| {
+        for b in bytes {
+            *h ^= *b as u64;
+            *h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    feed(&mut h, key.0.as_bytes());
+    feed(&mut h, b"\0");
+    feed(&mut h, key.1.as_deref().unwrap_or("").as_bytes());
+    format!("{:08x}", h & 0xffff_ffff)
+}
+
+/// Synthesize a transitive skill's materialized name:
+/// `{requester}__{declared}-{short_hash}`.
+fn synth_name(requester: &str, declared: &str, key: &Key) -> String {
+    format!("{requester}__{declared}-{}", short_hash(key))
+}
+
+fn chain_str(chain: &[String]) -> String {
+    chain.join(" -> ")
+}
+
+/// Locate this skill's co-located nested `ai.json`, requiring it to resolve
+/// **inside** the checkout boundary (`root`).
+///
+/// The content scanner (`scan::enforce`) deliberately skips a symlink whose
+/// target escapes `root` (or reaches into `.git`) — so a hostile repository
+/// could hide its nested manifest behind such a link, have it skipped by the
+/// scan, and yet still have it read here, bypassing the scan-before-recurse
+/// guarantee and triggering arbitrary dependency fetches. Reuse the single
+/// boundary-aware resolver (`fsutil::resolve_within_canonical`, shared with the
+/// copy/scan traversals) so the manifest we read is exactly the content the scan
+/// covered. Returns `None` when there is simply no nested manifest; errors when
+/// one exists but escapes the boundary.
+fn nested_manifest_path(content: &Path, root: &Path) -> Result<Option<PathBuf>> {
+    let nested = Manifest::path_in(content);
+    // `exists()` follows symlinks: a broken/absent link reads as "no manifest".
+    if !nested.exists() {
+        return Ok(None);
+    }
+    match crate::fsutil::resolve_within_canonical(root, &nested) {
+        Some(p) => Ok(Some(p)),
+        None => bail!(
+            "nested {} at {} resolves outside the skill checkout (a symlink escaping the \
+             checkout boundary, or into `.git`); refusing to read it — it would bypass the \
+             content scan that guards transitive resolution",
+            crate::manifest::MANIFEST_FILE,
+            nested.display()
+        ),
+    }
+}
+
+/// Fetch, security-scan, and materialize every direct skill, then (when opted
+/// in) recursively resolve and materialize the skills their nested `ai.json`
+/// files declare.
+pub fn expand(direct: &BTreeMap<String, LockedSkill>, ctx: &Ctx) -> Result<Output> {
+    let mut resolved: std::collections::HashMap<Key, Resolved> = std::collections::HashMap::new();
+
+    // Seed the dedup/conflict map with the direct skills. Two direct skills that
+    // share an identity but pin different commits are a genuine conflict once
+    // transitive resolution is in play (the same skill would resolve two ways).
+    // Only relevant when opted in — with the flag off the map is never consulted
+    // (a leaf `visit` returns before recursing), so behavior is exactly as before.
+    //
+    // Pre-seeding also fixes each direct root as an install point: a later
+    // transitive edge whose identity matches a root dedups against this
+    // pre-seeded entry (a diamond) instead of tripping the DFS-stack cycle guard
+    // — a direct root legitimately satisfies and terminates a back-edge to
+    // itself. Consequently only a cycle wholly among non-root transitive
+    // identities reaches the stack guard and hard-errors.
+    if ctx.resolve_transitive {
+        for (name, locked) in direct {
+            let key = key_of(&locked.git, &locked.path);
+            if let Some(existing) = resolved.get(&key) {
+                if existing.commit != locked.commit {
+                    return Err(conflict_error(
+                        &key,
+                        ConflictSide {
+                            reference: &existing.reference,
+                            commit: &existing.commit,
+                            chain: &existing.chain,
+                        },
+                        ConflictSide {
+                            reference: &locked.reference,
+                            commit: &locked.commit,
+                            chain: std::slice::from_ref(name),
+                        },
+                    ));
+                }
+            } else {
+                resolved.insert(
+                    key,
+                    Resolved {
+                        commit: locked.commit.clone(),
+                        reference: locked.reference.clone(),
+                        chain: vec![name.clone()],
+                        out_idx: None,
+                    },
+                );
+            }
+        }
+    }
+
+    // Walk each direct skill as a DFS root. BTreeMap iteration is sorted, so the
+    // traversal order — and therefore every synthesized name and provenance
+    // chain — is deterministic across runs. The DFS stack is balanced (every
+    // push is popped) by the time a root returns, so one `Walk` is reused across
+    // roots, carrying the shared dedup map and accumulated output.
+    let mut w = Walk {
+        stack: Vec::new(),
+        resolved,
+        out: Output {
+            materialized: Vec::new(),
+            transitive: Vec::new(),
+        },
+    };
+    for (name, locked) in direct {
+        visit(&mut w, name, locked, 0, direct, ctx)?;
+    }
+
+    let mut out = w.out;
+    // Stable committed lockfile: provenance lists must not churn with traversal
+    // order.
+    for (_, l) in &mut out.transitive {
+        l.requested_by.sort();
+        l.requested_by.dedup();
+    }
+    Ok(out)
+}
+
+fn visit(
+    w: &mut Walk,
+    name: &str,
+    locked: &LockedSkill,
+    depth: usize,
+    direct: &BTreeMap<String, LockedSkill>,
+    ctx: &Ctx,
+) -> Result<()> {
+    // Fetch into the store and run the pre-materialize security gate BEFORE
+    // reading this node's nested manifest — a blocked node aborts before any of
+    // its subtree is ever fetched.
+    let ensured = store::ensure(locked).with_context(|| format!("fetching skill `{name}`"))?;
+    let width = ctx.width;
+    println!(
+        "  {name:<width$}  {}",
+        if ensured.fetched { "fetched" } else { "cached" }
+    );
+    crate::skillcheck::warn_if_not_loadable(
+        name,
+        &locked.git,
+        &locked.reference,
+        locked.path.as_deref(),
+        &ensured.path,
+        &ensured.root,
+    );
+    crate::scan::enforce(name, &ensured.path, &ensured.root)
+        .with_context(|| format!("scanning skill `{name}`"))?;
+    w.out.materialized.push(MaterializedSkill {
+        name: name.to_string(),
+        path: ensured.path.clone(),
+        root: ensured.root.clone(),
+    });
+
+    if !ctx.resolve_transitive {
+        return Ok(());
+    }
+
+    // Only the `ai.json` co-located with this skill's own content is read — never
+    // a fallback to a monorepo's repo-root manifest for a subdir-pinned skill.
+    // Require it to resolve inside the checkout boundary so a symlinked manifest
+    // the scanner skipped cannot smuggle in unscanned transitive dependencies.
+    let Some(manifest_path) = nested_manifest_path(&ensured.path, &ensured.root)? else {
+        return Ok(());
+    };
+    // Read the boundary-checked, symlink-resolved path itself — not
+    // `ensured.path/ai.json` re-derived — so a symlink swapped in after the
+    // check cannot redirect the load to an outside, unscanned manifest.
+    let dep = DependencyManifest::load_file(&manifest_path)
+        .with_context(|| format!("reading nested dependencies of `{name}`"))?;
+    if dep.skills.is_empty() {
+        return Ok(());
+    }
+    if depth >= MAX_DEPTH {
+        let mut chain: Vec<String> = w.stack.iter().map(|(_, n)| n.clone()).collect();
+        chain.push(name.to_string());
+        bail!(
+            "transitive dependency depth cap ({MAX_DEPTH}) exceeded at: {}\n\
+             a dependency chain this deep is almost certainly a mistake; \
+             flatten it or reduce nesting",
+            chain_str(&chain)
+        );
+    }
+
+    let self_key = key_of(&locked.git, &locked.path);
+    w.stack.push((self_key, name.to_string()));
+
+    for (declared, spec) in &dep.skills {
+        spec.version()
+            .with_context(|| format!("nested skill `{declared}` required by `{name}`"))?;
+        let ckey = key_of(&spec.git, &spec.path);
+
+        // Cycle: the child identity is an ancestor still on the current branch.
+        if let Some(pos) = w.stack.iter().position(|(k, _)| k == &ckey) {
+            let mut chain: Vec<String> = w.stack[pos..].iter().map(|(_, n)| n.clone()).collect();
+            chain.push(format!("{declared} (= {})", w.stack[pos].1));
+            bail!(
+                "dependency cycle detected: {}\n\
+                 `{}` (git `{}`{}) transitively depends on itself",
+                chain_str(&chain),
+                declared,
+                spec.git,
+                spec.path
+                    .as_deref()
+                    .map(|p| format!(", path `{p}`"))
+                    .unwrap_or_default()
+            );
+        }
+
+        // Already resolved elsewhere in the graph: a diamond (dedup) or a
+        // version conflict.
+        if let Some(existing) = w.resolved.get(&ckey) {
+            // Reuse the already-resolved commit when this edge requests the same
+            // reference the node was resolved at: the identity + reference match,
+            // so re-resolving would only repeat a remote lookup — and worse, a
+            // moving ref (branch, or a retagged tag) could resolve to a different
+            // commit the second time and report a *phantom* version conflict for
+            // what is really one shared node. Only when a genuinely different
+            // reference is requested do we resolve again, to detect a real conflict.
+            let requested = spec.version()?.label();
+            if requested != existing.reference {
+                let child = resolve_child(spec, ctx)
+                    .with_context(|| format!("resolving nested skill `{declared}` of `{name}`"))?;
+                if existing.commit != child.commit {
+                    let mut cur_chain: Vec<String> =
+                        w.stack.iter().map(|(_, n)| n.clone()).collect();
+                    cur_chain.push(declared.clone());
+                    return Err(conflict_error(
+                        &ckey,
+                        ConflictSide {
+                            reference: &existing.reference,
+                            commit: &existing.commit,
+                            chain: &existing.chain,
+                        },
+                        ConflictSide {
+                            reference: &child.reference,
+                            commit: &child.commit,
+                            chain: &cur_chain,
+                        },
+                    ));
+                }
+            }
+            // Same identity, no conflict: a diamond. This also covers an edge
+            // that lands on a *pre-seeded direct root*: the root is a fixed
+            // install point that satisfies the back-edge, so it dedups here
+            // rather than tripping the DFS-stack cycle guard above. Record this
+            // requester on the shared transitive entry (directs keep an empty
+            // requested_by — a root is pre-seeded with `out_idx: None`, so a
+            // root diamond appends nothing).
+            if let Some(idx) = existing.out_idx {
+                w.out.transitive[idx].1.requested_by.push(name.to_string());
+            }
+            continue;
+        }
+
+        // Fresh node: resolve, synthesize a stable name, and recurse.
+        let mut child = resolve_child(spec, ctx)
+            .with_context(|| format!("resolving nested skill `{declared}` of `{name}`"))?;
+        let synth = synth_name(name, declared, &ckey);
+        validate_skill_name(&synth)
+            .with_context(|| format!("synthesized name for nested skill `{declared}`"))?;
+        if direct.contains_key(&synth) || w.out.transitive.iter().any(|(n, _)| n == &synth) {
+            bail!(
+                "transitive skill name collision: `{synth}` (from `{declared}` required by \
+                 `{name}`) already names another skill — pin one of the conflicting \
+                 dependencies to a version that does not ship it"
+            );
+        }
+        child.requested_by = vec![name.to_string()];
+
+        let mut child_chain: Vec<String> = w.stack.iter().map(|(_, n)| n.clone()).collect();
+        child_chain.push(synth.clone());
+        let idx = w.out.transitive.len();
+        w.resolved.insert(
+            ckey,
+            Resolved {
+                commit: child.commit.clone(),
+                reference: child.reference.clone(),
+                chain: child_chain,
+                out_idx: Some(idx),
+            },
+        );
+        w.out.transitive.push((synth.clone(), child.clone()));
+        visit(w, &synth, &child, depth + 1, direct, ctx)?;
+    }
+
+    w.stack.pop();
+    Ok(())
+}
+
+/// Resolve a nested skill spec to a locked entry, reusing the previous
+/// lockfile's pinned commit when an unchanged (same git+ref+path) entry exists
+/// and we are not refreshing — so an unchanged transitive branch dependency is
+/// not re-`ls-remote`d every sync.
+///
+/// Freshness cascade contract — deliberately scoped to the *whole walk*, not
+/// per-parent:
+///
+/// * A bare `spm update` (no name) sets `ctx.refresh = true`, so every
+///   transitive child is re-resolved to its latest commit.
+/// * Any other sync (`install`, `add`, `sync`, or `spm update <name>`) leaves
+///   `ctx.refresh = false`, so a child whose spec is unchanged reuses its
+///   pinned commit — even when a moving `branch`/`tag` selector has since
+///   advanced upstream.
+///
+/// In particular, `spm update <name>` re-resolves the *named direct root* to
+/// latest and re-reads its nested manifest (so a newly-declared child is
+/// resolved fresh, and a child whose pin the new manifest changed is
+/// re-resolved because the ref no longer matches the reused entry), but a child
+/// the root still requests by the *same* moving ref stays pinned. This
+/// non-cascade is intentional: transitive children are deduplicated across
+/// roots (a diamond shares one entry), so a single-name update cannot advance
+/// one root's subtree without risking an unrelated root's dependency. The whole
+/// transitive frontier advances only under a bare `spm update`. See
+/// `docs/guide/transitive-dependencies.md`.
+fn resolve_child(spec: &SkillSpec, ctx: &Ctx) -> Result<LockedSkill> {
+    let reference = spec.version()?.label();
+    if !ctx.refresh {
+        if let Some(prev) = ctx
+            .prev
+            .values()
+            .find(|l| l.git == spec.git && l.reference == reference && l.path == spec.path)
+        {
+            let commit = prev.commit.clone();
+            return Ok(LockedSkill {
+                git: spec.git.clone(),
+                reference,
+                store: store_key(&spec.git, &commit),
+                path: spec.path.clone(),
+                commit,
+                bundled_skills: Vec::new(),
+                requested_by: Vec::new(),
+            });
+        }
+    }
+    resolver::resolve(spec)
+}
+
+fn conflict_error(key: &Key, a: ConflictSide, b: ConflictSide) -> anyhow::Error {
+    let short = |c: &str| c[..c.len().min(8)].to_string();
+    let path_note = key
+        .1
+        .as_deref()
+        .map(|p| format!(" (path `{p}`)"))
+        .unwrap_or_default();
+    anyhow::anyhow!(
+        "version conflict: `{}`{} is required at two different commits:\n  \
+         {} @ {} (via {})\n  {} @ {} (via {})\n\
+         resolve it by pinning both requesters to the same ref, or removing one dependency",
+        key.0,
+        path_note,
+        a.reference,
+        short(a.commit),
+        chain_str(a.chain),
+        b.reference,
+        short(b.commit),
+        chain_str(b.chain),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_strips_git_suffix_and_trailing_slash() {
+        assert_eq!(
+            normalize_git("https://github.com/Org/Repo.git/"),
+            "https://github.com/Org/Repo"
+        );
+        assert_eq!(
+            normalize_git("https://github.com/Org/Repo"),
+            "https://github.com/Org/Repo"
+        );
+    }
+
+    #[test]
+    fn normalize_lowercases_scheme_and_host_but_not_path() {
+        assert_eq!(
+            normalize_git("HTTPS://GitHub.COM/Org/Repo"),
+            "https://github.com/Org/Repo"
+        );
+    }
+
+    #[test]
+    fn normalize_handles_scp_style() {
+        assert_eq!(
+            normalize_git("git@GitHub.com:Org/Repo.git"),
+            "git@github.com:Org/Repo"
+        );
+    }
+
+    #[test]
+    fn normalize_treats_windows_drive_path_as_local() {
+        // A bare Windows path must NOT be misread as an scp target: its drive
+        // letter is a single-letter "authority", so stripping `.git` would fuse
+        // `C:\work\repo.git` and `C:\work\repo` into one identity.
+        assert_eq!(
+            normalize_git(r"C:\work\repo.git"),
+            r"C:\work\repo.git",
+            "drive-letter path keeps its .git suffix and case"
+        );
+        assert_ne!(
+            normalize_git(r"C:\work\repo.git"),
+            normalize_git(r"C:\work\repo"),
+            "distinct local dirs stay distinct identities"
+        );
+        // Forward-slash drive paths (`C:/…`) are treated the same.
+        assert_eq!(normalize_git("D:/work/repo.git"), "D:/work/repo.git");
+        // A genuine single-letter scp host (no path separator after the colon)
+        // is still scp — the `.git` convention is stripped.
+        assert_eq!(normalize_git("h:Org/Repo.git"), "h:Org/Repo");
+    }
+
+    #[test]
+    fn normalize_treats_three_spellings_as_one_identity() {
+        let a = normalize_git("https://github.com/o/r");
+        let b = normalize_git("https://github.com/o/r.git");
+        let c = normalize_git("https://GitHub.com/o/r/");
+        assert_eq!(a, b);
+        assert_eq!(b, c);
+    }
+
+    #[test]
+    fn normalize_leaves_local_path_case() {
+        assert_eq!(normalize_git("/home/User/Repo"), "/home/User/Repo");
+        assert_eq!(
+            normalize_git("file:///home/User/Repo"),
+            "file:///home/User/Repo"
+        );
+    }
+
+    #[test]
+    fn normalize_preserves_git_suffix_for_local_and_file_sources() {
+        // `repo.git` and `repo` can be two distinct local directories, so the
+        // `.git` suffix must survive for both bare paths and `file://` URLs —
+        // otherwise unrelated skills fuse into one transitive identity.
+        assert_eq!(normalize_git("/tmp/repo.git"), "/tmp/repo.git");
+        assert_ne!(normalize_git("/tmp/repo.git"), normalize_git("/tmp/repo"));
+        assert_eq!(
+            normalize_git("file:///tmp/repo.git"),
+            "file:///tmp/repo.git"
+        );
+        assert_ne!(
+            normalize_git("file:///tmp/repo.git"),
+            normalize_git("file:///tmp/repo")
+        );
+        // A trailing slash is still trimmed, but the suffix stays.
+        assert_eq!(
+            normalize_git("file:///tmp/repo.git/"),
+            "file:///tmp/repo.git"
+        );
+    }
+
+    #[test]
+    fn normalize_still_strips_git_suffix_for_remote_sources() {
+        assert_eq!(
+            normalize_git("https://github.com/o/r.git"),
+            normalize_git("https://github.com/o/r")
+        );
+        assert_eq!(
+            normalize_git("git@github.com:o/r.git"),
+            "git@github.com:o/r"
+        );
+    }
+
+    #[test]
+    fn synth_name_is_stable_and_separator_free() {
+        let key = (
+            "https://github.com/o/r".to_string(),
+            Some("skills/x".to_string()),
+        );
+        let a = synth_name("foo", "helper", &key);
+        let b = synth_name("foo", "helper", &key);
+        assert_eq!(a, b, "deterministic");
+        assert!(
+            validate_skill_name(&a).is_ok(),
+            "must be a valid skill name: {a}"
+        );
+        assert!(a.starts_with("foo__helper-"));
+    }
+
+    #[test]
+    fn different_identities_hash_differently() {
+        let k1 = ("https://github.com/o/r".to_string(), None);
+        let k2 = ("https://github.com/o/other".to_string(), None);
+        assert_ne!(short_hash(&k1), short_hash(&k2));
+    }
+
+    #[test]
+    fn canonical_subpath_folds_equivalent_spellings() {
+        let want = Some("skills/x".to_string());
+        assert_eq!(canonical_subpath(&Some("skills/x".into())), want);
+        assert_eq!(canonical_subpath(&Some("skills/./x".into())), want);
+        assert_eq!(canonical_subpath(&Some("skills//x".into())), want);
+        assert_eq!(canonical_subpath(&Some("skills/x/".into())), want);
+        assert_eq!(canonical_subpath(&Some("./skills/x".into())), want);
+    }
+
+    #[test]
+    fn canonical_subpath_folds_root_equivalent_forms_to_none() {
+        assert_eq!(canonical_subpath(&None), None);
+        assert_eq!(canonical_subpath(&Some(".".into())), None);
+        assert_eq!(canonical_subpath(&Some("".into())), None);
+        assert_eq!(canonical_subpath(&Some("./".into())), None);
+    }
+
+    /// `skills/x` and `skills/./x` name the same content, so their transitive
+    /// identity key must be equal — otherwise dedup/version-conflict detection
+    /// can be bypassed and the same skill materialized twice.
+    #[test]
+    fn key_of_dedups_dot_component_paths() {
+        let git = "https://github.com/o/r";
+        assert_eq!(
+            key_of(git, &Some("skills/x".into())),
+            key_of(git, &Some("skills/./x".into()))
+        );
+    }
+
+    /// A nested `ai.json` that is a symlink escaping the checkout boundary must
+    /// be refused — the scanner skips such a link, so reading it here would
+    /// bypass the scan-before-recurse guarantee.
+    #[cfg(unix)]
+    #[test]
+    fn nested_manifest_path_rejects_symlink_escaping_boundary() {
+        use std::os::unix::fs::symlink;
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base = std::env::temp_dir().join(format!(
+            "spm-transitive-nested-escape-{}-{nanos}",
+            std::process::id()
+        ));
+        let checkout = base.join("checkout");
+        std::fs::create_dir_all(&checkout).unwrap();
+        // A real manifest living outside the checkout — the exfiltration target.
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("ai.json"), r#"{"skills":{}}"#).unwrap();
+        // Inside the checkout, `ai.json` is a symlink to the outside manifest.
+        symlink(outside.join("ai.json"), checkout.join("ai.json")).unwrap();
+
+        let root = std::fs::canonicalize(&checkout).unwrap();
+        let err = nested_manifest_path(&root, &root).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("outside the skill checkout"),
+            "{err:#}"
+        );
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// A regular, in-boundary nested `ai.json` is accepted, and a checkout with
+    /// no manifest reads as "no transitive deps".
+    #[test]
+    fn nested_manifest_path_accepts_in_boundary_and_absent() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let checkout = std::env::temp_dir().join(format!(
+            "spm-transitive-nested-ok-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&checkout).unwrap();
+        let root = std::fs::canonicalize(&checkout).unwrap();
+        assert_eq!(nested_manifest_path(&root, &root).unwrap(), None);
+
+        std::fs::write(root.join("ai.json"), r#"{"skills":{}}"#).unwrap();
+        assert!(nested_manifest_path(&root, &root).unwrap().is_some());
+        std::fs::remove_dir_all(&checkout).ok();
+    }
+}

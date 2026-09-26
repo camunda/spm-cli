@@ -45,6 +45,30 @@ skill. Each selector is locked to a resolved commit SHA in
 | `branch` | resolved SHA |
 | `commit` | itself       |
 
+## `resolveTransitive`
+
+An optional top-level boolean (default `false`). When `true`, spm reads each
+resolved skill's **own** co-located `ai.json` and recursively resolves the skills
+it declares, folding them into the same install alongside your direct skills:
+
+```json
+{
+  "targets": ["claude", "copilot"],
+  "resolveTransitive": true,
+  "skills": {
+    "toolkit": { "git": "https://github.com/org/toolkit", "tag": "v2.0.0" }
+  }
+}
+```
+
+It is **off by default** because skills can carry executable agent instructions,
+so auto-fetching repos you never named is a larger supply-chain surface than a
+typical package manager. The flag is read **only** from your root project's
+manifest — a dependency's nested `ai.json` cannot re-enable it. See
+[Transitive Skill Dependencies](/guide/transitive-dependencies) for the full
+model: naming, deduplication, cycles, the depth cap, and the version-conflict
+error.
+
 ## `plugins`
 
 A map of local plugin name → plugin spec. A **plugin** is a Claude Code plugin
