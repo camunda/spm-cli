@@ -62,7 +62,11 @@ pub struct Ctx<'a> {
     pub prev: &'a BTreeMap<String, LockedSkill>,
     /// Whether transitive resolution is enabled (root manifest's flag).
     pub resolve_transitive: bool,
-    /// Re-resolve transitive children to their latest commit (a full `update`).
+    /// Re-resolve transitive children to their latest commit. This is a single
+    /// global flag, set only by a bare `spm update` (no name) — see the
+    /// `resolve_child` doc for why a single-name `spm update <name>`
+    /// deliberately leaves it `false` and does not cascade into the named
+    /// root's transitive frontier.
     pub refresh: bool,
     /// Column width for the aligned per-skill fetch output.
     pub width: usize,
@@ -531,9 +535,28 @@ fn visit(
 /// Resolve a nested skill spec to a locked entry, reusing the previous
 /// lockfile's pinned commit when an unchanged (same git+ref+path) entry exists
 /// and we are not refreshing — so an unchanged transitive branch dependency is
-/// not re-`ls-remote`d every sync. Freshness cascades from parent to child: a
-/// child is re-resolved only when the parent was (its nested manifest reread) or
-/// on an explicit `update`.
+/// not re-`ls-remote`d every sync.
+///
+/// Freshness cascade contract — deliberately scoped to the *whole walk*, not
+/// per-parent:
+///
+/// * A bare `spm update` (no name) sets `ctx.refresh = true`, so every
+///   transitive child is re-resolved to its latest commit.
+/// * Any other sync (`install`, `add`, `sync`, or `spm update <name>`) leaves
+///   `ctx.refresh = false`, so a child whose spec is unchanged reuses its
+///   pinned commit — even when a moving `branch`/`tag` selector has since
+///   advanced upstream.
+///
+/// In particular, `spm update <name>` re-resolves the *named direct root* to
+/// latest and re-reads its nested manifest (so a newly-declared child is
+/// resolved fresh, and a child whose pin the new manifest changed is
+/// re-resolved because the ref no longer matches the reused entry), but a child
+/// the root still requests by the *same* moving ref stays pinned. This
+/// non-cascade is intentional: transitive children are deduplicated across
+/// roots (a diamond shares one entry), so a single-name update cannot advance
+/// one root's subtree without risking an unrelated root's dependency. The whole
+/// transitive frontier advances only under a bare `spm update`. See
+/// `docs/guide/transitive-dependencies.md`.
 fn resolve_child(spec: &SkillSpec, ctx: &Ctx) -> Result<LockedSkill> {
     let reference = spec.version()?.label();
     if !ctx.refresh {

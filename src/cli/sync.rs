@@ -184,6 +184,14 @@ pub(super) fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Re
         &transitive::Ctx {
             prev: &prev.skills,
             resolve_transitive: manifest.resolve_transitive,
+            // Only a bare `spm update` (no name) refreshes the transitive
+            // frontier. `spm update <name>` (`only = Some(..)`) is deliberately
+            // surgical: it re-resolves the named direct root above and re-reads
+            // its nested manifest, but does NOT cascade a moving-ref refresh
+            // into that root's unchanged transitive children — because those
+            // children are deduplicated across roots, so refreshing one root's
+            // subtree could advance an unrelated root's dependency. See
+            // `resolve_child` and docs/guide/transitive-dependencies.md.
             refresh: force_refresh && only.is_none(),
             width,
         },

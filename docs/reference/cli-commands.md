@@ -120,7 +120,15 @@ spm remove design-system --plugin  # drop a plugin
 ### `spm update [name]`
 
 Re-resolves `branch`/`tag` selectors to their latest commit and updates
-`ai.lock`. With no name, updates all skills.
+`ai.lock`. With no name, updates **all** skills — including the whole transitive
+frontier.
+
+`spm update <name>` is deliberately **surgical**: it advances the named root's
+own ref to latest and re-reads its nested manifest (resolving any newly-declared
+child, and re-resolving a child whose pin the new manifest changed), but a
+transitive child that root still requests by the **same** moving ref stays
+pinned. Refresh the whole graph — every transitive child — with a bare
+`spm update`. See [Transitive Skill Dependencies](/guide/transitive-dependencies).
 
 ### `spm install`
 

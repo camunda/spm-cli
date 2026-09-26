@@ -87,6 +87,29 @@ so re-running `spm install` never churns it.
 - A hard **depth cap** (8 levels) is a backstop against pathological or hostile
   graphs, independent of the flag.
 
+## Updating: `update` vs `update <name>`
+
+Moving refs (`branch`/`tag`) resolve to a commit once and stay **pinned** in
+`ai.lock` until you deliberately refresh them — the same for a transitive child
+as for a directly-declared skill.
+
+- **`spm update`** (no name) refreshes **everything**: every direct skill *and*
+  the whole transitive frontier re-resolves its `branch`/`tag` to the latest
+  commit.
+- **`spm update <name>`** is deliberately **surgical**. It advances the named
+  root's own ref to latest and re-reads that root's nested `ai.json` — so a
+  child the updated manifest **newly declares** is resolved fresh, and a child
+  whose **pin the manifest changed** (a different ref) is re-resolved. But a
+  transitive child the root still requests by the **same** moving ref stays
+  pinned at its locked commit; the single-name update does **not** chase it to
+  the branch/tag tip.
+
+This non-cascade is intentional. Transitive children are **deduplicated across
+roots** — a diamond shares one lock entry — so advancing one named root's
+subtree could silently move an *unrelated* root's dependency. If you want a
+root's moving-ref children chased to their latest commits, run a bare
+`spm update`.
+
 ## Version conflicts
 
 If two skills — directly or transitively — require the **same repo** at two

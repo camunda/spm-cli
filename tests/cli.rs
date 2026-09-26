@@ -3220,6 +3220,101 @@ fn transitive_diamond_resolves_shared_skill_once() {
     );
 }
 
+/// `spm update <name>` is deliberately surgical: it advances the named direct
+/// root and re-reads its nested manifest, but does NOT cascade a moving-ref
+/// refresh into that root's unchanged transitive children — a child requested
+/// by the same branch stays pinned until a bare `spm update` refreshes the whole
+/// frontier. Guards the `resolve_child` non-cascade contract.
+#[test]
+fn update_named_root_does_not_cascade_refresh_to_transitive_children() {
+    let sb = Sandbox::new();
+    let leaf_dir = sb.root.join("leaf");
+    let leaf = make_repo(
+        &leaf_dir,
+        &[("SKILL.md", "---\nname: leaf\n---\nLeaf v1.\n")],
+    );
+    let leaf_c1 = skill_head(&leaf_dir);
+    let top_dir = sb.root.join("top");
+    make_repo(
+        &top_dir,
+        &[
+            ("SKILL.md", "---\nname: top\n---\nTop v1.\n"),
+            (
+                "ai.json",
+                &format!(r#"{{"skills":{{"leaf":{{"git":"{leaf}","branch":"main"}}}}}}"#),
+            ),
+        ],
+    );
+    let top = format!(
+        "file://{}",
+        top_dir.display().to_string().replace('\\', "/")
+    );
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{"top":{{"git":"{top}","branch":"main"}}}}}}"#
+        ),
+    );
+    sb.ok(&["install"]);
+
+    // Helper: the synthesized transitive-leaf key + its pinned commit in ai.lock.
+    let leaf_pin = |sb: &Sandbox| -> String {
+        let lock: serde_json::Value = serde_json::from_str(&sb.read("ai.lock")).unwrap();
+        let skills = lock["skills"].as_object().unwrap();
+        let (_, entry) = skills
+            .iter()
+            .find(|(k, _)| k.starts_with("top__leaf-"))
+            .unwrap_or_else(|| panic!("no transitive leaf entry in {lock}"));
+        entry["commit"].as_str().unwrap().to_string()
+    };
+    let top_pin = |sb: &Sandbox| -> String {
+        let lock: serde_json::Value = serde_json::from_str(&sb.read("ai.lock")).unwrap();
+        lock["skills"]["top"]["commit"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(leaf_pin(&sb), leaf_c1, "leaf pinned at v1 after install");
+
+    // Advance BOTH branches upstream: top -> T2 (root itself moves) and the
+    // still-`branch:main` leaf child -> L2 (moving-ref tip advances). top's
+    // nested ai.json is unchanged (still `leaf@main`).
+    std::fs::write(top_dir.join("SKILL.md"), "---\nname: top\n---\nTop v2.\n").unwrap();
+    git_in(&top_dir, &["commit", "-aqm", "top v2"]);
+    let top_t2 = skill_head(&top_dir);
+    std::fs::write(
+        leaf_dir.join("SKILL.md"),
+        "---\nname: leaf\n---\nLeaf v2.\n",
+    )
+    .unwrap();
+    git_in(&leaf_dir, &["commit", "-aqm", "leaf v2"]);
+    let leaf_l2 = skill_head(&leaf_dir);
+    assert_ne!(leaf_c1, leaf_l2, "leaf branch must have actually advanced");
+
+    // `spm update top`: the named root advances to T2, but its unchanged
+    // same-branch leaf child stays pinned at v1 (surgical, no cascade).
+    sb.ok(&["update", "top"]);
+    assert_eq!(
+        top_pin(&sb),
+        top_t2,
+        "named root advanced to its latest commit"
+    );
+    assert_eq!(
+        leaf_pin(&sb),
+        leaf_c1,
+        "update <name> must NOT cascade a moving-ref refresh into the child"
+    );
+
+    // A bare `spm update` refreshes the whole frontier: the leaf child advances.
+    sb.ok(&["update"]);
+    assert_eq!(
+        leaf_pin(&sb),
+        leaf_l2,
+        "bare update must advance the transitive child to the branch tip"
+    );
+}
+
 /// A dependency cycle (A -> B -> A) is detected and reported, not looped into a
 /// stack overflow.
 #[test]
