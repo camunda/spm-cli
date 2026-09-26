@@ -20,6 +20,17 @@
 //!   cycle, and detects a version conflict when the same identity would need two
 //!   different commits.
 //!
+//! The DFS stack is *not* the sole cycle authority. Before the walk, every
+//! directly-declared root is pre-seeded into the resolved map (see [`expand`]),
+//! so any edge landing on a root short-circuits to the diamond/dedup branch and
+//! is never pushed onto the stack. This is deliberate: a direct root is a fixed
+//! install point that is materialized exactly once as a top-level skill, and it
+//! therefore *satisfies* (and terminates) any transitive back-edge to it. A
+//! cycle that passes through a direct root resolves as a diamond by design, not
+//! as an error — it is a terminating, satisfiable graph. Only cycles wholly
+//! among non-root nodes are unsatisfiable self-references and hard-error via the
+//! DFS stack.
+//!
 //! A transitively-resolved skill's materialized name is synthesized
 //! deterministically as `{requester}__{declared}-{short_hash}` so it is stable
 //! across runs (letting the sync reuse fast-path key on it), collision-resistant
@@ -283,6 +294,16 @@ pub fn expand(direct: &BTreeMap<String, LockedSkill>, ctx: &Ctx) -> Result<Outpu
     // transitive resolution is in play (the same skill would resolve two ways).
     // Only relevant when opted in — with the flag off the map is never consulted
     // (a leaf `visit` returns before recursing), so behavior is exactly as before.
+    //
+    // Pre-seeding roots here also makes each direct root a fixed install point:
+    // because it is already in the resolved map before the DFS starts, any
+    // transitive edge that points back at a root hits the diamond/dedup branch in
+    // `visit` and is never traversed or pushed onto the DFS stack. That
+    // deliberately satisfies (and terminates) a back-edge to a root — a cycle
+    // that passes through a direct root resolves as a diamond, not a hard error,
+    // because the root is unconditionally materialized once regardless. Only
+    // cycles wholly among non-root nodes are unsatisfiable and hard-error via the
+    // DFS stack; see the module-level docs.
     if ctx.resolve_transitive {
         for (name, locked) in direct {
             let key = key_of(&locked.git, &locked.path);
@@ -432,7 +453,12 @@ fn visit(
         }
 
         // Already resolved elsewhere in the graph: a diamond (dedup) or a
-        // version conflict.
+        // version conflict. This branch is *also* what a pre-seeded direct root
+        // takes: an edge pointing back at a root finds it already in the map, so
+        // it resolves as a diamond and is never re-traversed. A cycle that passes
+        // through a direct root therefore terminates here by design rather than
+        // hard-erroring via the DFS stack — the root is a fixed install point
+        // that satisfies the back-edge (see the module docs and `expand`).
         if let Some(existing) = w.resolved.get(&ckey) {
             // Reuse the already-resolved commit when this edge requests the same
             // reference the node was resolved at: the identity + reference match,
