@@ -3061,10 +3061,12 @@ fn help_flags(sb: &Sandbox, args: &[&str]) -> Vec<(String, Option<String>)> {
 /// up to the next `##`/`###` heading. `heading` is matched as a line prefix.
 fn skill_section<'a>(text: &'a str, heading: &str) -> &'a str {
     let start = text
-        .lines()
+        // `split_inclusive` keeps each line's real terminator, so byte offsets
+        // stay exact for both LF and CRLF checkouts (Windows `core.autocrlf`).
+        .split_inclusive('\n')
         .scan(0usize, |off, l| {
             let here = *off;
-            *off += l.len() + 1;
+            *off += l.len();
             Some((here, l))
         })
         .find(|(_, l)| l.starts_with(heading))
@@ -3078,7 +3080,7 @@ fn skill_section<'a>(text: &'a str, heading: &str) -> &'a str {
         .chain(rest.find("\n### "))
         .min()
         .map_or(body.len(), |n| body.len() - rest.len() + n);
-    &body[..end]
+    body[..end].trim_end()
 }
 
 #[test]
@@ -3122,7 +3124,29 @@ fn shipped_skill_has_valid_front_matter_and_passes_scan() {
 fn shipped_skill_documents_every_command_and_flag() {
     let sb = Sandbox::new();
     let text = std::fs::read_to_string(shipped_skill_dir().join("SKILL.md")).unwrap();
+    assert_skill_documents_cli(&sb, &text);
+}
 
+/// The same check must hold for a CRLF checkout of the skill (Windows with
+/// `core.autocrlf=true`), so section extraction may not depend on `\n` byte math.
+#[test]
+fn shipped_skill_checks_are_line_ending_independent() {
+    let sb = Sandbox::new();
+    let lf = std::fs::read_to_string(shipped_skill_dir().join("SKILL.md"))
+        .unwrap()
+        .replace("\r\n", "\n");
+    let crlf = lf.replace('\n', "\r\n");
+    for heading in ["### `spm add`", "### `spm remove`", "## Targets"] {
+        assert_eq!(
+            skill_section(&crlf, heading).replace("\r\n", "\n"),
+            skill_section(&lf, heading),
+            "section `{heading}` differs between LF and CRLF"
+        );
+    }
+    assert_skill_documents_cli(&sb, &crlf);
+}
+
+fn assert_skill_documents_cli(sb: &Sandbox, text: &str) {
     let top = sb.ok(&["--help"]);
     let commands: Vec<String> = top
         .lines()
@@ -3137,12 +3161,12 @@ fn shipped_skill_documents_every_command_and_flag() {
         "parsed too few commands: {commands:?}"
     );
     // Guard the parsers themselves: a silent empty parse would make the checks below vacuous.
-    let add_flags = help_flags(&sb, &["add"]);
+    let add_flags = help_flags(sb, &["add"]);
     assert!(
         add_flags.iter().any(|(l, _)| l == "--force"),
         "{add_flags:?}"
     );
-    assert!(skill_section(&text, "### `spm add`").contains("--force"));
+    assert!(skill_section(text, "### `spm add`").contains("--force"));
 
     let mut invocations: Vec<(Vec<&str>, String)> = Vec::new();
     for c in &commands {
@@ -3159,8 +3183,8 @@ fn shipped_skill_documents_every_command_and_flag() {
     for (args, heading) in &invocations {
         // Each command's flags must appear in that command's own section, not
         // merely somewhere else in the skill.
-        let section = skill_section(&text, heading);
-        for (long, short) in help_flags(&sb, args) {
+        let section = skill_section(text, heading);
+        for (long, short) in help_flags(sb, args) {
             let documented = section.contains(&long)
                 || short.is_some_and(|s| section.contains(&format!("[{s}]")));
             assert!(
