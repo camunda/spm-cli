@@ -1,5 +1,6 @@
 use super::common::default_name;
 use super::common::VersionArg;
+use super::shorthand;
 use super::sync::sync;
 use crate::manifest::{Manifest, SkillSpec};
 use crate::scope::Scope;
@@ -28,6 +29,9 @@ pub(super) fn add(scope: &Scope, req: AddRequest) -> Result<()> {
         plugin,
         force,
     } = req;
+    // Expand a `github.com/owner/repo[@ref]` shorthand into a normal URL (plus
+    // version selector) before anything else, so the manifest records the URL.
+    let (git, version) = shorthand::expand(git, version)?;
     let dir = scope.manifest_dir()?;
     let mut manifest = Manifest::load(&dir)?;
     if let Some(sub) = &path {

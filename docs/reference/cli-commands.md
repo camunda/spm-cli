@@ -5,7 +5,7 @@ the authoritative, version-specific usage.
 
 ```bash
 spm init [--target amp|claude|cline|codex|copilot|cursor|gemini|windsurf ...] [-g]  # scaffold ai.json (repeatable / comma-separated)
-spm add <git> (--tag|--branch|--commit <v>) \      # add + install a skill
+spm add <git> (--tag|--branch|--commit <v>) \      # add + install a skill (<git> may be github.com/owner/repo[@ref])
         [--path <subdir>] [--name <local-name>] [--all] [--force] [-g]  # --all: add every skill under --path
         [--plugin]                                 # --plugin: add a full plugin instead of a skill
 spm target add [vendor ...]                        # add target vendor(s); no arg = pick interactively
@@ -65,6 +65,18 @@ selector:
 | `--tag`    | git tag (annotated tags deref to commit) |
 | `--branch` | branch tip at install/update time        |
 | `--commit` | exact commit                             |
+
+The repository can also be given as `github.com/<owner>/<repo>[@<ref>]`, which
+expands to `https://github.com/<owner>/<repo>.git`. `@<ref>` stands in for the
+version flag: spm looks it up on the remote and treats it as a tag or a branch
+(a full 40-character SHA is taken as a commit). It is an error if the ref is
+neither, or both a tag and a branch (use `--tag`/`--branch` instead), or if it is
+combined with `--tag`, `--branch` or `--commit`. `ai.json` records the expanded
+URL, never the shorthand; any other input is passed through untouched.
+
+```bash
+spm add github.com/org/repo@v1.0.0   # = spm add https://github.com/org/repo.git --tag v1.0.0
+```
 
 - `--path <subdir>` selects a subdirectory (for monorepos holding many skills).
 - `--name <local-name>` sets the `ai.json` key for the skill.

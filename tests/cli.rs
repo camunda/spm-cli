@@ -262,6 +262,31 @@ impl Sandbox {
             .unwrap()
     }
 
+    /// Run `spm <args>` with git told (via `url.<base>.insteadOf`) that
+    /// `https://github.com/owner/repo` is really the local skill repo, so the
+    /// `github.com/...` shorthand can be exercised end to end without network.
+    fn spm_github(&self, args: &[&str]) -> std::process::Output {
+        Command::new(env!("CARGO_BIN_EXE_spm"))
+            .args(args)
+            .current_dir(&self.project)
+            .env("SPM_HOME", &self.spm_home)
+            .env("HOME", &self.home)
+            .env("USERPROFILE", &self.home)
+            .env("GIT_CONFIG_COUNT", "2")
+            .env(
+                "GIT_CONFIG_KEY_0",
+                format!("url.{}.insteadOf", self.skill_url()),
+            )
+            .env("GIT_CONFIG_VALUE_0", "https://github.com/owner/repo.git")
+            .env(
+                "GIT_CONFIG_KEY_1",
+                format!("url.{}.insteadOf", self.skill_url()),
+            )
+            .env("GIT_CONFIG_VALUE_1", "https://github.com/owner/repo")
+            .output()
+            .unwrap()
+    }
+
     /// Run `spm <args>` feeding `input` on stdin — drives the interactive
     /// target picker (a plain line read, so piped input works without a tty).
     fn spm_stdin(&self, args: &[&str], input: &str) -> std::process::Output {
@@ -3013,4 +3038,151 @@ fn scan_command_scans_a_single_file() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("curl-pipe-shell"), "{stdout}");
+}
+
+/// Run `spm add <args>` through [`Sandbox::spm_github`] in a fresh project and
+/// return the resulting `ai.json`, asserting success.
+fn github_add_manifest(args: &[&str]) -> String {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    let mut full = vec!["add"];
+    full.extend_from_slice(args);
+    let out = sb.spm_github(&full);
+    assert!(
+        out.status.success(),
+        "spm {full:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    sb.read("ai.json")
+}
+
+#[test]
+fn add_github_shorthand_with_tag_matches_full_url_and_flag() {
+    let short = github_add_manifest(&["github.com/owner/repo@v0.1.0"]);
+    let full = github_add_manifest(&["https://github.com/owner/repo.git", "--tag", "v0.1.0"]);
+    assert_eq!(short, full, "shorthand must equal the URL + flag entry");
+    // The manifest records the expanded URL, never the shorthand.
+    assert!(
+        short.contains("\"git\": \"https://github.com/owner/repo.git\""),
+        "{short}"
+    );
+    assert!(short.contains("\"tag\": \"v0.1.0\""), "{short}");
+    assert!(!short.contains("@v0.1.0"), "{short}");
+}
+
+#[test]
+fn add_github_shorthand_with_branch_matches_full_url_and_flag() {
+    let short = github_add_manifest(&["github.com/owner/repo@main"]);
+    let full = github_add_manifest(&["https://github.com/owner/repo.git", "--branch", "main"]);
+    assert_eq!(short, full);
+    assert!(short.contains("\"branch\": \"main\""), "{short}");
+}
+
+#[test]
+fn add_github_shorthand_with_full_sha_pins_a_commit() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    let sha = skill_head(&sb.skill_repo);
+    let short = format!("github.com/owner/repo@{sha}");
+    let out = sb.spm_github(&["add", &short]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let manifest = sb.read("ai.json");
+    assert!(
+        manifest.contains(&format!("\"commit\": \"{sha}\"")),
+        "{manifest}"
+    );
+    assert!(!manifest.contains('@'), "{manifest}");
+}
+
+#[test]
+fn add_github_shorthand_without_ref_uses_the_version_flag() {
+    let short = github_add_manifest(&["github.com/owner/repo", "--tag", "v0.1.0"]);
+    let full = github_add_manifest(&["https://github.com/owner/repo.git", "--tag", "v0.1.0"]);
+    assert_eq!(short, full);
+}
+
+#[test]
+fn add_github_shorthand_without_any_ref_still_needs_a_selector() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    let before = sb.read("ai.json");
+    let out = sb.spm_github(&["add", "github.com/owner/repo"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("set one of tag/branch/commit"), "{err}");
+    assert_eq!(sb.read("ai.json"), before);
+}
+
+#[test]
+fn add_full_https_url_is_stored_verbatim() {
+    // No `.git` appended and no shorthand handling: full URLs behave as before.
+    let manifest = github_add_manifest(&["https://github.com/owner/repo", "--tag", "v0.1.0"]);
+    assert!(
+        manifest.contains("\"git\": \"https://github.com/owner/repo\""),
+        "{manifest}"
+    );
+}
+
+#[test]
+fn add_github_shorthand_ref_conflicts_with_version_flags() {
+    for flag in [
+        ["--tag", "v0.1.0"],
+        ["--branch", "main"],
+        ["--commit", "abc"],
+    ] {
+        let sb = Sandbox::new();
+        sb.ok(&["init", "--target", "claude"]);
+        let before = sb.read("ai.json");
+        let out = sb.spm_github(&["add", "github.com/owner/repo@v0.1.0", flag[0], flag[1]]);
+        assert!(!out.status.success(), "{flag:?} must conflict with @ref");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("already names a ref"), "{err}");
+        assert_eq!(sb.read("ai.json"), before);
+    }
+}
+
+#[test]
+fn add_github_shorthand_rejects_unknown_and_ambiguous_refs() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    sb.git(&["branch", "dual"]);
+    sb.git(&["tag", "dual"]);
+    let before = sb.read("ai.json");
+
+    let out = sb.spm_github(&["add", "github.com/owner/repo@nope"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("neither a tag nor a branch"), "{err}");
+
+    let out = sb.spm_github(&["add", "github.com/owner/repo@dual"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("both a tag and a branch"), "{err}");
+    assert!(err.contains("--tag dual"), "{err}");
+
+    assert_eq!(sb.read("ai.json"), before);
+}
+
+#[test]
+fn add_github_shorthand_rejects_malformed_input() {
+    for bad in [
+        "github.com/owner",
+        "github.com/owner/",
+        "github.com/owner/repo/tree/main",
+        "github.com/owner/repo@",
+    ] {
+        let sb = Sandbox::new();
+        sb.ok(&["init", "--target", "claude"]);
+        let before = sb.read("ai.json");
+        let out = sb.spm_github(&["add", bad, "--tag", "v0.1.0"]);
+        assert!(!out.status.success(), "{bad} must be rejected");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("invalid GitHub shorthand"), "{bad}: {err}");
+        assert!(err.contains("github.com/<owner>/<repo>[@<ref>]"), "{err}");
+        assert_eq!(sb.read("ai.json"), before);
+    }
 }
