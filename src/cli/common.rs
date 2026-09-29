@@ -34,19 +34,20 @@ impl ScopeArg {
     }
 }
 
-/// The opt-in protocol controls shared by every command that contacts a git
-/// remote (`add`, `install`, `update`). Global, so they are accepted after any
-/// subcommand; they never change what is recorded in `ai.json` / `ai.lock`.
+/// The opt-in protocol controls shared by every command that can contact a git
+/// remote: those that run a `sync` (`add`, `install`, `update`, `remove`,
+/// `target add`). Flattened into each of those and no others; they never change
+/// what is recorded in `ai.json` / `ai.lock`.
 #[derive(Args)]
 pub(crate) struct TransportArgs {
     /// Contact remotes over this protocol, rewriting the URL you gave (GitHub-style
     /// `https://host/org/repo` <-> `git@host:org/repo`; other URLs are used as given).
-    #[arg(long, global = true, value_enum)]
+    #[arg(long, value_enum)]
     pub(crate) protocol: Option<git::Protocol>,
     /// If a remote can't be reached (network or auth failure), retry once over
     /// the other protocol and say which one worked. Off by default: switching
     /// protocols can mask a real credential problem.
-    #[arg(long, global = true)]
+    #[arg(long)]
     pub(crate) protocol_fallback: bool,
 }
 

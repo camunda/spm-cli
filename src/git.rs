@@ -110,8 +110,15 @@ struct RemoteParts<'a> {
 /// in the other protocol: `https://host/path`, `ssh://git@host/path` and
 /// scp-style `git@host:path`. Anything that does not map cleanly (a port,
 /// userinfo, a non-`git` SSH user, an absolute scp path, `file://`, a local
-/// path) yields `None` so it is never rewritten.
+/// path) yields `None` so it is never rewritten. So does any URL whose path
+/// would change meaning between the two forms: a `#fragment` or `?query` (URL
+/// metadata over HTTPS, literal path characters over scp), percent-encoding
+/// (decoded over HTTPS, literal over scp), a backslash, or an SSH home-relative
+/// `~` path.
 fn split_remote(url: &str) -> Option<RemoteParts<'_>> {
+    if url.contains(['#', '?', '%', '\\']) {
+        return None;
+    }
     let (protocol, host, path) = if let Some(rest) = url.strip_prefix("https://") {
         let (host, path) = rest.split_once('/')?;
         (Protocol::Https, host, path)
@@ -125,7 +132,7 @@ fn split_remote(url: &str) -> Option<RemoteParts<'_>> {
         return None;
     };
     let plain_host = !host.is_empty() && !host.contains(['@', ':', '/', '\\']);
-    let plain_path = !path.is_empty() && !path.starts_with('/');
+    let plain_path = !path.is_empty() && !path.starts_with(['/', '~']);
     (plain_host && plain_path).then_some(RemoteParts {
         protocol,
         host,
@@ -158,6 +165,12 @@ const CONNECTIVITY_MARKERS: &[&str] = &[
     "authentication failed",
     "could not read username",
     "could not read password",
+    "invalid username or password",
+    "http basic: access denied",
+    "the requested url returned error: 401",
+    "the requested url returned error: 403",
+    "the requested url returned error: 407",
+    "http code 407",
     "terminal prompts disabled",
     "host key verification failed",
     "could not resolve host",
@@ -397,6 +410,16 @@ mod tests {
             "ssh://git@git.example.com:7999/p/repo.git",
             "https://user@github.com/org/repo.git",
             "https://github.com:8443/org/repo.git",
+            // fragment, query, percent-encoding, backslash and `~` paths change
+            // meaning between HTTPS and scp-style SSH
+            "https://github.com/org/repo#x",
+            "https://github.com/org/repo.git?ref=x",
+            "https://github.com/org/my%20repo.git",
+            r"https://github.com/org\repo.git",
+            "git@github.com:org/repo#x",
+            "git@github.com:org/repo.git?x=1",
+            "git@github.com:~alice/repo.git",
+            "ssh://git@github.com/~alice/repo.git",
             // non-`git` SSH user, absolute scp path, empty path/host
             "alice@github.com:org/repo.git",
             "git@host:/abs/repo.git",
@@ -428,6 +451,12 @@ mod tests {
             "ssh: connect to host x port 22: Connection refused",
             "fatal: Authentication failed for 'https://x/'",
             "Host key verification failed.",
+            "fatal: unable to access 'https://x/': The requested URL returned error: 401",
+            "fatal: unable to access 'https://x/': The requested URL returned error: 403",
+            "fatal: unable to access 'https://x/': The requested URL returned error: 407",
+            "fatal: unable to access 'https://x/': Received HTTP code 407 from proxy after CONNECT",
+            "remote: HTTP Basic: Access denied\nfatal: Authentication failed for 'https://x/'",
+            "remote: Invalid username or password.",
         ] {
             assert!(is_connectivity_failure(&failure(stderr)), "{stderr}");
         }
@@ -435,6 +464,8 @@ mod tests {
             "fatal: couldn't find remote ref refs/heads/nope",
             "fatal: remote error: upload-pack: not our ref abc",
             "fatal: reference is not a tree: abc",
+            // a 404 is a missing repo/path, not an auth problem
+            "fatal: unable to access 'https://x/': The requested URL returned error: 404",
         ] {
             assert!(!is_connectivity_failure(&failure(stderr)), "{stderr}");
         }

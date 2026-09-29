@@ -3738,3 +3738,44 @@ fn protocol_fallback_does_not_retry_when_the_path_is_missing() {
         "ssh was tried: {err}"
     );
 }
+
+/// The protocol flags exist only on the commands that can contact a remote (the
+/// ones that run a sync); everywhere else clap rejects them rather than
+/// silently ignoring them.
+#[test]
+fn protocol_flags_are_scoped_to_commands_that_contact_remotes() {
+    let sb = Sandbox::new();
+    for cmd in [
+        &["add"][..],
+        &["install"],
+        &["update"],
+        &["remove"],
+        &["target", "add"],
+    ] {
+        let mut args = cmd.to_vec();
+        args.push("--help");
+        let help = String::from_utf8_lossy(&sb.spm(&args).stdout).into_owned();
+        assert!(help.contains("--protocol "), "{cmd:?}: {help}");
+        assert!(help.contains("--protocol-fallback"), "{cmd:?}: {help}");
+    }
+    for cmd in [
+        &["init"][..],
+        &["list"],
+        &["status"],
+        &["clean"],
+        &["prune"],
+        &["scan"],
+    ] {
+        for flag in [&["--protocol", "https"][..], &["--protocol-fallback"]] {
+            let mut args = cmd.to_vec();
+            args.extend_from_slice(flag);
+            let out = sb.spm(&args);
+            assert!(!out.status.success(), "{args:?} should be rejected");
+            assert!(
+                stderr_of(&out).contains("unexpected argument"),
+                "{args:?}: {}",
+                stderr_of(&out)
+            );
+        }
+    }
+}
