@@ -233,7 +233,11 @@ lock (`$SPM_HOME/ai.json`, `$SPM_HOME/ai.lock`, default under `~/.spm/`) and on
 user-global tool directories, so the skills are available in every project.
 Use it only when the user asks for a skill "everywhere" or "globally".
 On a first-time setup run `spm init -g` (safe to repeat) before `spm add -g`,
-which fails with `no ai.json found` otherwise. Global Claude skills are invoked as
+which fails with `no ai.json found` otherwise. Pass the user's agent to the global
+init with `--target <vendor>` (it defaults to `claude`): a global manifest's target
+cannot be changed later, because `target add` operates only on a project manifest
+and a repeated `init` is a no-op, so a non-Claude user who takes the default would
+materialize the skill for the wrong agent. Global Claude skills are invoked as
 `/spm-global:<name>`, project ones as `/spm:<name>`.
 
 ## Content scan
@@ -274,7 +278,12 @@ Failure states to know about:
 - `spm add` writes the new entry into `ai.json` before it resolves and fetches.
   If the add then fails (bad ref, auth error, blocked scan), the entry stays in
   `ai.json` with no pin (for a new name). Either fix the cause and run `spm install`, or drop it
-  with `spm remove <name>`.
+  with `spm remove <name>`. This ordering is specific to a single `spm add`:
+  `spm add --all` resolves and fetches the container (and checks for name
+  collisions) *before* it writes `ai.json`, so a bad ref, auth failure, invalid
+  container or collision leaves no new entries — only a scan block, which runs
+  after the write, leaves them behind. Inspect the manifest before running
+  `spm remove` after an `--all` failure rather than assuming an entry was added.
 - `ai.lock` is only written when a sync fully succeeds. If `spm add --force`
   replaces an existing entry and then fails, `ai.json` holds the new (failing)
   selector while `ai.lock` and the materialized skill still hold the old one.

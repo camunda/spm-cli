@@ -248,7 +248,10 @@ to use which, and how to fix common failures. Install it with `spm` itself:
 
 ```bash
 spm add https://github.com/camunda/spm-cli --branch main --path skills/spm
-spm init -g && spm add -g https://github.com/camunda/spm-cli --branch main --path skills/spm  # or for every project
+# ...or for every project. Pass your agent's vendor to the global init — it defaults
+# to `claude`, and `target add` cannot change a global manifest, so a repeated `init`
+# will not fix the wrong target afterwards:
+spm init -g --target copilot && spm add -g https://github.com/camunda/spm-cli --branch main --path skills/spm
 ```
 
 Use `--tag` instead of `--branch` to pin a release that contains the skill.
