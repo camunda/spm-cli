@@ -3014,3 +3014,146 @@ fn scan_command_scans_a_single_file() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("curl-pipe-shell"), "{stdout}");
 }
+
+// ---------------------------------------------------------------------------
+// Shipped agent skill (`skills/spm/SKILL.md`)
+// ---------------------------------------------------------------------------
+
+/// Absolute path of the user-facing skill this repo ships.
+fn shipped_skill_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/spm")
+}
+
+/// Long flags (`--foo`) an `spm … --help` screen advertises, minus clap's own
+/// `--help`/`--version`.
+fn help_long_flags(sb: &Sandbox, args: &[&str]) -> Vec<String> {
+    let mut full = args.to_vec();
+    full.push("--help");
+    let help = sb.ok(&full);
+    let mut flags = Vec::new();
+    for line in help
+        .lines()
+        .skip_while(|l| !l.starts_with("Options:"))
+        .skip(1)
+    {
+        for tok in line.split(|c: char| c.is_whitespace() || c == ',') {
+            if let Some(name) = tok.strip_prefix("--") {
+                let name = name.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '-');
+                if !name.is_empty() && name != "help" && name != "version" {
+                    flags.push(format!("--{name}"));
+                }
+            }
+        }
+        // Flag lines are the indented ones; stop at the first non-indented line.
+        if !line.starts_with(' ') {
+            break;
+        }
+    }
+    flags
+}
+
+#[test]
+fn shipped_skill_has_valid_front_matter_and_passes_scan() {
+    let sb = Sandbox::new();
+    let dir = shipped_skill_dir();
+    let text = std::fs::read_to_string(dir.join("SKILL.md")).expect("skills/spm/SKILL.md exists");
+
+    // Agent Skills front matter: `name` matching the directory, plus a description.
+    let mut lines = text.lines();
+    assert_eq!(
+        lines.next(),
+        Some("---"),
+        "SKILL.md must open with front matter"
+    );
+    let front: Vec<&str> = lines.by_ref().take_while(|l| *l != "---").collect();
+    assert!(front.contains(&"name: spm"), "{front:?}");
+    let desc = front
+        .iter()
+        .find_map(|l| l.strip_prefix("description: "))
+        .expect("description in front matter");
+    assert!(!desc.trim().is_empty() && desc.len() <= 1024, "{desc}");
+
+    // spm's own scanner must find nothing to block (or warn about).
+    let out = sb.ok(&["scan", dir.to_str().unwrap()]);
+    assert!(out.contains("no suspicious patterns"), "{out}");
+}
+
+/// Drift guard: the skill must document every subcommand and every long flag the
+/// CLI exposes, so adding a command or flag without updating the skill fails CI.
+#[test]
+fn shipped_skill_documents_every_command_and_flag() {
+    let sb = Sandbox::new();
+    let text = std::fs::read_to_string(shipped_skill_dir().join("SKILL.md")).unwrap();
+
+    let top = sb.ok(&["--help"]);
+    let commands: Vec<String> = top
+        .lines()
+        .skip_while(|l| !l.starts_with("Commands:"))
+        .skip(1)
+        .take_while(|l| l.starts_with(' '))
+        .filter_map(|l| l.split_whitespace().next().map(str::to_string))
+        .filter(|c| c != "help")
+        .collect();
+    assert!(
+        commands.len() >= 11,
+        "parsed too few commands: {commands:?}"
+    );
+    // Guard the parser itself: a silent zero-flag parse would make the check below vacuous.
+    assert!(help_long_flags(&sb, &["add"]).contains(&"--force".to_string()));
+
+    let mut invocations: Vec<Vec<&str>> = Vec::new();
+    for c in &commands {
+        assert!(
+            text.contains(&format!("### `spm {c}")),
+            "SKILL.md has no `### spm {c}` section"
+        );
+        if c == "target" {
+            invocations.push(vec!["target", "add"]);
+        } else {
+            invocations.push(vec![c.as_str()]);
+        }
+    }
+    for args in &invocations {
+        for flag in help_long_flags(&sb, args) {
+            assert!(
+                text.contains(&flag),
+                "SKILL.md does not mention `{flag}` (from `spm {} --help`)",
+                args.join(" ")
+            );
+        }
+    }
+}
+
+/// Dogfood: the shipped skill installs through `spm add … --path skills/spm`
+/// and lands as a loadable `SKILL.md` for the target vendor.
+#[test]
+fn shipped_skill_installs_with_spm_add_path() {
+    let sb = Sandbox::new();
+    let dest = sb.skill_repo.join("skills/spm");
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::copy(shipped_skill_dir().join("SKILL.md"), dest.join("SKILL.md")).unwrap();
+    sb.git(&["add", "-A"]);
+    sb.git(&["commit", "-qm", "add spm skill"]);
+
+    sb.ok(&["init", "--target", "copilot"]);
+    let out = sb.spm(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--path",
+        "skills/spm",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("added skill spm"), "{stdout}");
+    let installed = sb
+        .project
+        .join(".agents/skills/spm-managed-skills/spm/SKILL.md");
+    assert!(installed.exists(), "skill not materialized");
+    assert!(sb.read("ai.json").contains("\"path\": \"skills/spm\""));
+}
