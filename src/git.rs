@@ -198,6 +198,11 @@ const CONNECTIVITY_MARKERS: &[&str] = &[
     "operation timed out",
     "failed to connect",
     "could not read from remote repository",
+    // A missing `ssh`/`GIT_SSH_COMMAND` helper: git cannot spawn the transport,
+    // so the SSH protocol is not set up and HTTPS should be tried.
+    "unable to fork",
+    "cannot run ",
+    "no such file or directory",
 ];
 
 /// True if `err` is a `git` failure caused by connectivity or authentication.
@@ -491,6 +496,9 @@ mod tests {
             "fatal: unable to access 'https://x/': Received HTTP code 407 from proxy after CONNECT",
             "remote: HTTP Basic: Access denied\nfatal: Authentication failed for 'https://x/'",
             "remote: Invalid username or password.",
+            // A missing ssh/GIT_SSH_COMMAND helper: git cannot spawn the transport.
+            "fatal: unable to fork",
+            "error: cannot run ssh: No such file or directory\nfatal: unable to fork",
         ] {
             assert!(is_connectivity_failure(&failure(stderr)), "{stderr}");
         }
@@ -585,6 +593,18 @@ mod tests {
         // Success on the first protocol never touches the second.
         let (_, tried) = run_transport(FALLBACK, SSH, &[None]);
         assert_eq!(tried, [SSH]);
+    }
+
+    /// The reverse direction the advisory flagged: an unavailable SSH transport
+    /// (a missing `ssh` helper) must fall back to HTTPS, not strand the user on
+    /// the SSH error. The end-to-end fallback above only exercises HTTPS → SSH.
+    #[test]
+    fn fallback_from_a_missing_ssh_helper_tries_https() {
+        const NO_SSH: &str =
+            "error: cannot run ssh: No such file or directory\nfatal: unable to fork";
+        let (ok, tried) = run_transport(FALLBACK, SSH, &[Some(NO_SSH), None]);
+        assert_eq!(ok.unwrap(), HTTPS);
+        assert_eq!(tried, [SSH, HTTPS]);
     }
 
     /// With `--protocol` and the fallback together, the forced protocol is tried
