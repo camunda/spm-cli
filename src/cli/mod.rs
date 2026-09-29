@@ -14,7 +14,7 @@ mod update;
 use crate::scope::Scope;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use common::{ScopeArg, VersionArg};
+use common::{ScopeArg, TransportArgs, VersionArg};
 use std::path::Path;
 
 #[derive(Parser)]
@@ -22,6 +22,8 @@ use std::path::Path;
 pub struct Cli {
     #[command(subcommand)]
     command: Command,
+    #[command(flatten)]
+    transport: TransportArgs,
 }
 
 #[derive(Subcommand)]
@@ -146,6 +148,7 @@ enum TargetCommand {
 
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
+    cli.transport.apply();
     let cwd = std::env::current_dir()?;
     match cli.command {
         Command::Init { targets, scope } => init::init(&scope.resolve(&cwd), targets),
