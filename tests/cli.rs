@@ -3873,9 +3873,11 @@ fn shipped_skill_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/spm")
 }
 
-/// Long flags (`--foo`) an `spm … --help` screen advertises, minus clap's own
-/// `--help`/`--version`.
-fn help_long_flags(sb: &Sandbox, args: &[&str]) -> Vec<String> {
+/// Flags an `spm … --help` screen advertises, as `(long, short)` pairs (for
+/// example `("--global", Some("-g"))`), minus clap's own `--help`/`--version`.
+/// Only the flag column is parsed, so `--foo` mentioned in a description is not
+/// mistaken for a flag.
+fn help_flags(sb: &Sandbox, args: &[&str]) -> Vec<(String, Option<String>)> {
     let mut full = args.to_vec();
     full.push("--help");
     let help = sb.ok(&full);
@@ -3884,21 +3886,48 @@ fn help_long_flags(sb: &Sandbox, args: &[&str]) -> Vec<String> {
         .lines()
         .skip_while(|l| !l.starts_with("Options:"))
         .skip(1)
+        .take_while(|l| l.starts_with(' '))
     {
-        for tok in line.split(|c: char| c.is_whitespace() || c == ',') {
-            if let Some(name) = tok.strip_prefix("--") {
-                let name = name.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '-');
-                if !name.is_empty() && name != "help" && name != "version" {
-                    flags.push(format!("--{name}"));
+        let mut short = None;
+        for tok in line.split_whitespace() {
+            let tok = tok.trim_end_matches(',');
+            if let Some(long) = tok.strip_prefix("--") {
+                if long != "help" && long != "version" {
+                    flags.push((tok.to_string(), short.take()));
                 }
+                break;
+            } else if tok.starts_with('-') {
+                short = Some(tok.to_string());
+            } else {
+                break;
             }
-        }
-        // Flag lines are the indented ones; stop at the first non-indented line.
-        if !line.starts_with(' ') {
-            break;
         }
     }
     flags
+}
+
+/// The body of one `###` (or `##`) section of the skill, from its heading line
+/// up to the next `##`/`###` heading. `heading` is matched as a line prefix.
+fn skill_section<'a>(text: &'a str, heading: &str) -> &'a str {
+    let start = text
+        .lines()
+        .scan(0usize, |off, l| {
+            let here = *off;
+            *off += l.len() + 1;
+            Some((here, l))
+        })
+        .find(|(_, l)| l.starts_with(heading))
+        .map(|(o, _)| o)
+        .unwrap_or_else(|| panic!("SKILL.md has no section starting with `{heading}`"));
+    let body = &text[start..];
+    let rest = &body[body.find('\n').map_or(body.len(), |n| n + 1)..];
+    let end = rest
+        .find("\n## ")
+        .into_iter()
+        .chain(rest.find("\n### "))
+        .min()
+        .map_or(body.len(), |n| body.len() - rest.len() + n);
+    &body[..end]
 }
 
 #[test]
@@ -3914,7 +3943,16 @@ fn shipped_skill_has_valid_front_matter_and_passes_scan() {
         Some("---"),
         "SKILL.md must open with front matter"
     );
-    let front: Vec<&str> = lines.by_ref().take_while(|l| *l != "---").collect();
+    let mut front: Vec<&str> = Vec::new();
+    let mut closed = false;
+    for l in lines.by_ref() {
+        if l == "---" {
+            closed = true;
+            break;
+        }
+        front.push(l);
+    }
+    assert!(closed, "SKILL.md front matter has no closing `---`");
     assert!(front.contains(&"name: spm"), "{front:?}");
     let desc = front
         .iter()
@@ -3947,26 +3985,36 @@ fn shipped_skill_documents_every_command_and_flag() {
         commands.len() >= 11,
         "parsed too few commands: {commands:?}"
     );
-    // Guard the parser itself: a silent zero-flag parse would make the check below vacuous.
-    assert!(help_long_flags(&sb, &["add"]).contains(&"--force".to_string()));
+    // Guard the parsers themselves: a silent empty parse would make the checks below vacuous.
+    let add_flags = help_flags(&sb, &["add"]);
+    assert!(
+        add_flags.iter().any(|(l, _)| l == "--force"),
+        "{add_flags:?}"
+    );
+    assert!(skill_section(&text, "### `spm add`").contains("--force"));
 
-    let mut invocations: Vec<Vec<&str>> = Vec::new();
+    let mut invocations: Vec<(Vec<&str>, String)> = Vec::new();
     for c in &commands {
         assert!(
             text.contains(&format!("### `spm {c}")),
             "SKILL.md has no `### spm {c}` section"
         );
         if c == "target" {
-            invocations.push(vec!["target", "add"]);
+            invocations.push((vec!["target", "add"], "### `spm target add`".to_string()));
         } else {
-            invocations.push(vec![c.as_str()]);
+            invocations.push((vec![c.as_str()], format!("### `spm {c}`")));
         }
     }
-    for args in &invocations {
-        for flag in help_long_flags(&sb, args) {
+    for (args, heading) in &invocations {
+        // Each command's flags must appear in that command's own section, not
+        // merely somewhere else in the skill.
+        let section = skill_section(&text, heading);
+        for (long, short) in help_flags(&sb, args) {
+            let documented = section.contains(&long)
+                || short.is_some_and(|s| section.contains(&format!("[{s}]")));
             assert!(
-                text.contains(&flag),
-                "SKILL.md does not mention `{flag}` (from `spm {} --help`)",
+                documented,
+                "`{heading}` section does not mention `{long}` (from `spm {} --help`)",
                 args.join(" ")
             );
         }

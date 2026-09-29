@@ -303,7 +303,7 @@ to use which, and how to fix common failures. Install it with `spm` itself:
 
 ```bash
 spm add https://github.com/camunda/spm-cli --branch main --path skills/spm
-spm add -g https://github.com/camunda/spm-cli --branch main --path skills/spm  # or for every project
+spm init -g && spm add -g https://github.com/camunda/spm-cli --branch main --path skills/spm  # or for every project
 ```
 
 Use `--tag` instead of `--branch` to pin a release that contains the skill.

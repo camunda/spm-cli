@@ -20,9 +20,11 @@ spm add https://github.com/camunda/spm-cli --branch main --path skills/spm
 ```
 
 Use `--tag <version>` instead of `--branch main` to pin a release that contains
-the skill. To make it available in every project, add `-g`:
+the skill. To make it available in every project, use the global scope. `spm add -g`
+needs the global manifest to exist, so run `spm init -g` first (it is safe to repeat):
 
 ```bash
+spm init -g
 spm add -g https://github.com/camunda/spm-cli --branch main --path skills/spm
 ```
 
