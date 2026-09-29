@@ -281,16 +281,26 @@ Failure states to know about:
   If the add then fails (bad ref, auth error, blocked scan), the entry stays in
   `ai.json` with no pin (for a new name). Either fix the cause and run `spm install`, or drop it
   with `spm remove <name>`. This ordering is specific to a single `spm add`:
-  `spm add --all` resolves and fetches the container (and checks for name
-  collisions) *before* it writes `ai.json`, so a bad ref, auth failure, invalid
-  container or collision leaves no new entries — only a scan block, which runs
-  after the write, leaves them behind. Inspect the manifest before running
-  `spm remove` after an `--all` failure rather than assuming an entry was added.
-- `ai.lock` is only written when a sync fully succeeds. If `spm add --force`
-  replaces an existing entry and then fails, `ai.json` holds the new (failing)
-  selector while `ai.lock` and the materialized skill still hold the old one.
-  `spm list` and `spm status` keep reporting the old pin as installed until an
-  `spm install` succeeds, so fix the cause and re-run `spm install`.
+  `spm add --all` resolves and fetches the container (and checks each sub-skill
+  against the existing *skills*) *before* it writes `ai.json`, so a bad ref, auth
+  failure, invalid container or a collision with an existing skill leaves no new
+  entries. Other collisions are only detected *after* the write, when `sync`
+  reloads the manifest: a sub-skill whose name matches an existing *plugin* (or a
+  skill bundled by one of your plugins) is saved into `ai.json` first and only
+  then rejected, and — like a scan block — leaves the batch entries behind.
+  Inspect the manifest before running `spm remove` after an `--all` failure
+  rather than assuming nothing was added.
+- `ai.lock` is only written when a sync fully succeeds, so a failure *before*
+  materialization (resolution, fetch, scan, collision check) leaves `ai.lock` and
+  every materialized skill on the old pin. Materialization itself is not atomic,
+  though: `sync` rewrites each configured target in turn before saving `ai.lock`,
+  so a copy/configuration failure partway through can leave some targets updated
+  (or partially rewritten) while `ai.lock` still holds the old pin. If `spm add
+  --force` replaces an existing entry and then fails, `ai.json` holds the new
+  (failing) selector; `spm list` and `spm status` keep reporting the old pin as
+  installed — and `status` only compares names, so it will not flag a
+  half-updated target — until an `spm install` succeeds. Re-run `spm install`
+  after fixing the cause to restore every target to a consistent state.
 - To change the version selector of an existing entry from the CLI, re-run
   `spm add` for it with `--force` and the new selector (and the same
   `--name` and `--path`).
