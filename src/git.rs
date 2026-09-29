@@ -53,11 +53,17 @@ fn transport() -> Transport {
 
 /// A failed `git` invocation. Keeps stderr so callers can tell a connection or
 /// authentication failure (worth retrying over another protocol) from a genuine
-/// "not found" error.
+/// "not found" error. `remote` records whether the failing command actually
+/// contacted the remote (`ls-remote`, `fetch`): only a *remote-stage* failure
+/// is eligible for connectivity classification, so a local `init`,
+/// `remote set-url`, or `checkout` error whose stderr happens to contain a
+/// connectivity marker (e.g. "no such file or directory") is never mistaken for
+/// a remote reachability failure and retried over the other protocol.
 #[derive(Debug)]
 struct GitFailure {
     args: String,
     stderr: String,
+    remote: bool,
 }
 
 impl fmt::Display for GitFailure {
@@ -97,6 +103,18 @@ fn git_command(args: &[&str]) -> Command {
 }
 
 fn git(args: &[&str], cwd: Option<&Path>) -> Result<String> {
+    run_git(args, cwd, false)
+}
+
+/// Like [`git`], but tags any failure as a *remote-stage* failure so the
+/// transport fallback classifier may consider it (see
+/// [`is_connectivity_failure`]). Use only for commands that actually contact
+/// the remote — `ls-remote` and `fetch` — never for local store/config steps.
+fn git_remote(args: &[&str], cwd: Option<&Path>) -> Result<String> {
+    run_git(args, cwd, true)
+}
+
+fn run_git(args: &[&str], cwd: Option<&Path>, remote: bool) -> Result<String> {
     let mut cmd = git_command(args);
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
@@ -108,6 +126,7 @@ fn git(args: &[&str], cwd: Option<&Path>) -> Result<String> {
         return Err(GitFailure {
             args: args.join(" "),
             stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            remote,
         }
         .into());
     }
@@ -206,8 +225,17 @@ const CONNECTIVITY_MARKERS: &[&str] = &[
 ];
 
 /// True if `err` is a `git` failure caused by connectivity or authentication.
+///
+/// Restricted to *remote-stage* failures (`ls-remote`, `fetch`): a local store
+/// or configuration step (`init`, `remote set-url`, `checkout`) is never
+/// retried over another protocol, even if its stderr contains a connectivity
+/// marker, so a local error is never misreported as a remote reachability
+/// failure.
 fn is_connectivity_failure(err: &anyhow::Error) -> bool {
     err.downcast_ref::<GitFailure>().is_some_and(|f| {
+        if !f.remote {
+            return false;
+        }
         let stderr = f.stderr.to_lowercase();
         CONNECTIVITY_MARKERS.iter().any(|m| stderr.contains(m))
     })
@@ -267,7 +295,7 @@ pub fn ls_remote(url: &str, refspecs: &[&str]) -> Result<String> {
 fn ls_remote_once(url: &str, refspecs: &[&str]) -> Result<String> {
     let mut args = vec!["ls-remote", url];
     args.extend_from_slice(refspecs);
-    let out = git(&args, None)?;
+    let out = git_remote(&args, None)?;
     if out.is_empty() {
         bail!("ref `{}` not found in {url}", refspecs.join(" "));
     }
@@ -348,8 +376,8 @@ fn fetch_commit_once(url: &str, sha: &str, dest: &Path) -> Result<()> {
         git(&["remote", "set-url", "origin", url], Some(dest))?;
     }
 
-    if git(&["fetch", "--depth", "1", "origin", sha], Some(dest)).is_err() {
-        git(&["fetch", "origin"], Some(dest)).with_context(|| format!("fetching {url}"))?;
+    if git_remote(&["fetch", "--depth", "1", "origin", sha], Some(dest)).is_err() {
+        git_remote(&["fetch", "origin"], Some(dest)).with_context(|| format!("fetching {url}"))?;
     }
     git(&["checkout", "--detach", sha], Some(dest))
         .with_context(|| format!("checking out {sha} in {}", dest.display()))?;
@@ -397,6 +425,18 @@ mod tests {
         GitFailure {
             args: "ls-remote".into(),
             stderr: stderr.into(),
+            remote: true,
+        }
+        .into()
+    }
+
+    /// A failure from a *local* store/config step (`init`, `remote set-url`,
+    /// `checkout`) — never eligible for connectivity classification.
+    fn local_failure(stderr: &str) -> anyhow::Error {
+        GitFailure {
+            args: "checkout".into(),
+            stderr: stderr.into(),
+            remote: false,
         }
         .into()
     }
@@ -514,6 +554,30 @@ mod tests {
         assert!(!is_connectivity_failure(&anyhow::anyhow!(
             "ref `x` not found in y"
         )));
+    }
+
+    /// Connectivity classification is gated on the *stage*, not just the text:
+    /// a local store/config step (`init`, `remote set-url`, `checkout`) that
+    /// fails with stderr containing a connectivity marker is NOT a connectivity
+    /// failure, so it is never retried over another protocol and never
+    /// misreported as a remote reachability failure. The identical message from
+    /// the remote operation still is.
+    #[test]
+    fn local_stage_failures_are_never_connectivity_failures() {
+        for stderr in [
+            "fatal: could not create work tree dir: Permission denied",
+            "error: could not lock config file .git/config: No such file or directory",
+            "fatal: unable to fork",
+        ] {
+            assert!(
+                !is_connectivity_failure(&local_failure(stderr)),
+                "local stage must not classify: {stderr}"
+            );
+            assert!(
+                is_connectivity_failure(&failure(stderr)),
+                "same text from the remote op must classify: {stderr}"
+            );
+        }
     }
 
     /// Run `with_transport`, recording each URL tried and answering from `script`
@@ -638,6 +702,28 @@ mod tests {
         .unwrap_err();
         assert_eq!(tried, 1);
         assert!(format!("{err}").contains("not found"));
+    }
+
+    /// A local-stage failure whose stderr matches a connectivity marker must not
+    /// trigger a protocol fallback: only the remote operation is retryable, so a
+    /// local `checkout`/`init` error surfaces as-is with a single attempt.
+    #[test]
+    fn fallback_never_retries_a_local_stage_failure() {
+        let mut tried = 0;
+        let err = with_transport(FALLBACK, SSH, |_| -> Result<()> {
+            tried += 1;
+            Err(local_failure(
+                "fatal: unable to update the ref: No such file or directory",
+            ))
+        })
+        .unwrap_err();
+        assert_eq!(
+            tried, 1,
+            "a local-stage error is not retried over a protocol"
+        );
+        let msg = format!("{err:#}");
+        assert!(msg.contains("No such file or directory"), "{msg}");
+        assert!(!msg.contains("either protocol"), "{msg}");
     }
 
     /// A URL with no equivalent in the other protocol has nothing to fall back to.
