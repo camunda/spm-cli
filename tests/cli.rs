@@ -3146,9 +3146,14 @@ fn shipped_skill_checks_are_line_ending_independent() {
     assert_skill_documents_cli(&sb, &crlf);
 }
 
-fn assert_skill_documents_cli(sb: &Sandbox, text: &str) {
-    let top = sb.ok(&["--help"]);
-    let commands: Vec<String> = top
+/// Every leaf command path (`["init"]`, `["target", "add"]`, …), discovered by
+/// following each `Commands:` block in `--help` recursively, so a new nested
+/// subcommand is picked up without touching the test.
+fn leaf_commands(sb: &Sandbox, prefix: &[&str]) -> Vec<Vec<String>> {
+    let mut args = prefix.to_vec();
+    args.push("--help");
+    let help = sb.ok(&args);
+    let children: Vec<String> = help
         .lines()
         .skip_while(|l| !l.starts_with("Commands:"))
         .skip(1)
@@ -3156,9 +3161,24 @@ fn assert_skill_documents_cli(sb: &Sandbox, text: &str) {
         .filter_map(|l| l.split_whitespace().next().map(str::to_string))
         .filter(|c| c != "help")
         .collect();
+    if children.is_empty() {
+        return vec![prefix.iter().map(|s| s.to_string()).collect()];
+    }
+    children
+        .iter()
+        .flat_map(|c| {
+            let mut next = prefix.to_vec();
+            next.push(c.as_str());
+            leaf_commands(sb, &next)
+        })
+        .collect()
+}
+
+fn assert_skill_documents_cli(sb: &Sandbox, text: &str) {
+    let leaves = leaf_commands(sb, &[]);
     assert!(
-        commands.len() >= 11,
-        "parsed too few commands: {commands:?}"
+        leaves.len() >= 11 && leaves.contains(&vec!["target".to_string(), "add".to_string()]),
+        "parsed too few commands: {leaves:?}"
     );
     // Guard the parsers themselves: a silent empty parse would make the checks below vacuous.
     let add_flags = help_flags(sb, &["add"]);
@@ -3168,18 +3188,15 @@ fn assert_skill_documents_cli(sb: &Sandbox, text: &str) {
     );
     assert!(skill_section(text, "### `spm add`").contains("--force"));
 
-    let mut invocations: Vec<(Vec<&str>, String)> = Vec::new();
-    for c in &commands {
-        assert!(
-            text.contains(&format!("### `spm {c}")),
-            "SKILL.md has no `### spm {c}` section"
-        );
-        if c == "target" {
-            invocations.push((vec!["target", "add"], "### `spm target add`".to_string()));
-        } else {
-            invocations.push((vec![c.as_str()], format!("### `spm {c}`")));
-        }
-    }
+    let invocations: Vec<(Vec<&str>, String)> = leaves
+        .iter()
+        .map(|path| {
+            (
+                path.iter().map(String::as_str).collect(),
+                format!("### `spm {}`", path.join(" ")),
+            )
+        })
+        .collect();
     for (args, heading) in &invocations {
         // Each command's flags must appear in that command's own section, not
         // merely somewhere else in the skill.

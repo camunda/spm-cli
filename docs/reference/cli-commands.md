@@ -155,8 +155,9 @@ CI gate on skill sources.
 
 The same scan runs automatically as a **pre-materialize gate**: every skill and
 plugin is scanned right after it is fetched into the store and *before* it is
-copied into any agent-discovered directory, on `spm add`, `spm install`, and
-`spm update`. High/critical findings abort the command (nothing is materialized
+copied into any agent-discovered directory, by every command that syncs skills:
+`spm add`, `spm install`, `spm update`, `spm remove`, and `spm target add`
+(each scans every dependency in `ai.json`). High/critical findings abort the command (nothing is materialized
 and `ai.lock` is not written); medium/low findings are surfaced as warnings.
 
 Detected pattern categories:

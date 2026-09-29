@@ -269,7 +269,8 @@ directory. It flags:
 - **Path traversal** — `../../` requested in skill text.
 - **Auto-run triggers** — `postinstall` scripts, git hooks, bundled `Makefile`s.
 
-**High/critical findings block** `add`/`install`/`update`. To review a source (or
+**High/critical findings block** every command that syncs skills (`add`, `install`,
+`update`, `remove` and `target add`). To review a source (or
 gate it in CI) run it standalone — it exits non-zero on any blocking finding:
 
 ```bash
