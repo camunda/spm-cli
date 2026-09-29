@@ -75,7 +75,7 @@ impl std::error::Error for GitFailure {}
 /// an interactive username/password prompt for private repos — credential
 /// helpers and ssh-agent still supply auth non-interactively; only the hanging
 /// TTY fallback is disabled, so auth failures surface as errors instead of hangs.
-fn git(args: &[&str], cwd: Option<&Path>) -> Result<String> {
+fn git_command(args: &[&str]) -> Command {
     let mut cmd = Command::new("git");
     // `core.longpaths=true` lets git on Windows write paths longer than the
     // legacy 260-char MAX_PATH (deep object/checkout paths under the store).
@@ -83,6 +83,21 @@ fn git(args: &[&str], cwd: Option<&Path>) -> Result<String> {
     cmd.args(["-c", "core.longpaths=true"]);
     cmd.args(args);
     cmd.env("GIT_TERMINAL_PROMPT", "0");
+    // Pin git (and the ssh/curl helpers it spawns) to the C locale so failure
+    // diagnostics are stable English text. The connectivity/auth classifier
+    // (`CONNECTIVITY_MARKERS`) matches those messages verbatim; without this a
+    // localized host would emit translated stderr, the markers would miss, and
+    // `--protocol-fallback` would give up instead of retrying over the other
+    // protocol. `LC_ALL` overrides every other locale category and `LANGUAGE`;
+    // clearing `LANGUAGE` defends against gettext ignoring `LC_ALL` when it is
+    // set.
+    cmd.env("LC_ALL", "C");
+    cmd.env_remove("LANGUAGE");
+    cmd
+}
+
+fn git(args: &[&str], cwd: Option<&Path>) -> Result<String> {
+    let mut cmd = git_command(args);
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
@@ -438,6 +453,25 @@ mod tests {
         assert_eq!(protocol_of(SSH_URL), Some(Protocol::Ssh));
         assert_eq!(protocol_of(HTTPS), Some(Protocol::Https));
         assert_eq!(protocol_of("file:///tmp/repo"), None);
+    }
+
+    /// The connectivity/auth classifier matches English stderr verbatim, so git
+    /// (and the ssh/curl helpers it spawns) must run under a fixed message
+    /// locale — otherwise a localized host emits translated diagnostics, the
+    /// markers miss, and `--protocol-fallback` never retries.
+    #[test]
+    fn git_command_pins_the_c_locale_for_stable_diagnostics() {
+        let cmd = git_command(&["ls-remote"]);
+        let lc_all = cmd
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new("LC_ALL"))
+            .and_then(|(_, v)| v);
+        assert_eq!(lc_all, Some(std::ffi::OsStr::new("C")));
+        // LANGUAGE must be cleared so gettext cannot override LC_ALL=C.
+        let language = cmd
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new("LANGUAGE"));
+        assert_eq!(language, Some((std::ffi::OsStr::new("LANGUAGE"), None)));
     }
 
     /// Only connection/auth failures are retryable; ref and path errors and
