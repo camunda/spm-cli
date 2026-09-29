@@ -147,8 +147,9 @@ struct RemoteParts<'a> {
 /// path) yields `None` so it is never rewritten. So does any URL whose path
 /// would change meaning between the two forms: a `#fragment` or `?query` (URL
 /// metadata over HTTPS, literal path characters over scp), percent-encoding
-/// (decoded over HTTPS, literal over scp), a backslash, or an SSH home-relative
-/// `~` path.
+/// (decoded over HTTPS, literal over scp), a backslash, an SSH home-relative
+/// `~` path, or a `..` segment (HTTPS normalizes dot segments while scp-style
+/// SSH resolves them relative to the account's home).
 fn split_remote(url: &str) -> Option<RemoteParts<'_>> {
     if url.contains(['#', '?', '%', '\\']) {
         return None;
@@ -166,7 +167,8 @@ fn split_remote(url: &str) -> Option<RemoteParts<'_>> {
         return None;
     };
     let plain_host = !host.is_empty() && !host.contains(['@', ':', '/', '\\']);
-    let plain_path = !path.is_empty() && !path.starts_with(['/', '~']);
+    let dotdot = path.split('/').any(|seg| seg == "..");
+    let plain_path = !path.is_empty() && !path.starts_with(['/', '~']) && !dotdot;
     (plain_host && plain_path).then_some(RemoteParts {
         protocol,
         host,
@@ -480,6 +482,11 @@ mod tests {
             "git@github.com:org/repo.git?x=1",
             "git@github.com:~alice/repo.git",
             "ssh://git@github.com/~alice/repo.git",
+            // `..` path segments normalize over HTTPS but resolve home-relative
+            // over scp-style SSH, so they change meaning between the two forms
+            "https://github.com/org/../repo.git",
+            "git@github.com:org/../repo.git",
+            "ssh://git@github.com/../repo.git",
             // non-`git` SSH user, absolute scp path, empty path/host
             "alice@github.com:org/repo.git",
             "git@host:/abs/repo.git",
