@@ -163,10 +163,15 @@ Prints each declared skill and plugin with its git URL and its pin as
 spm status [-g]
 ```
 
-Reports, per target, whether each locked skill is present (`ok`), `MISSING`, or
-`stale` (materialized but no longer in `ai.lock`). It exits non-zero when
-anything is missing or when the Claude marketplace pointer is stale, so it can
-gate scripts. It compares only names, not versions: after a hand edit of
+Reports, per target, whether each locked skill is present (`ok`) or `MISSING`.
+Separately, it lists any *stale* directories — materialized but no longer in
+`ai.lock`. Stale detection is best-effort: it is only performed for targets
+whose skill directory is spm-owned, so it is disabled for the shared-directory
+targets (Amp, Codex, Cursor, Cline, Gemini, Windsurf) in both scopes and for
+Copilot in global scope, because their directories are shared with your own
+skills and undeclared entries there are not spm's to flag. It exits non-zero
+when anything is missing or when the Claude marketplace pointer is stale, so it
+can gate scripts. It compares only names, not versions: after a hand edit of
 `ai.json`, run `spm install` before trusting it. It also warns when a skill
 name is installed in both project and global scope, because the two collide at
 discovery time.
