@@ -5,7 +5,7 @@ the authoritative, version-specific usage.
 
 ```bash
 spm init [--target amp|claude|cline|codex|copilot|cursor|gemini|windsurf ...] [-g]  # scaffold ai.json (repeatable / comma-separated)
-spm add <git> (--tag|--branch|--commit <v>) \      # add + install a skill (<git> may be github.com/owner/repo[@ref])
+spm add <git> [--tag|--branch|--commit <v>] \      # add + install a skill; the version flag is required unless <git> is github.com/owner/repo@ref
         [--path <subdir>] [--name <local-name>] [--all] [--force] [-g]  # --all: add every skill under --path
         [--plugin]                                 # --plugin: add a full plugin instead of a skill
 spm target add [vendor ...]                        # add target vendor(s); no arg = pick interactively

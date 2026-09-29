@@ -60,10 +60,10 @@ fn parse(input: &str) -> Result<Option<Shorthand>> {
     }))
 }
 
-/// A full-length commit SHA (SHA-1 or SHA-256), which cannot be a tag or branch
-/// worth probing for.
+/// A full-length SHA-1 commit ID (the only form `ai.json` and `ai.lock` accept),
+/// which is taken as a commit without probing for a tag or branch.
 fn is_full_sha(r: &str) -> bool {
-    matches!(r.len(), 40 | 64) && r.chars().all(|c| c.is_ascii_hexdigit())
+    r.len() == 40 && r.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Decide whether `@<ref>` names a tag, a branch or a commit.
@@ -200,7 +200,9 @@ mod tests {
         let v = classify("file:///nonexistent", &sha).unwrap();
         assert_eq!(v.commit.as_deref(), Some(sha.as_str()));
         assert!(v.tag.is_none() && v.branch.is_none());
-        assert!(is_full_sha(&"0".repeat(64)));
+        // A 64-character (SHA-256) ID is not a valid `ai.json` commit, so it must
+        // not be accepted here only to be rejected by the reload in `sync`.
+        assert!(!is_full_sha(&"0".repeat(64)));
         assert!(!is_full_sha("abc1234"));
         assert!(!is_full_sha(&"g".repeat(40)));
     }
