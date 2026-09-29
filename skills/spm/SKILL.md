@@ -7,8 +7,9 @@ description: Operate the spm skill package manager. Use when the user wants to a
 
 `spm` manages AI skills the way a package manager manages dependencies. Skills
 are declared as git dependencies in `ai.json`, pinned to commits in `ai.lock`,
-and copied into the directories the user's AI tools read from. Nothing spm
-writes into the working tree is committed. Run `spm --help` or
+and copied into the directories the user's AI tools read from. You commit
+`ai.json` and `ai.lock`; the skills spm copies into the working tree are
+gitignored and never committed. Run `spm --help` or
 `spm <command> --help` for the authoritative, version-specific usage.
 
 ## Mental model
@@ -23,8 +24,12 @@ writes into the working tree is committed. Run `spm --help` or
 - Do not hand-edit `ai.lock`. Edit `ai.json` only for things the CLI cannot do,
   then run `spm install`.
 - Do not commit materialized skills. spm adds them to `.gitignore` for you.
-- Every command works on the project in the current directory. `-g` or
-  `--global` switches to the user-global scope (see [Global scope](#global-scope)).
+- By default commands work on the project in the current directory. `init`,
+  `add`, `remove`, `update`, `install`, `list`, `status` and `clean` accept `-g`
+  or `--global` to switch to the user-global scope (see
+  [Global scope](#global-scope)). `target add` is always project-only, `scan`
+  works on the path it is given, and `prune` always empties the global cache;
+  none of those three accepts `-g`.
 - Requires the system `git` on `PATH`. spm never handles credentials itself.
 
 ## Which command to run
@@ -72,10 +77,12 @@ scans the content, and materializes it, all in one step. It needs an existing
   usage error. Giving none fails with `set one of tag/branch/commit`. Prefer
   `--tag` for reproducibility; `--commit` needs the full 40-character SHA.
 - `--path <subdir>` selects a subdirectory of the repo (monorepos). It must be
-  relative and must not contain `..`.
+  relative to the repo root and must not contain a `..` path component (a
+  segment such as `v1..2` is fine).
 - `--name` sets the local name (the `ai.json` key). It defaults to the last
   segment of `--path`, or the repo name when there is no usable path. A name
-  must not contain `/`, `\`, `.` or `..`.
+  must be non-empty, must not contain `/`, `\` or NUL, and must not be exactly
+  `.` or `..` (so `foo.bar` is fine).
 - `--all` treats `--path` as a container and adds every immediate
   subdirectory that has a `SKILL.md`, each keyed by its directory name. It
   cannot be combined with `--name` or `--plugin`.
@@ -115,7 +122,9 @@ spm update [name] [-g]
 
 Re-resolves `--tag` and `--branch` entries to their current commit and rewrites
 `ai.lock`. With a name, updates only that skill or plugin. A `--commit` entry
-never moves. `spm install` alone never updates pins; only `spm update` does.
+never moves. An unchanged pin is only ever moved by `spm update`;
+`spm install` keeps it, and re-resolves just the entries whose URL, selector or
+path you changed, or that have no pin yet.
 
 ### `spm remove`
 
@@ -157,8 +166,10 @@ spm status [-g]
 Reports, per target, whether each locked skill is present (`ok`), `MISSING`, or
 `stale` (materialized but no longer in `ai.lock`). It exits non-zero when
 anything is missing or when the Claude marketplace pointer is stale, so it can
-gate scripts. It also warns when a skill name is installed in both project and
-global scope, because the two collide at discovery time.
+gate scripts. It compares only names, not versions: after a hand edit of
+`ai.json`, run `spm install` before trusting it. It also warns when a skill
+name is installed in both project and global scope, because the two collide at
+discovery time.
 
 ### `spm clean`
 
@@ -216,7 +227,8 @@ After `spm install` for Claude, the Claude session has to be restarted, or
 lock (`$SPM_HOME/ai.json`, `$SPM_HOME/ai.lock`, default under `~/.spm/`) and on
 user-global tool directories, so the skills are available in every project.
 Use it only when the user asks for a skill "everywhere" or "globally".
-`spm init -g` is needed first. Global Claude skills are invoked as
+On a first-time setup run `spm init -g` (safe to repeat) before `spm add -g`,
+which fails with `no ai.json found` otherwise. Global Claude skills are invoked as
 `/spm-global:<name>`, project ones as `/spm:<name>`.
 
 ## Content scan
@@ -253,8 +265,13 @@ Failure states to know about:
 
 - `spm add` writes the new entry into `ai.json` before it resolves and fetches.
   If the add then fails (bad ref, auth error, blocked scan), the entry stays in
-  `ai.json` with no pin. Either fix the cause and run `spm install`, or drop it
+  `ai.json` with no pin (for a new name). Either fix the cause and run `spm install`, or drop it
   with `spm remove <name>`.
+- `ai.lock` is only written when a sync fully succeeds. If `spm add --force`
+  replaces an existing entry and then fails, `ai.json` holds the new (failing)
+  selector while `ai.lock` and the materialized skill still hold the old one.
+  `spm list` and `spm status` keep reporting the old pin as installed until an
+  `spm install` succeeds, so fix the cause and re-run `spm install`.
 - To change the version selector of an existing entry from the CLI, re-run
   `spm add` for it with `--force` and the new selector (and the same
   `--name` and `--path`).
@@ -263,8 +280,11 @@ Failure states to know about:
 
 - Prefer the CLI over editing `ai.json` by hand: the CLI validates, pins and
   materializes in one step.
-- After any change to `ai.json`, run `spm status` to confirm the result, and
-  commit both `ai.json` and `ai.lock` together.
+- After editing `ai.json` by hand, run `spm install` first, then `spm status`.
+  `status` only compares the names in `ai.lock` with what is on disk; it does
+  not compare an entry's URL, selector or path with its pin, so before
+  `install` it can report success for the old materialization. Commit
+  `ai.json` and `ai.lock` together.
 - Never stage or commit what spm materialized (see [Targets](#targets)). If
   `git status` lists spm-managed skill directories as untracked, their
   `.gitignore` entries were removed; run `spm install` to restore them.
