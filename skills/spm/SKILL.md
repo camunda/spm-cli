@@ -233,11 +233,14 @@ which fails with `no ai.json found` otherwise. Global Claude skills are invoked 
 
 ## Content scan
 
-Before anything is copied into an agent-visible directory, `spm add`,
-`spm install` and `spm update` scan the fetched content for prompt injection,
-secret exfiltration, obfuscated payloads, command execution and auto-run
-triggers. A high or critical finding aborts the command: nothing is
-materialized and `ai.lock` is not written. Lower severities print as warnings.
+Before anything is copied into an agent-visible directory, every command that
+runs a sync (`spm add`, `spm install`, `spm update`, `spm remove` and
+`spm target add`) scans the fetched content of every dependency in `ai.json`
+for prompt injection, secret exfiltration, obfuscated payloads, command
+execution and auto-run triggers. So a blocking dependency can also fail
+`remove` or `target add`, even though neither adds anything. A high or critical
+finding aborts the command: nothing is materialized and `ai.lock` is not
+written. Lower severities print as warnings.
 
 - Run `spm scan <path>` to review content by hand or to gate a skill in CI.
 - Never bypass a block on the user's behalf. Show the user the findings and
