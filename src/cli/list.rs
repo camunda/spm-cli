@@ -5,7 +5,7 @@ use anyhow::Result;
 
 pub(super) fn list(scope: &Scope) -> Result<()> {
     let dir = scope.manifest_dir()?;
-    let manifest = Manifest::load(&dir)?;
+    let manifest = Manifest::load(&dir, scope)?;
     let lock = Lockfile::load_or_default(&dir)?;
     if manifest.skills.is_empty() && manifest.plugins.is_empty() {
         println!("no skills or plugins declared");

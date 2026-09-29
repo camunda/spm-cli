@@ -12,7 +12,7 @@ use anyhow::{bail, Result};
 /// doubles as an automated gate.
 pub(super) fn status(scope: &Scope) -> Result<()> {
     let dir = scope.manifest_dir()?;
-    let manifest = Manifest::load(&dir)?;
+    let manifest = Manifest::load(&dir, scope)?;
     let lock = Lockfile::load_or_default(&dir)?;
     // Plugin-bundled skills are flattened into every vendor's skills dir just
     // like standalone skills, so they belong in `expected` — otherwise `status`

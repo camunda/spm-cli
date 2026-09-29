@@ -12,7 +12,7 @@ use anyhow::{bail, Context, Result};
 /// refresh to a single skill (used by `update <name>`).
 pub(super) fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Result<usize> {
     let dir = scope.manifest_dir()?;
-    let manifest = Manifest::load(&dir)?;
+    let manifest = Manifest::load(&dir, scope)?;
     if manifest.targets.is_empty() {
         bail!("ai.json declares no targets");
     }
