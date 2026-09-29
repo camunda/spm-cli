@@ -295,6 +295,20 @@ spm prune [--yes]                                  # wipe the global fetch cache
 spm scan [path]                                    # scan skill content for suspicious patterns (default: .)
 ```
 
+## Agent skill
+
+This repo ships a user-facing skill, [`skills/spm/SKILL.md`](skills/spm/SKILL.md),
+that teaches an AI coding agent how to operate `spm`: the commands and flags, when
+to use which, and how to fix common failures. Install it with `spm` itself:
+
+```bash
+spm add https://github.com/camunda/spm-cli --branch main --path skills/spm
+spm add -g https://github.com/camunda/spm-cli --branch main --path skills/spm  # or for every project
+```
+
+Use `--tag` instead of `--branch` to pin a release that contains the skill.
+`AGENTS.md` and `CLAUDE.md` are for contributors to `spm-cli`, not for users.
+
 ## Content scanning (security gate)
 
 Skills are markdown + scripts that Claude/Copilot auto-discover and act on, so a
