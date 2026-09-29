@@ -234,10 +234,12 @@ user-global tool directories, so the skills are available in every project.
 Use it only when the user asks for a skill "everywhere" or "globally".
 On a first-time setup run `spm init -g` (safe to repeat) before `spm add -g`,
 which fails with `no ai.json found` otherwise. Pass the user's agent to the global
-init with `--target <vendor>` (it defaults to `claude`): a global manifest's target
-cannot be changed later, because `target add` operates only on a project manifest
+init with `--target <vendor>` (it defaults to `claude`): no CLI command retargets a
+global manifest afterwards, because `target add` operates only on a project manifest
 and a repeated `init` is a no-op, so a non-Claude user who takes the default would
-materialize the skill for the wrong agent. Global Claude skills are invoked as
+materialize the skill for the wrong agent. It is still recoverable by hand — edit the
+`targets` array in `$SPM_HOME/ai.json` and run `spm install -g` — but passing
+`--target` up front avoids it. Global Claude skills are invoked as
 `/spm-global:<name>`, project ones as `/spm:<name>`.
 
 ## Content scan

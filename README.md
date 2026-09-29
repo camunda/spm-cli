@@ -247,10 +247,12 @@ that teaches an AI coding agent how to operate `spm`: the commands and flags, wh
 to use which, and how to fix common failures. Install it with `spm` itself:
 
 ```bash
+# In a project (needs an `ai.json` — run `spm init` first if the project has none):
 spm add https://github.com/camunda/spm-cli --branch main --path skills/spm
 # ...or for every project. Pass your agent's vendor to the global init — it defaults
-# to `claude`, and `target add` cannot change a global manifest, so a repeated `init`
-# will not fix the wrong target afterwards:
+# to `claude`, and no CLI command retargets a global manifest afterwards (`target add`
+# is project-only and a repeated `init` is a no-op), though you can still fix it by
+# editing the `targets` array in `$SPM_HOME/ai.json` and running `spm install -g`:
 spm init -g --target copilot && spm add -g https://github.com/camunda/spm-cli --branch main --path skills/spm
 ```
 
