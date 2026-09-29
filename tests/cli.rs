@@ -643,6 +643,81 @@ fn remove_prunes_skill() {
 }
 
 #[test]
+fn rm_alias_behaves_like_remove() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    sb.ok(&["rm", "greet"]);
+
+    assert!(!sb.read("ai.json").contains("greet"));
+    let skills_dir = sb.claude_market_dir().join("plugin/skills");
+    assert!(std::fs::read_dir(&skills_dir).unwrap().next().is_none());
+}
+
+#[test]
+fn i_alias_behaves_like_install() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let lock_before = sb.read("ai.lock");
+
+    assert_eq!(sb.ok(&["i"]), sb.ok(&["install"]));
+    assert_eq!(lock_before, sb.read("ai.lock"));
+}
+
+#[test]
+fn ls_alias_behaves_like_list() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+
+    let out = sb.ok(&["ls"]);
+    assert!(out.contains("greet"), "{out}");
+    assert_eq!(out, sb.ok(&["list"]));
+}
+
+#[cfg(unix)]
+#[test]
+fn aliases_accept_the_global_flag() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "-g", "--target", "copilot"]);
+    sb.ok(&[
+        "add",
+        "-g",
+        &sb.skill_url(),
+        "--tag",
+        "v0.1.0",
+        "--name",
+        "greet",
+    ]);
+
+    let listed = sb.ok(&["ls", "-g"]);
+    assert!(listed.contains("greet"), "{listed}");
+    assert_eq!(listed, sb.ok(&["list", "-g"]));
+
+    assert_eq!(sb.ok(&["i", "-g"]), sb.ok(&["install", "-g"]));
+
+    sb.ok(&["rm", "-g", "greet"]);
+    assert!(!sb.copilot_global_skills().join("greet").exists());
+}
+
+#[test]
+fn aliases_are_shown_in_help() {
+    let sb = Sandbox::new();
+    let help = sb.ok(&["--help"]);
+    for (cmd, alias) in [("install", "i"), ("remove", "rm"), ("list", "ls")] {
+        let row = help
+            .lines()
+            .find(|l| l.trim_start().starts_with(cmd))
+            .unwrap_or_else(|| panic!("no `{cmd}` row in help: {help}"));
+        assert!(
+            row.contains(&format!("[alias: {alias}]")),
+            "`{cmd}` row should advertise `{alias}`: {row}"
+        );
+    }
+}
+
+#[test]
 fn install_is_idempotent_from_lock() {
     let sb = Sandbox::new();
     sb.ok(&["init", "--target", "claude"]);
