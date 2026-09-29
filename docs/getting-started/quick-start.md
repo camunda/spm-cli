@@ -18,8 +18,9 @@ This writes a minimal `ai.json` you commit to your repo.
 ## 2. Add a skill
 
 `spm add` adds a skill to `ai.json`, resolves it to an immutable commit, records
-that pin in `ai.lock`, and materializes it — all in one step. Choose exactly one
-version selector (`--tag`, `--branch`, or `--commit`):
+that pin in `ai.lock`, and materializes it — all in one step. Choose at most one
+version selector (`--tag`, `--branch`, or `--commit`); with none, `spm add` uses
+the repository's default branch and records it in `ai.json`:
 
 ```bash
 spm add https://github.com/org/skills --tag v1.2.0 --path skills/pdf --name pdf-tools

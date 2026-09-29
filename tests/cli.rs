@@ -2986,6 +2986,144 @@ fn scan_command_clean_on_benign_dir() {
     assert!(out.contains("no suspicious patterns"), "{out}");
 }
 
+/// With no selector, `spm add` follows the remote's `HEAD`. The repo's default
+/// branch is deliberately not `main`, so a hard-coded guess would fail.
+#[test]
+fn add_without_selector_defaults_to_remote_default_branch() {
+    let sb = Sandbox::new();
+    sb.git(&["branch", "-m", "trunk"]);
+    sb.ok(&["init", "--target", "claude"]);
+    let out = sb.ok(&["add", &sb.skill_url(), "--name", "greet"]);
+
+    // The chosen default is shown, not applied silently.
+    assert!(out.contains("default branch `trunk`"), "{out}");
+
+    // ai.json records an explicit branch; ai.lock pins the commit it pointed at.
+    let manifest: serde_json::Value = serde_json::from_str(&sb.read("ai.json")).unwrap();
+    assert_eq!(manifest["skills"]["greet"]["branch"], "trunk", "{manifest}");
+    assert!(
+        manifest["skills"]["greet"].get("tag").is_none(),
+        "{manifest}"
+    );
+    let lock = sb.read("ai.lock");
+    assert!(lock.contains("\"reference\": \"branch:trunk\""), "{lock}");
+    assert!(lock.contains(&skill_head(&sb.skill_repo)), "{lock}");
+    assert!(sb
+        .claude_market_dir()
+        .join("plugin/skills/greet/SKILL.md")
+        .exists());
+}
+
+#[test]
+fn add_all_without_selector_defaults_to_remote_default_branch() {
+    let sb = Sandbox::new();
+    sb.git(&["branch", "-m", "trunk"]);
+    sb.add_skill_pack();
+    sb.ok(&["init", "--target", "claude"]);
+    let out = sb.ok(&["add", &sb.skill_url(), "--path", "pack", "--all"]);
+    assert!(out.contains("default branch `trunk`"), "{out}");
+
+    let manifest: serde_json::Value = serde_json::from_str(&sb.read("ai.json")).unwrap();
+    for name in ["alpha", "beta"] {
+        assert_eq!(manifest["skills"][name]["branch"], "trunk", "{manifest}");
+    }
+    assert!(sb.read("ai.lock").contains(&skill_head(&sb.skill_repo)));
+}
+
+#[test]
+fn add_plugin_without_selector_defaults_to_remote_default_branch() {
+    let sb = Sandbox::new();
+    sb.git(&["branch", "-m", "trunk"]);
+    sb.add_plugin();
+    sb.ok(&["init", "--target", "claude"]);
+    let out = sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--path",
+        "pkg",
+        "--plugin",
+        "--name",
+        "ds",
+    ]);
+    assert!(out.contains("default branch `trunk`"), "{out}");
+
+    let manifest: serde_json::Value = serde_json::from_str(&sb.read("ai.json")).unwrap();
+    assert_eq!(manifest["plugins"]["ds"]["branch"], "trunk", "{manifest}");
+    assert!(sb.read("ai.lock").contains(&skill_head(&sb.skill_repo)));
+}
+
+/// An explicit selector is used as-is: no default-branch lookup, no message.
+#[test]
+fn add_with_explicit_selector_does_not_use_default_branch() {
+    let sb = Sandbox::new();
+    sb.git(&["branch", "other"]);
+    sb.git(&["branch", "-m", "trunk"]);
+    sb.ok(&["init", "--target", "claude"]);
+    let out = sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "other",
+        "--name",
+        "greet",
+    ]);
+    assert!(!out.contains("default branch"), "{out}");
+    let manifest: serde_json::Value = serde_json::from_str(&sb.read("ai.json")).unwrap();
+    assert_eq!(manifest["skills"]["greet"]["branch"], "other", "{manifest}");
+
+    let out = sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--tag",
+        "v0.1.0",
+        "--name",
+        "pinned",
+    ]);
+    assert!(!out.contains("default branch"), "{out}");
+    let manifest: serde_json::Value = serde_json::from_str(&sb.read("ai.json")).unwrap();
+    assert_eq!(manifest["skills"]["pinned"]["tag"], "v0.1.0", "{manifest}");
+    assert!(
+        manifest["skills"]["pinned"].get("branch").is_none(),
+        "{manifest}"
+    );
+}
+
+#[test]
+fn add_still_rejects_multiple_selectors() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    let out = sb.spm(&[
+        "add",
+        &sb.skill_url(),
+        "--tag",
+        "v0.1.0",
+        "--branch",
+        "main",
+    ]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("cannot be used with"), "{err}");
+}
+
+/// A remote whose `HEAD` is detached has no default branch: fail clearly and
+/// leave `ai.json` untouched rather than recording an empty/guessed branch.
+#[test]
+fn add_without_selector_errors_when_default_branch_unresolvable() {
+    let sb = Sandbox::new();
+    sb.git(&["checkout", "-q", "--detach"]);
+    sb.ok(&["init", "--target", "claude"]);
+    let before = sb.read("ai.json");
+    let out = sb.spm(&["add", &sb.skill_url(), "--name", "greet"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("could not determine the default branch"),
+        "{err}"
+    );
+    assert!(!err.contains("panicked"), "{err}");
+    assert_eq!(sb.read("ai.json"), before);
+}
+
 #[test]
 fn scan_command_fails_on_nonexistent_path() {
     let sb = Sandbox::new();
