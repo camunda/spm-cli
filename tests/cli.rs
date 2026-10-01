@@ -668,6 +668,81 @@ fn remove_prunes_skill() {
 }
 
 #[test]
+fn rm_alias_behaves_like_remove() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    sb.ok(&["rm", "greet"]);
+
+    assert!(!sb.read("ai.json").contains("greet"));
+    let skills_dir = sb.claude_market_dir().join("plugin/skills");
+    assert!(std::fs::read_dir(&skills_dir).unwrap().next().is_none());
+}
+
+#[test]
+fn i_alias_behaves_like_install() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let lock_before = sb.read("ai.lock");
+
+    assert_eq!(sb.ok(&["i"]), sb.ok(&["install"]));
+    assert_eq!(lock_before, sb.read("ai.lock"));
+}
+
+#[test]
+fn ls_alias_behaves_like_list() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+
+    let out = sb.ok(&["ls"]);
+    assert!(out.contains("greet"), "{out}");
+    assert_eq!(out, sb.ok(&["list"]));
+}
+
+#[cfg(unix)]
+#[test]
+fn aliases_accept_the_global_flag() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "-g", "--target", "copilot"]);
+    sb.ok(&[
+        "add",
+        "-g",
+        &sb.skill_url(),
+        "--tag",
+        "v0.1.0",
+        "--name",
+        "greet",
+    ]);
+
+    let listed = sb.ok(&["ls", "-g"]);
+    assert!(listed.contains("greet"), "{listed}");
+    assert_eq!(listed, sb.ok(&["list", "-g"]));
+
+    assert_eq!(sb.ok(&["i", "-g"]), sb.ok(&["install", "-g"]));
+
+    sb.ok(&["rm", "-g", "greet"]);
+    assert!(!sb.copilot_global_skills().join("greet").exists());
+}
+
+#[test]
+fn aliases_are_shown_in_help() {
+    let sb = Sandbox::new();
+    let help = sb.ok(&["--help"]);
+    for (cmd, alias) in [("install", "i"), ("remove", "rm"), ("list", "ls")] {
+        let row = help
+            .lines()
+            .find(|l| l.trim_start().starts_with(cmd))
+            .unwrap_or_else(|| panic!("no `{cmd}` row in help: {help}"));
+        assert!(
+            row.contains(&format!("[alias: {alias}]")),
+            "`{cmd}` row should advertise `{alias}`: {row}"
+        );
+    }
+}
+
+#[test]
 fn install_is_idempotent_from_lock() {
     let sb = Sandbox::new();
     sb.ok(&["init", "--target", "claude"]);
@@ -760,6 +835,108 @@ fn unknown_target_is_rejected() {
     let out = sb.spm(&["init", "--target", "nonsense"]);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("unknown target"));
+}
+
+/// Every command that loads the manifest, run with no `ai.json` present.
+fn manifest_loading_commands(sb: &Sandbox) -> Vec<Vec<String>> {
+    let url = sb.skill_url();
+    [
+        vec!["list"],
+        vec!["status"],
+        vec!["install"],
+        vec!["update"],
+        vec!["clean"],
+        vec!["remove", "greet"],
+        vec!["add", &url, "--tag", "v0.1.0"],
+    ]
+    .into_iter()
+    .map(|args| args.into_iter().map(String::from).collect())
+    .collect()
+}
+
+#[test]
+fn missing_manifest_hints_spm_init() {
+    let sb = Sandbox::new();
+    let mut commands = manifest_loading_commands(&sb);
+    commands.push(vec!["target".into(), "add".into(), "claude".into()]);
+    for args in commands {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = sb.spm(&args);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "spm {args:?}: {err}");
+        // The original message is preserved for scripts that match on it.
+        assert!(
+            err.starts_with("error: no ai.json found at "),
+            "spm {args:?}: {err}"
+        );
+        assert!(
+            err.trim_end()
+                .ends_with("\nhint: run `spm init` to create one"),
+            "spm {args:?}: {err}"
+        );
+    }
+}
+
+#[test]
+fn missing_global_manifest_hints_spm_init_global() {
+    let sb = Sandbox::new();
+    for args in manifest_loading_commands(&sb) {
+        let mut args: Vec<&str> = args.iter().map(String::as_str).collect();
+        args.push("--global");
+        let out = sb.spm(&args);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "spm {args:?}: {err}");
+        assert!(
+            err.starts_with("error: no ai.json found at "),
+            "spm {args:?}: {err}"
+        );
+        assert!(
+            err.trim_end()
+                .ends_with("\nhint: run `spm init --global` to create one"),
+            "spm {args:?}: {err}"
+        );
+    }
+}
+
+#[test]
+fn malformed_manifest_does_not_hint_spm_init() {
+    let sb = Sandbox::new();
+    std::fs::write(sb.project.join("ai.json"), "{ not json").unwrap();
+    let out = sb.spm(&["list"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("parsing "), "{err}");
+    assert!(!err.contains("hint"), "{err}");
+    assert!(!err.contains("spm init"), "{err}");
+}
+
+#[test]
+fn schema_invalid_manifest_does_not_hint_spm_init() {
+    let sb = Sandbox::new();
+    std::fs::write(
+        sb.project.join("ai.json"),
+        r#"{"targets":["bogus"],"skills":{}}"#,
+    )
+    .unwrap();
+    let out = sb.spm(&["list"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("does not match schema"), "{err}");
+    assert!(!err.contains("hint"), "{err}");
+}
+
+/// A manifest that exists but cannot be read (here: `ai.json` is a directory,
+/// which fails with a non-`NotFound` error on every platform and, unlike a
+/// chmod, also fails when the tests run as root) must not suggest `spm init`.
+#[test]
+fn unreadable_manifest_does_not_hint_spm_init() {
+    let sb = Sandbox::new();
+    std::fs::create_dir(sb.project.join("ai.json")).unwrap();
+    let out = sb.spm(&["list"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("no ai.json found at "), "{err}");
+    assert!(!err.contains("hint"), "{err}");
 }
 
 #[test]
@@ -3011,6 +3188,144 @@ fn scan_command_clean_on_benign_dir() {
     assert!(out.contains("no suspicious patterns"), "{out}");
 }
 
+/// With no selector, `spm add` follows the remote's `HEAD`. The repo's default
+/// branch is deliberately not `main`, so a hard-coded guess would fail.
+#[test]
+fn add_without_selector_defaults_to_remote_default_branch() {
+    let sb = Sandbox::new();
+    sb.git(&["branch", "-m", "trunk"]);
+    sb.ok(&["init", "--target", "claude"]);
+    let out = sb.ok(&["add", &sb.skill_url(), "--name", "greet"]);
+
+    // The chosen default is shown, not applied silently.
+    assert!(out.contains("default branch `trunk`"), "{out}");
+
+    // ai.json records an explicit branch; ai.lock pins the commit it pointed at.
+    let manifest: serde_json::Value = serde_json::from_str(&sb.read("ai.json")).unwrap();
+    assert_eq!(manifest["skills"]["greet"]["branch"], "trunk", "{manifest}");
+    assert!(
+        manifest["skills"]["greet"].get("tag").is_none(),
+        "{manifest}"
+    );
+    let lock = sb.read("ai.lock");
+    assert!(lock.contains("\"reference\": \"branch:trunk\""), "{lock}");
+    assert!(lock.contains(&skill_head(&sb.skill_repo)), "{lock}");
+    assert!(sb
+        .claude_market_dir()
+        .join("plugin/skills/greet/SKILL.md")
+        .exists());
+}
+
+#[test]
+fn add_all_without_selector_defaults_to_remote_default_branch() {
+    let sb = Sandbox::new();
+    sb.git(&["branch", "-m", "trunk"]);
+    sb.add_skill_pack();
+    sb.ok(&["init", "--target", "claude"]);
+    let out = sb.ok(&["add", &sb.skill_url(), "--path", "pack", "--all"]);
+    assert!(out.contains("default branch `trunk`"), "{out}");
+
+    let manifest: serde_json::Value = serde_json::from_str(&sb.read("ai.json")).unwrap();
+    for name in ["alpha", "beta"] {
+        assert_eq!(manifest["skills"][name]["branch"], "trunk", "{manifest}");
+    }
+    assert!(sb.read("ai.lock").contains(&skill_head(&sb.skill_repo)));
+}
+
+#[test]
+fn add_plugin_without_selector_defaults_to_remote_default_branch() {
+    let sb = Sandbox::new();
+    sb.git(&["branch", "-m", "trunk"]);
+    sb.add_plugin();
+    sb.ok(&["init", "--target", "claude"]);
+    let out = sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--path",
+        "pkg",
+        "--plugin",
+        "--name",
+        "ds",
+    ]);
+    assert!(out.contains("default branch `trunk`"), "{out}");
+
+    let manifest: serde_json::Value = serde_json::from_str(&sb.read("ai.json")).unwrap();
+    assert_eq!(manifest["plugins"]["ds"]["branch"], "trunk", "{manifest}");
+    assert!(sb.read("ai.lock").contains(&skill_head(&sb.skill_repo)));
+}
+
+/// An explicit selector is used as-is: no default-branch lookup, no message.
+#[test]
+fn add_with_explicit_selector_does_not_use_default_branch() {
+    let sb = Sandbox::new();
+    sb.git(&["branch", "other"]);
+    sb.git(&["branch", "-m", "trunk"]);
+    sb.ok(&["init", "--target", "claude"]);
+    let out = sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "other",
+        "--name",
+        "greet",
+    ]);
+    assert!(!out.contains("default branch"), "{out}");
+    let manifest: serde_json::Value = serde_json::from_str(&sb.read("ai.json")).unwrap();
+    assert_eq!(manifest["skills"]["greet"]["branch"], "other", "{manifest}");
+
+    let out = sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--tag",
+        "v0.1.0",
+        "--name",
+        "pinned",
+    ]);
+    assert!(!out.contains("default branch"), "{out}");
+    let manifest: serde_json::Value = serde_json::from_str(&sb.read("ai.json")).unwrap();
+    assert_eq!(manifest["skills"]["pinned"]["tag"], "v0.1.0", "{manifest}");
+    assert!(
+        manifest["skills"]["pinned"].get("branch").is_none(),
+        "{manifest}"
+    );
+}
+
+#[test]
+fn add_still_rejects_multiple_selectors() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    let out = sb.spm(&[
+        "add",
+        &sb.skill_url(),
+        "--tag",
+        "v0.1.0",
+        "--branch",
+        "main",
+    ]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("cannot be used with"), "{err}");
+}
+
+/// A remote whose `HEAD` is detached has no default branch: fail clearly and
+/// leave `ai.json` untouched rather than recording an empty/guessed branch.
+#[test]
+fn add_without_selector_errors_when_default_branch_unresolvable() {
+    let sb = Sandbox::new();
+    sb.git(&["checkout", "-q", "--detach"]);
+    sb.ok(&["init", "--target", "claude"]);
+    let before = sb.read("ai.json");
+    let out = sb.spm(&["add", &sb.skill_url(), "--name", "greet"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("could not determine the default branch"),
+        "{err}"
+    );
+    assert!(!err.contains("panicked"), "{err}");
+    assert_eq!(sb.read("ai.json"), before);
+}
+
 #[test]
 fn scan_command_fails_on_nonexistent_path() {
     let sb = Sandbox::new();
@@ -3106,15 +3421,11 @@ fn add_github_shorthand_without_ref_uses_the_version_flag() {
 }
 
 #[test]
-fn add_github_shorthand_without_any_ref_still_needs_a_selector() {
-    let sb = Sandbox::new();
-    sb.ok(&["init", "--target", "claude"]);
-    let before = sb.read("ai.json");
-    let out = sb.spm_github(&["add", "github.com/owner/repo"]);
-    assert!(!out.status.success());
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(err.contains("set one of tag/branch/commit"), "{err}");
-    assert_eq!(sb.read("ai.json"), before);
+fn add_github_shorthand_without_ref_uses_default_branch() {
+    let short = github_add_manifest(&["github.com/owner/repo"]);
+    let full = github_add_manifest(&["https://github.com/owner/repo.git"]);
+    assert_eq!(short, full);
+    assert!(short.contains("\"branch\": \"main\""), "{short}");
 }
 
 #[test]

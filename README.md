@@ -10,6 +10,11 @@ AI tool (Amp, Claude Code, Cline, OpenAI Codex CLI, GitHub Copilot CLI, Cursor, 
 skills to your repo**. Anything spm materializes into the working tree is
 gitignored — no symlinks, no skills under version control.
 
+🌐 Manage skills at **project scope** (the default — tracked in `ai.json`, shared
+with your team) or **user-global scope** (`-g`/`--global` on the scope-aware
+commands — one skill set available to *every* project on your machine). See
+[Global skills](#global-skills--g----global).
+
 📖 **Documentation:** <https://camunda.github.io/spm-cli/> (built from
 [`docs/`](docs/) and deployed via GitHub Pages).
 
@@ -79,6 +84,10 @@ Version selectors (exactly one per skill):
 | `commit` | exact commit                               | itself         |
 
 `path` (optional) selects a subdirectory — for monorepos holding many skills.
+
+`spm add` with no selector uses the remote's default branch and writes it to
+`ai.json` as an explicit `branch` (the chosen branch is printed). A hand-edited
+entry must still set exactly one selector.
 
 ### Full plugins (`plugins`)
 
@@ -159,6 +168,7 @@ records the expanded URL, never the shorthand. Anything not starting with
 spm add github.com/org/repo@v1.0.0        # = spm add https://github.com/org/repo.git --tag v1.0.0
 spm add github.com/org/repo@main          # = ... --branch main
 spm add github.com/org/repo --tag v1.0.0  # shorthand URL, explicit flag
+spm add github.com/org/repo               # no selector = remote's default branch
 ```
 
 **Any git host works** — apart from that GitHub-only shorthand, spm shells out to
@@ -241,14 +251,14 @@ make install PREFIX=~/.local  # or a custom prefix
 
 ```bash
 spm init [--target amp|claude|cline|codex|copilot|cursor|gemini|windsurf ...] [-g]  # scaffold ai.json (repeatable / comma-separated)
-spm add <git> [--tag|--branch|--commit <v>] \      # add + install a skill; the version flag is required unless <git> is github.com/owner/repo@ref
+spm add <git> [--tag|--branch|--commit <v>] \      # add + install a skill (no selector = default branch; github.com/owner/repo@ref also works)
         [--path <subdir>] [--name <local-name>] [--all] [-g]  # --all: add every skill under --path
         [--plugin]                                 # --plugin: add a full plugin (see "Full plugins")
 spm target add [vendor ...]                        # add target vendor(s); no arg = pick interactively
-spm remove <name> [--plugin] [-g]                  # drop a skill (or a plugin with --plugin)
+spm remove <name> [--plugin] [-g]                  # drop a skill (or a plugin with --plugin); alias: rm
 spm update [name] [-g]                              # re-resolve branches/tags to latest
-spm install [-g]                                   # rebuild from ai.lock (after clone)
-spm list [-g]                                      # show skills + pinned commits
+spm install [-g]                                   # rebuild from ai.lock (after clone); alias: i
+spm list [-g]                                      # show skills + pinned commits; alias: ls
 spm status [-g]                                    # check skills are materialized in this checkout
 spm clean [-g]                                     # remove generated vendor config
 spm prune [--yes]                                  # wipe the global fetch cache ($SPM_HOME/store, default ~/.spm/store)
@@ -284,8 +294,11 @@ To override the gate for content you trust (or a false positive), set
 ## Global skills (`-g` / `--global`)
 
 By default every command operates on the **project** in the current directory.
-Pass `-g` (`--global`) to instead manage a **user-global** set of skills that is
-available to your AI tools in *every* project:
+Scope-aware commands (`init`, `add`, `remove`, `update`, `install`, `list`,
+`status`, `clean`) accept `-g` (`--global`) to instead manage a **user-global**
+set of skills that is available to your AI tools in *every* project. `spm target
+add`, `spm prune`, and `spm scan` aren't scope-aware: `prune` always wipes the
+shared global fetch cache and `scan` always operates on a path.
 
 ```bash
 spm init -g --target copilot                       # create the global manifest ($SPM_HOME/ai.json)
@@ -322,9 +335,12 @@ spm clean  -g                                      # remove global vendor config
     registered in `~/.claude/settings.json` under the marketplace name
     `spm-global` (skills invoked as `/spm-global:<name>`). A distinct name keeps
     it from colliding with a project's `spm` marketplace.
-- A skill installed in **both** scopes collides by name at discovery time
-  (`/spm:foo` vs `/spm-global:foo` for Claude; a duplicate `foo` dir for
-  Copilot). `spm status` warns when it detects such a global/project shadow.
+- A skill installed in **both** scopes collides by name at discovery time for
+  the shared-dir targets (Copilot, Gemini, Codex, Cursor, Cline, Windsurf, Amp —
+  a duplicate `foo` dir). Claude doesn't collide: `/spm:foo` (project) and
+  `/spm-global:foo` (global) are distinct, namespaced commands. Either way, `spm
+  status` warns on a same-name skill across scopes, since it compares the names
+  recorded in each scope's `ai.lock`.
 
 ## Worktrees & fresh clones
 
@@ -396,4 +412,3 @@ A **pre-commit hook** (fmt + clippy) installs itself automatically via
 (or `cargo build`) once after cloning and the hook lands in `.git/hooks`. The
 hook source lives in [`.cargo-husky/hooks/`](.cargo-husky/hooks). Bypass a
 single commit with `git commit --no-verify`.
-

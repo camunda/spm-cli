@@ -1,4 +1,5 @@
-use anyhow::{bail, Context, Result};
+use crate::scope::Scope;
+use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -178,10 +179,20 @@ impl Manifest {
         dir.join(MANIFEST_FILE)
     }
 
-    pub fn load(dir: &Path) -> Result<Self> {
+    /// Load and validate `dir`'s manifest. `scope` only picks the `spm init`
+    /// invocation named in the hint when the file is missing.
+    pub fn load(dir: &Path, scope: &Scope) -> Result<Self> {
         let p = Self::path_in(dir);
-        let text = std::fs::read_to_string(&p)
-            .with_context(|| format!("no {MANIFEST_FILE} found at {}", p.display()))?;
+        let text = std::fs::read_to_string(&p).map_err(|e| {
+            // Hint only when the file is genuinely absent: for unreadable or
+            // unparsable manifests `spm init` would not help.
+            let cause = if e.kind() == std::io::ErrorKind::NotFound {
+                anyhow!("{e}\nhint: run `{}` to create one", scope.init_command())
+            } else {
+                anyhow!(e)
+            };
+            cause.context(format!("no {MANIFEST_FILE} found at {}", p.display()))
+        })?;
         let value: serde_json::Value =
             serde_json::from_str(&text).with_context(|| format!("parsing {}", p.display()))?;
         crate::schema::validate(&value).with_context(|| format!("in {}", p.display()))?;

@@ -5,41 +5,36 @@ the authoritative, version-specific usage.
 
 ```bash
 spm init [--target amp|claude|cline|codex|copilot|cursor|gemini|windsurf ...] [-g]  # scaffold ai.json (repeatable / comma-separated)
-spm add <git> [--tag|--branch|--commit <v>] \      # add + install a skill; the version flag is required unless <git> is github.com/owner/repo@ref
+spm add <git> [--tag|--branch|--commit <v>] \      # add + install a skill (no selector = default branch; github.com/owner/repo@ref also works)
         [--path <subdir>] [--name <local-name>] [--all] [--force] [-g]  # --all: add every skill under --path
         [--plugin]                                 # --plugin: add a full plugin instead of a skill
 spm target add [vendor ...]                        # add target vendor(s); no arg = pick interactively
-spm remove <name> [--plugin] [-g]                  # drop a skill (or a plugin with --plugin)
+spm remove <name> [--plugin] [-g]                  # drop a skill (or a plugin with --plugin); alias: rm
 spm update [name] [-g]                             # re-resolve branches/tags to latest
-spm install [-g]                                   # rebuild from ai.lock (after clone)
-spm list [-g]                                      # show skills + pinned commits
+spm install [-g]                                   # rebuild from ai.lock (after clone); alias: i
+spm list [-g]                                      # show skills + pinned commits; alias: ls
 spm status [-g]                                    # check skills are materialized in this checkout
 spm clean [-g]                                     # remove generated vendor config
 spm prune [--yes]                                  # wipe the global fetch cache ($SPM_HOME/store, default ~/.spm/store)
 spm scan [path]                                    # scan skill content for suspicious patterns (default: .)
 ```
 
+Three commands have short aliases that behave identically, including `-g`:
+`spm i` for `spm install`, `spm rm <name>` for `spm remove <name>`, and `spm ls`
+for `spm list`.
+
 ## Scope: project (default) vs. global (`-g`)
 
-Every command except `target add` and `prune` accepts `-g` / `--global`. Without
-it, the command operates on the **project** in the current directory. With it,
-the command manages a **user-global** set of skills available to your AI tools in
-every project:
-
-- The global **manifest + lock** live under `$SPM_HOME` (default `~/.spm/ai.json`
-  / `~/.spm/ai.lock`) and reuse the same fetch cache as project installs.
-- Global skills materialize into user-global vendor locations:
-  `~/.copilot/skills/<name>/` for Copilot, `~/.gemini/skills/<name>/` for Gemini,
-  `~/.agents/skills/<name>/` for Codex, `~/.cursor/skills/<name>/` for Cursor,
-  `~/.cline/skills/<name>/` for Cline, `~/.codeium/windsurf/skills/<name>/` for
-  Windsurf, `~/.config/agents/skills/<name>/` for Amp, and a marketplace under
-  `$SPM_HOME/claude-global/` registered in `~/.claude/settings.json` as
-  `spm-global` (skills invoked as `/spm-global:<name>`) for Claude.
-- The shared-dir tools' global dirs (Copilot, Gemini, Codex, Cursor, Cline,
-  Windsurf, Amp) are shared with your hand-authored skills, so spm only touches
-  the entries it manages there — it never wipes the directory.
-- `spm status` warns when a skill name is installed in **both** scopes, since the
-  two collide by name at discovery time.
+Scope-aware commands (`init`, `add`, `remove`, `update`, `install`, `list`,
+`status`, `clean`) accept `-g` / `--global`; `spm target add`, `spm prune`, and
+`spm scan` don't (`prune` always wipes the shared global fetch cache and `scan`
+always operates on a path). Without `-g`, a scope-aware command operates on the
+**project** in the current directory. With it, it manages a **user-global** set
+of skills available to your AI tools in *every* project, with its own
+manifest/lock under `$SPM_HOME` and its own per-vendor materialization
+locations. See [Global Skills](/guide/global-skills) for the full concept, where
+each vendor materializes global skills, and how cross-scope name collisions are
+handled.
 
 ```bash
 spm init -g --target copilot
@@ -57,7 +52,7 @@ one or more vendors up front.
 ### `spm add`
 
 Adds a skill to `ai.json`, resolves it to an immutable commit, pins it in
-`ai.lock`, and materializes it — in one step. Provide exactly one version
+`ai.lock`, and materializes it — in one step. Provide at most one version
 selector:
 
 | flag       | meaning                                  |
@@ -77,6 +72,14 @@ URL, never the shorthand; any other input is passed through untouched.
 ```bash
 spm add github.com/org/repo@v1.0.0   # = spm add https://github.com/org/repo.git --tag v1.0.0
 ```
+
+With **no** selector, `spm add` resolves the remote's default branch (what its
+`HEAD` points at), prints the branch it chose, and records it in `ai.json` as an
+explicit `branch` entry, so `spm update` keeps working as for any branch
+dependency. `ai.lock` still pins the commit the branch pointed at. If the
+default branch can't be determined (an empty repository or a detached `HEAD`),
+`spm add` fails and asks you to pass a selector. Only `spm add` fills in a
+default: a hand-edited `ai.json` entry must still set exactly one selector.
 
 - `--path <subdir>` selects a subdirectory (for monorepos holding many skills).
 - `--name <local-name>` sets the `ai.json` key for the skill.

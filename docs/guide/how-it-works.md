@@ -16,10 +16,11 @@ ai.json ──resolve──▶ ai.lock ──fetch──▶ ~/.spm/store/<repo>@
 - **Global store** (`~/.spm/store`) — a **fetch cache only**: each repo@commit is
   cloned once and shared across all projects. Nothing is *registered* or
   *materialized* here — it exists purely so repeated installs don't re-clone.
-- **Vendor projection** — spm copies the store's skills into a **project-local**
-  directory wherever each vendor loads them from. Nothing spm generates is
-  committed to your repo, and nothing is written into a user-global vendor
-  location.
+- **Vendor projection** — spm copies the store's skills into the directory
+  where each vendor loads them from. By default that's a **project-local**
+  directory — nothing spm generates is committed to your repo. Pass `-g` /
+  `--global` to project into a **user-global** vendor location instead, shared
+  across every project on your machine. See [Global Skills](/guide/global-skills).
 
 ## Resolve → fetch → project
 
@@ -28,11 +29,16 @@ ai.json ──resolve──▶ ai.lock ──fetch──▶ ~/.spm/store/<repo>@
    their commit; a branch resolves to its tip at install/update time.
 2. **Fetch.** spm clones `<repo>@<sha>` into `~/.spm/store` once. Subsequent
    installs across any project reuse that clone.
-3. **Project.** spm copies the resolved skill(s) into the project-local directory
-   each target vendor discovers them from, and adds that directory to
-   `.gitignore`.
+3. **Project.** spm copies the resolved skill(s) into the directory each target
+   vendor discovers them from — project-local by default, or a user-global
+   location with `-g` (see [Global Skills](/guide/global-skills)). In project
+   scope that directory is added to `.gitignore`; global scope has no repo, so
+   nothing is gitignored there.
 
 ## Registration per vendor
+
+The following describes **project scope** (the default). For how each vendor
+registers **global** (`-g`) skills instead, see [Global Skills](/guide/global-skills).
 
 Registration differs by target — see [Targets & Vendors](/guide/targets) for the
 full detail:

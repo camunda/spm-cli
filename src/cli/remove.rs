@@ -5,7 +5,7 @@ use anyhow::{bail, Result};
 
 pub(super) fn remove(scope: &Scope, name: &str, plugin: bool) -> Result<()> {
     let dir = scope.manifest_dir()?;
-    let mut manifest = Manifest::load(&dir)?;
+    let mut manifest = Manifest::load(&dir, scope)?;
     let (removed, kind) = if plugin {
         (manifest.plugins.remove(name).is_some(), "plugin")
     } else {

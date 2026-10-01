@@ -74,6 +74,7 @@ enum Command {
         command: TargetCommand,
     },
     /// Remove a skill (or, with --plugin, a plugin) dependency.
+    #[command(visible_alias = "rm")]
     Remove {
         name: String,
         /// Remove a plugin dependency instead of a skill.
@@ -90,11 +91,13 @@ enum Command {
         scope: ScopeArg,
     },
     /// Fetch + materialize everything from ai.lock (use after cloning).
+    #[command(visible_alias = "i")]
     Install {
         #[command(flatten)]
         scope: ScopeArg,
     },
     /// List declared skills and plugins with their locked commits.
+    #[command(visible_alias = "ls")]
     List {
         #[command(flatten)]
         scope: ScopeArg,

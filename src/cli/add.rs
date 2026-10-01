@@ -33,7 +33,7 @@ pub(super) fn add(scope: &Scope, req: AddRequest) -> Result<()> {
     // version selector) before anything else, so the manifest records the URL.
     let (git, version) = shorthand::expand(git, version)?;
     let dir = scope.manifest_dir()?;
-    let mut manifest = Manifest::load(&dir)?;
+    let mut manifest = Manifest::load(&dir, scope)?;
     if let Some(sub) = &path {
         crate::manifest::validate_subpath(sub)?;
     }
@@ -94,6 +94,7 @@ pub(super) fn add(scope: &Scope, req: AddRequest) -> Result<()> {
                 if plugin { "--plugin " } else { "" }
             );
         }
+        let version = with_default_branch(&git, version)?;
         let spec = SkillSpec {
             git,
             tag: version.tag,
@@ -114,6 +115,20 @@ pub(super) fn add(scope: &Scope, req: AddRequest) -> Result<()> {
     Ok(())
 }
 
+/// When no `--tag`/`--branch`/`--commit` was given, default to the remote's
+/// default branch so `ai.json` still records an explicit `branch` (and `spm
+/// update` keeps working). Only `add` fills this in; `SkillSpec::version()` stays
+/// strict for hand-edited manifests. Explicit selectors pass through untouched,
+/// including a conflicting combination, which `version()` still rejects.
+fn with_default_branch(git: &str, mut version: VersionArg) -> Result<VersionArg> {
+    if version.tag.is_none() && version.branch.is_none() && version.commit.is_none() {
+        let branch = crate::git::default_branch(git)?;
+        println!("no --tag/--branch/--commit given; using default branch `{branch}`");
+        version.branch = Some(branch);
+    }
+    Ok(version)
+}
+
 /// `spm add --all`: treat `path` as a *container* and add every skill inside it
 /// (each immediate subdirectory carrying a `SKILL.md`) as its own manifest entry,
 /// keyed by the subdirectory name. This is the one-shot equivalent of the
@@ -129,6 +144,7 @@ fn add_all(
     force: bool,
 ) -> Result<()> {
     let dir = scope.manifest_dir()?;
+    let version = with_default_branch(&git, version)?;
     // Version selector is validated once for the container; every derived entry
     // reuses it verbatim.
     let container = SkillSpec {
