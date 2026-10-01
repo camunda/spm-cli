@@ -3596,6 +3596,29 @@ fn protocol_flag_uses_non_rewritable_urls_as_given() {
     assert!(sb.read("ai.json").contains(&url));
 }
 
+/// Regression test: without a `--tag`/`--branch`/`--commit` selector, `add`
+/// first looks up the remote's default branch before resolving it. That
+/// lookup must go through the same `--protocol` override as the rest of the
+/// sync, not bypass it and contact the URL exactly as given.
+#[test]
+fn protocol_flag_applies_to_the_default_branch_lookup() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    let good = sb.skill_url();
+    // Only the HTTPS form is served; the SSH URL the user typed is unreachable.
+    let out = sb.spm_remotes(
+        &["add", SSH_URL, "--protocol", "https", "--name", "greet"],
+        &[(HTTPS_URL, &good)],
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("default branch"), "{stdout}");
+
+    let manifest = sb.read("ai.json");
+    assert!(manifest.contains(SSH_URL), "{manifest}");
+    assert!(!manifest.contains("https://"), "{manifest}");
+}
+
 #[test]
 fn without_the_flags_the_url_is_used_as_given_with_no_retry() {
     let sb = Sandbox::new();

@@ -331,13 +331,17 @@ pub fn remote_ref_names(url: &str, refspecs: &[&str]) -> Result<Vec<String>> {
 /// via `git ls-remote --symref <url> HEAD`. Errors, rather than guessing, when
 /// the remote reports no symbolic `HEAD` (empty repo, detached `HEAD`).
 pub fn default_branch(url: &str) -> Result<String> {
-    let out = git(&["ls-remote", "--symref", url, "HEAD"], None)?;
+    let out = with_transport(transport(), url, default_branch_once)?;
     parse_default_branch(&out).with_context(|| {
         format!(
             "could not determine the default branch of {url} (empty repository or detached \
              HEAD?); pass --branch, --tag or --commit explicitly"
         )
     })
+}
+
+fn default_branch_once(url: &str) -> Result<String> {
+    git(&["ls-remote", "--symref", url, "HEAD"], None)
 }
 
 /// Extract the branch name from the `ref: refs/heads/<name>\tHEAD` line that
