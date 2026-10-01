@@ -80,6 +80,10 @@ Version selectors (exactly one per skill):
 
 `path` (optional) selects a subdirectory — for monorepos holding many skills.
 
+`spm add` with no selector uses the remote's default branch and writes it to
+`ai.json` as an explicit `branch` (the chosen branch is printed). A hand-edited
+entry must still set exactly one selector.
+
 ### Full plugins (`plugins`)
 
 Alongside individual `skills`, `ai.json` can depend on a **full Claude Code
@@ -226,7 +230,7 @@ make install PREFIX=~/.local  # or a custom prefix
 
 ```bash
 spm init [--target amp|claude|cline|codex|copilot|cursor|gemini|windsurf ...] [-g]  # scaffold ai.json (repeatable / comma-separated)
-spm add <git> (--tag|--branch|--commit <v>) \      # add + install a skill
+spm add <git> [--tag|--branch|--commit <v>] \      # add + install a skill (no selector = default branch)
         [--path <subdir>] [--name <local-name>] [--all] [-g]  # --all: add every skill under --path
         [--plugin]                                 # --plugin: add a full plugin (see "Full plugins")
 spm target add [vendor ...]                        # add target vendor(s); no arg = pick interactively

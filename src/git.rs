@@ -55,6 +55,31 @@ pub fn ls_remote(url: &str, refspecs: &[&str]) -> Result<String> {
     fallback.context("could not parse ls-remote output")
 }
 
+/// Resolve the remote's default branch (what `HEAD` points at) without cloning,
+/// via `git ls-remote --symref <url> HEAD`. Errors, rather than guessing, when
+/// the remote reports no symbolic `HEAD` (empty repo, detached `HEAD`).
+pub fn default_branch(url: &str) -> Result<String> {
+    let out = git(&["ls-remote", "--symref", url, "HEAD"], None)?;
+    parse_default_branch(&out).with_context(|| {
+        format!(
+            "could not determine the default branch of {url} (empty repository or detached \
+             HEAD?); pass --branch, --tag or --commit explicitly"
+        )
+    })
+}
+
+/// Extract the branch name from the `ref: refs/heads/<name>\tHEAD` line that
+/// `ls-remote --symref` prints ahead of the `<sha>\tHEAD` line.
+fn parse_default_branch(out: &str) -> Option<String> {
+    out.lines()
+        .find_map(|line| {
+            line.strip_prefix("ref: refs/heads/")?
+                .strip_suffix("\tHEAD")
+        })
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+}
+
 /// True if `dir` is a git checkout already sitting at `sha`.
 pub fn is_at_commit(dir: &Path, sha: &str) -> bool {
     if !dir.join(".git").exists() {
@@ -155,6 +180,61 @@ mod tests {
         let err = ls_remote(&url, &["refs/heads/does-not-exist"]).unwrap_err();
         assert!(format!("{err}").contains("not found"), "{err}");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `default_branch` follows the remote's `HEAD`, so a repo whose default
+    /// branch is not `main` (here `trunk`) resolves to that name.
+    #[test]
+    fn default_branch_follows_remote_head() {
+        let dir = scratch("default-branch");
+        make_repo(&dir);
+        assert!(StdCommand::new("git")
+            .args(["branch", "-m", "trunk"])
+            .current_dir(&dir)
+            .status()
+            .unwrap()
+            .success());
+        let url = format!("file://{}", dir.display());
+        assert_eq!(default_branch(&url).unwrap(), "trunk");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A detached `HEAD` has no symbolic ref, so there is no default branch to
+    /// report: fail with a clear error, never an empty name.
+    #[test]
+    fn default_branch_errors_on_detached_head() {
+        let dir = scratch("default-branch-detached");
+        make_repo(&dir);
+        assert!(StdCommand::new("git")
+            .args(["checkout", "-q", "--detach"])
+            .current_dir(&dir)
+            .status()
+            .unwrap()
+            .success());
+        let url = format!("file://{}", dir.display());
+        let err = default_branch(&url).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("could not determine the default branch"),
+            "{err:#}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn parse_default_branch_handles_output_shapes() {
+        assert_eq!(
+            parse_default_branch("ref: refs/heads/trunk\tHEAD\nabc123\tHEAD"),
+            Some("trunk".to_string())
+        );
+        // Branch names may contain slashes.
+        assert_eq!(
+            parse_default_branch("ref: refs/heads/release/1.x\tHEAD\nabc123\tHEAD"),
+            Some("release/1.x".to_string())
+        );
+        // No symref line (detached HEAD), empty output, or an empty name.
+        assert_eq!(parse_default_branch("abc123\tHEAD"), None);
+        assert_eq!(parse_default_branch(""), None);
+        assert_eq!(parse_default_branch("ref: refs/heads/\tHEAD"), None);
     }
 
     /// `is_at_commit` is false both when there's no `.git` at all and when the

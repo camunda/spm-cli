@@ -5,7 +5,7 @@ the authoritative, version-specific usage.
 
 ```bash
 spm init [--target amp|claude|cline|codex|copilot|cursor|gemini|windsurf ...] [-g]  # scaffold ai.json (repeatable / comma-separated)
-spm add <git> (--tag|--branch|--commit <v>) \      # add + install a skill
+spm add <git> [--tag|--branch|--commit <v>] \      # add + install a skill (no selector = default branch)
         [--path <subdir>] [--name <local-name>] [--all] [--force] [-g]  # --all: add every skill under --path
         [--plugin]                                 # --plugin: add a full plugin instead of a skill
 spm target add [vendor ...]                        # add target vendor(s); no arg = pick interactively
@@ -61,7 +61,7 @@ one or more vendors up front.
 ### `spm add`
 
 Adds a skill to `ai.json`, resolves it to an immutable commit, pins it in
-`ai.lock`, and materializes it — in one step. Provide exactly one version
+`ai.lock`, and materializes it — in one step. Provide at most one version
 selector:
 
 | flag       | meaning                                  |
@@ -69,6 +69,14 @@ selector:
 | `--tag`    | git tag (annotated tags deref to commit) |
 | `--branch` | branch tip at install/update time        |
 | `--commit` | exact commit                             |
+
+With **no** selector, `spm add` resolves the remote's default branch (what its
+`HEAD` points at), prints the branch it chose, and records it in `ai.json` as an
+explicit `branch` entry, so `spm update` keeps working as for any branch
+dependency. `ai.lock` still pins the commit the branch pointed at. If the
+default branch can't be determined (an empty repository or a detached `HEAD`),
+`spm add` fails and asks you to pass a selector. Only `spm add` fills in a
+default: a hand-edited `ai.json` entry must still set exactly one selector.
 
 - `--path <subdir>` selects a subdirectory (for monorepos holding many skills).
 - `--name <local-name>` sets the `ai.json` key for the skill.
