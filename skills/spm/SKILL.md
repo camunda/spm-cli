@@ -114,7 +114,10 @@ The URL can be any form `git` understands: `https://...`, `git@host:org/repo.git
   with no equivalent form (a port, `file://`, a local path) is used as given.
   `--protocol-fallback` retries once over the other protocol after a network or
   auth failure (never for a missing ref) and reports which one worked. Both are
-  off by default, and `ai.json`/`ai.lock` always keep the URL you supplied.
+  off by default. The protocol rewrite affects only the URL handed to git, never
+  what is persisted: `ai.json` and `ai.lock` keep the URL as recorded — the
+  expanded `https://github.com/<owner>/<repo>.git` form for a `github.com/...`
+  shorthand, otherwise exactly what you supplied.
   Silent switching can mask a real credential problem, so reach for these only
   when a URL fails for protocol or auth reasons. The same two flags are accepted
   by `install`, `update`, `remove` and `target add`.

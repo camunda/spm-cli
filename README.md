@@ -210,8 +210,11 @@ spm install --protocol-fallback                                      # try as gi
   When it does, spm prints which protocol worked; if both fail, the error lists
   both attempts.
 
-Neither flag changes what is recorded: `ai.json` and `ai.lock` keep the URL you
-supplied. **Use the fallback deliberately:** switching protocols can hide a real
+Neither flag changes what is recorded: `ai.json` and `ai.lock` keep the URL as
+recorded — the expanded `https://github.com/<owner>/<repo>.git` form for a
+`github.com/...` shorthand, otherwise exactly what you supplied; the protocol
+rewrite affects only the URL handed to git. **Use the fallback deliberately:**
+switching protocols can hide a real
 credential problem (an expired SSH key quietly replaced by an anonymous HTTPS
 clone that only works for public repos, or the reverse), which is why it is off
 by default.

@@ -172,8 +172,10 @@ non-zero** when any blocking (high/critical) finding is present, so it works as 
 CI gate on skill sources.
 
 The same scan runs automatically as a **pre-materialize gate**: every skill and
-plugin is scanned right after it is fetched into the store and *before* it is
-copied into any agent-discovered directory, by every command that syncs skills:
+plugin is scanned from its store checkout — fetched only when its pin is new or
+the cached checkout is missing or stale, so a cached dependency is scanned with
+no network access — and *before* it is copied into any agent-discovered
+directory, by every command that syncs skills:
 `spm add`, `spm install`, `spm update`, `spm remove`, and `spm target add`
 (each scans every dependency in `ai.json`). High/critical findings abort the command (nothing is materialized
 and `ai.lock` is not written); medium/low findings are surfaced as warnings.
@@ -236,8 +238,11 @@ spm install --protocol-fallback                                      # try as gi
   When it does, spm prints which protocol worked; if both fail, the error lists
   both attempts.
 
-Neither flag changes what is recorded: `ai.json` and `ai.lock` keep the URL you
-supplied. **Use the fallback deliberately:** switching protocols can hide a real
+Neither flag changes what is recorded: `ai.json` and `ai.lock` keep the URL as
+recorded — the expanded `https://github.com/<owner>/<repo>.git` form for a
+`github.com/...` shorthand, otherwise exactly what you supplied; the protocol
+rewrite affects only the URL handed to git. **Use the fallback deliberately:**
+switching protocols can hide a real
 credential problem (an expired SSH key quietly replaced by an anonymous HTTPS
 clone that only works for public repos, or the reverse), which is why it is off
 by default.
