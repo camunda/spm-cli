@@ -57,6 +57,7 @@ export default defineConfig({
         items: [
           { text: "Why spm?", link: "/guide/why-spm" },
           { text: "How It Works", link: "/guide/how-it-works" },
+          { text: "Global Skills", link: "/guide/global-skills" },
           { text: "Referencing a Skill", link: "/guide/referencing-skills" },
           { text: "Targets & Vendors", link: "/guide/targets" },
           { text: "Worktrees & Fresh Clones", link: "/guide/worktrees" },

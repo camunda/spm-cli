@@ -25,25 +25,16 @@ for `spm list`.
 
 ## Scope: project (default) vs. global (`-g`)
 
-Every command except `target add` and `prune` accepts `-g` / `--global`. Without
-it, the command operates on the **project** in the current directory. With it,
-the command manages a **user-global** set of skills available to your AI tools in
-every project:
-
-- The global **manifest + lock** live under `$SPM_HOME` (default `~/.spm/ai.json`
-  / `~/.spm/ai.lock`) and reuse the same fetch cache as project installs.
-- Global skills materialize into user-global vendor locations:
-  `~/.copilot/skills/<name>/` for Copilot, `~/.gemini/skills/<name>/` for Gemini,
-  `~/.agents/skills/<name>/` for Codex, `~/.cursor/skills/<name>/` for Cursor,
-  `~/.cline/skills/<name>/` for Cline, `~/.codeium/windsurf/skills/<name>/` for
-  Windsurf, `~/.config/agents/skills/<name>/` for Amp, and a marketplace under
-  `$SPM_HOME/claude-global/` registered in `~/.claude/settings.json` as
-  `spm-global` (skills invoked as `/spm-global:<name>`) for Claude.
-- The shared-dir tools' global dirs (Copilot, Gemini, Codex, Cursor, Cline,
-  Windsurf, Amp) are shared with your hand-authored skills, so spm only touches
-  the entries it manages there — it never wipes the directory.
-- `spm status` warns when a skill name is installed in **both** scopes, since the
-  two collide by name at discovery time.
+Scope-aware commands (`init`, `add`, `remove`, `update`, `install`, `list`,
+`status`, `clean`) accept `-g` / `--global`; `spm target add`, `spm prune`, and
+`spm scan` don't (`prune` always wipes the shared global fetch cache and `scan`
+always operates on a path). Without `-g`, a scope-aware command operates on the
+**project** in the current directory. With it, it manages a **user-global** set
+of skills available to your AI tools in *every* project, with its own
+manifest/lock under `$SPM_HOME` and its own per-vendor materialization
+locations. See [Global Skills](/guide/global-skills) for the full concept, where
+each vendor materializes global skills, and how cross-scope name collisions are
+handled.
 
 ```bash
 spm init -g --target copilot

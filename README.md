@@ -10,6 +10,11 @@ AI tool (Amp, Claude Code, Cline, OpenAI Codex CLI, GitHub Copilot CLI, Cursor, 
 skills to your repo**. Anything spm materializes into the working tree is
 gitignored — no symlinks, no skills under version control.
 
+🌐 Manage skills at **project scope** (the default — tracked in `ai.json`, shared
+with your team) or **user-global scope** (`-g`/`--global` on the scope-aware
+commands — one skill set available to *every* project on your machine). See
+[Global skills](#global-skills--g----global).
+
 📖 **Documentation:** <https://camunda.github.io/spm-cli/> (built from
 [`docs/`](docs/) and deployed via GitHub Pages).
 
@@ -273,8 +278,11 @@ To override the gate for content you trust (or a false positive), set
 ## Global skills (`-g` / `--global`)
 
 By default every command operates on the **project** in the current directory.
-Pass `-g` (`--global`) to instead manage a **user-global** set of skills that is
-available to your AI tools in *every* project:
+Scope-aware commands (`init`, `add`, `remove`, `update`, `install`, `list`,
+`status`, `clean`) accept `-g` (`--global`) to instead manage a **user-global**
+set of skills that is available to your AI tools in *every* project. `spm target
+add`, `spm prune`, and `spm scan` aren't scope-aware: `prune` always wipes the
+shared global fetch cache and `scan` always operates on a path.
 
 ```bash
 spm init -g --target copilot                       # create the global manifest ($SPM_HOME/ai.json)
@@ -311,9 +319,12 @@ spm clean  -g                                      # remove global vendor config
     registered in `~/.claude/settings.json` under the marketplace name
     `spm-global` (skills invoked as `/spm-global:<name>`). A distinct name keeps
     it from colliding with a project's `spm` marketplace.
-- A skill installed in **both** scopes collides by name at discovery time
-  (`/spm:foo` vs `/spm-global:foo` for Claude; a duplicate `foo` dir for
-  Copilot). `spm status` warns when it detects such a global/project shadow.
+- A skill installed in **both** scopes collides by name at discovery time for
+  the shared-dir targets (Copilot, Gemini, Codex, Cursor, Cline, Windsurf, Amp —
+  a duplicate `foo` dir). Claude doesn't collide: `/spm:foo` (project) and
+  `/spm-global:foo` (global) are distinct, namespaced commands. Either way, `spm
+  status` warns on a same-name skill across scopes, since it compares the names
+  recorded in each scope's `ai.lock`.
 
 ## Worktrees & fresh clones
 

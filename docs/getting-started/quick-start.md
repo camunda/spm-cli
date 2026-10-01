@@ -65,5 +65,6 @@ git hooks too. See [Worktrees & Fresh Clones](/guide/worktrees).
 ## Where to go next
 
 - [How It Works](/guide/how-it-works) — the resolve → fetch → project pipeline.
+- [Global Skills](/guide/global-skills) — install a personal skill set available to every project with `-g`.
 - [CLI Commands](/reference/cli-commands) — the full command reference.
 - [ai.json Manifest](/reference/ai-json) — the file you author.

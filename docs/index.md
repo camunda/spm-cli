@@ -38,4 +38,7 @@ features:
   - icon: ⚡
     title: Shared Global Fetch Cache
     details: Each repo@commit is cloned once into ~/.spm/store and shared across all your projects, so repeated installs never re-clone.
+  - icon: 🌐
+    title: Project or User-Global Scope
+    details: Manage skills per-project (the default, tracked in ai.json) or pass -g/--global to install a personal skill set available to every project on your machine.
 ---
