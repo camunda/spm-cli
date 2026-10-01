@@ -3619,7 +3619,35 @@ fn protocol_flag_applies_to_the_default_branch_lookup() {
     assert!(!manifest.contains("https://"), "{manifest}");
 }
 
-/// Regression test: the `github.com/<owner>/<repo>@<ref>` shorthand resolves
+/// Regression test: the no-selector default-branch lookup is a genuine
+/// remote-stage operation, so a connection/auth failure there must be
+/// eligible for `--protocol-fallback`'s retry over the other protocol, just
+/// like the ref/commit resolution that follows it.
+#[test]
+fn protocol_fallback_applies_to_the_default_branch_lookup() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    let good = sb.skill_url();
+    // HTTPS is unreachable; SSH works. No --branch/--tag/--commit, so `add`
+    // must look up the default branch before anything else.
+    let out = sb.spm_remotes(
+        &["add", HTTPS_URL, "--protocol-fallback", "--name", "greet"],
+        &[(HTTPS_URL, unreachable_url()), (SSH_URL, good.as_str())],
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let err = stderr_of(&out);
+    assert!(
+        err.contains(&format!("used ssh ({SSH_URL})")),
+        "the message must name the protocol that worked: {err}"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("default branch"), "{stdout}");
+
+    // The manifest keeps the HTTPS URL the user supplied, never the fallback.
+    let manifest = sb.read("ai.json");
+    assert!(manifest.contains(HTTPS_URL), "{manifest}");
+    assert!(!manifest.contains(SSH_URL), "{manifest}");
+}
 /// `@<ref>` to a tag or branch via its own `git ls-remote` (see
 /// `cli::shorthand::classify`), before the usual add/sync flow runs. That
 /// lookup must go through the same `--protocol` override too, not bypass it

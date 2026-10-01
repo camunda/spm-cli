@@ -345,7 +345,7 @@ pub fn default_branch(url: &str) -> Result<String> {
 }
 
 fn default_branch_once(url: &str) -> Result<String> {
-    git(&["ls-remote", "--symref", url, "HEAD"], None)
+    git_remote(&["ls-remote", "--symref", url, "HEAD"], None)
 }
 
 /// Extract the branch name from the `ref: refs/heads/<name>\tHEAD` line that
