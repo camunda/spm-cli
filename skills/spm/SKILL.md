@@ -65,17 +65,23 @@ when `ai.json` exists leaves the file untouched and exits 0.
 ### `spm add`
 
 ```bash
-spm add <git-url> (--tag <t> | --branch <b> | --commit <sha>) \
-        [--path <subdir>] [--name <local-name>] [--all] [--plugin] [--force] [-g]
+spm add <git-url | github.com/<owner>/<repo>[@<ref>]> \
+        [--tag <t> | --branch <b> | --commit <sha>] \
+        [--path <subdir>] [--name <local-name>] [--all] [--plugin] [--force] \
+        [--protocol ssh|https] [--protocol-fallback] [-g]
 ```
 
 Adds the dependency to `ai.json`, resolves it to a commit, writes `ai.lock`,
 scans the content, and materializes it, all in one step. It needs an existing
 `ai.json`: run `spm init` first.
 
-- Give exactly one of `--tag`, `--branch`, `--commit`. Combining them is a
-  usage error. Giving none fails with `set one of tag/branch/commit`. Prefer
-  `--tag` for reproducibility; `--commit` needs the full 40-character SHA.
+- The version selector is optional. Give at most one of `--tag`, `--branch`,
+  `--commit`; combining them is a usage error. With none, spm resolves the
+  remote's default branch, prints the branch it chose, and records it as an
+  explicit `branch` entry in `ai.json` — the common "just give me the skill"
+  case. If the default branch cannot be determined (empty repo, detached HEAD)
+  it fails and leaves `ai.json` untouched. Prefer `--tag` for reproducibility;
+  `--commit` needs the full 40-character SHA.
 - `--path <subdir>` selects a subdirectory of the repo (monorepos). It must be
   relative to the repo root and must not contain a `..` path component (a
   segment such as `v1..2` is fine).
@@ -96,7 +102,26 @@ scans the content, and materializes it, all in one step. It needs an existing
 The URL can be any form `git` understands: `https://...`, `git@host:org/repo.git`,
 `ssh://...`, `file://...`. Any git host works.
 
+- `github.com/<owner>/<repo>[@<ref>]` is a shorthand that expands to
+  `https://github.com/<owner>/<repo>.git` before anything else runs, so
+  `ai.json`, `ai.lock` and the store only ever see the full URL. An optional
+  `@<ref>` replaces the version flag: a full SHA is taken as a commit, otherwise
+  it is looked up once and used as a tag or a branch. `@<ref>` cannot be
+  combined with `--tag`/`--branch`/`--commit`. Any input not starting with
+  `github.com/` is passed through untouched.
+- `--protocol ssh|https` rewrites a GitHub-style URL to that protocol before
+  contacting the remote (`https://host/org/repo` <-> `git@host:org/repo`); a URL
+  with no equivalent form (a port, `file://`, a local path) is used as given.
+  `--protocol-fallback` retries once over the other protocol after a network or
+  auth failure (never for a missing ref) and reports which one worked. Both are
+  off by default, and `ai.json`/`ai.lock` always keep the URL you supplied.
+  Silent switching can mask a real credential problem, so reach for these only
+  when a URL fails for protocol or auth reasons. The same two flags are accepted
+  by `install`, `update`, `remove` and `target add`.
+
 ```bash
+spm add github.com/org/skills --path skills/pdf --name pdf-tools
+spm add github.com/org/skills@v1.2.0 --path skills/pdf --name pdf-tools
 spm add https://github.com/org/skills --tag v1.2.0 --path skills/pdf --name pdf-tools
 spm add https://github.com/org/skills --tag v1.2.0 --path skills --all
 spm add https://github.com/org/design-system --branch main \
@@ -106,46 +131,53 @@ spm add https://github.com/org/design-system --branch main \
 ### `spm install`
 
 ```bash
-spm install [-g]
+spm install [--protocol ssh|https] [--protocol-fallback] [-g]
 ```
 
-Fetches and materializes everything declared in `ai.json`, reusing the commits
+Alias: `spm i`. Fetches and materializes everything declared in `ai.json`, reusing the commits
 pinned in `ai.lock`. It only re-resolves an entry whose git URL, selector or
 path changed, or that has no pin yet. Prints `installed N dependencies`. Run it
-after every clone and in every new worktree.
+after every clone and in every new worktree. `--protocol`/`--protocol-fallback`
+behave as under [`spm add`](#spm-add).
 
 ### `spm update`
 
 ```bash
-spm update [name] [-g]
+spm update [name] [--protocol ssh|https] [--protocol-fallback] [-g]
 ```
 
 Re-resolves `--tag` and `--branch` entries to their current commit and rewrites
 `ai.lock`. With a name, updates only that skill or plugin. A `--commit` entry
 never moves. An unchanged pin is only ever moved by `spm update`;
 `spm install` keeps it, and re-resolves just the entries whose URL, selector or
-path you changed, or that have no pin yet.
+path you changed, or that have no pin yet. `--protocol`/`--protocol-fallback`
+behave as under [`spm add`](#spm-add).
 
 ### `spm remove`
 
 ```bash
-spm remove <name> [--plugin] [-g]
+spm remove <name> [--plugin] [--protocol ssh|https] [--protocol-fallback] [-g]
 ```
 
-Drops the entry from `ai.json` and removes its materialized files. Use
+Alias: `spm rm`. Drops the entry from `ai.json` and removes its materialized files. Use
 `--plugin` when the name is a plugin. A name that does not exist is an error.
+Because `remove` re-runs the content scan over the remaining dependencies (see
+[Content scan](#content-scan)), it also contacts their remotes, so it accepts
+`--protocol`/`--protocol-fallback`, which behave as under [`spm add`](#spm-add).
 
 ### `spm target add`
 
 ```bash
-spm target add [vendor[,vendor...]]
+spm target add [vendor[,vendor...]] [--protocol ssh|https] [--protocol-fallback]
 ```
 
 Adds target tools to `ai.json` and materializes existing skills for them. With
 no vendor it asks interactively, reading a numbered choice from stdin, so
 always pass vendors explicitly when running non-interactively. Adding a target
 that is already configured is a skip, not an error. This command has no `-g`
-flag and always works on the current project.
+flag and always works on the current project. It re-materializes every declared
+skill, so it accepts `--protocol`/`--protocol-fallback`, which behave as under
+[`spm add`](#spm-add).
 
 ### `spm list`
 
@@ -153,7 +185,7 @@ flag and always works on the current project.
 spm list [-g]
 ```
 
-Prints each declared skill and plugin with its git URL and its pin as
+Alias: `spm ls`. Prints each declared skill and plugin with its git URL and its pin as
 `<selector> @ <first 8 chars of the commit>`, or `not installed` when
 `ai.lock` has no pin for it.
 
@@ -262,9 +294,9 @@ written. Lower severities print as warnings.
 
 | Symptom | Cause and fix |
 | --- | --- |
-| `no ai.json found at ...` | The project is not initialized. Run `spm init --target <vendor>`, then retry. |
+| `no ai.json found at ...` | The project is not initialized. The error now also names the fix (`spm init`, or `spm init --global` in global scope). Run it, then retry. |
 | `ref ... not found in <url>` | The tag or branch does not exist at that URL. Check the spelling and that it is pushed (`git ls-remote <url>`). Tags and branches are looked up separately, so use `--tag` for tags and `--branch` for branches. |
-| `git ... failed:` with `Permission denied`, `Authentication failed` or `could not read Username` | Auth failure. spm runs git non-interactively (`GIT_TERMINAL_PROMPT=0`), so it fails instead of prompting. For a private repo use the SSH form (`git@host:org/repo.git`) with a key loaded in ssh-agent, or the HTTPS form with a git credential helper configured. Verify with `git ls-remote <url>` in the same shell, then retry. Do not ask the user for tokens. |
+| `git ... failed:` with `Permission denied`, `Authentication failed` or `could not read Username` | Auth failure. spm runs git non-interactively (`GIT_TERMINAL_PROMPT=0`), so it fails instead of prompting. For a private repo use the SSH form (`git@host:org/repo.git`) with a key loaded in ssh-agent, or the HTTPS form with a git credential helper configured. Verify with `git ls-remote <url>` in the same shell, then retry. If only one protocol works on this machine, re-run with `--protocol ssh`/`--protocol https` or `--protocol-fallback` (see [`spm add`](#spm-add)). Do not ask the user for tokens. |
 | `a skill named ... already exists` | The name is taken. Pick another with `--name`, pass `--force` to re-pin it, or `spm remove <name>` first. |
 | `a plugin named ... already exists` or `... is declared as both a skill and a plugin` | Skills and plugins share one namespace. Use a different `--name`, or remove the other entry. `--force` does not convert a skill into a plugin. |
 | `skill name collision: ... is provided by more than one skill/plugin` | A plugin bundles a skill with the same name as another entry. Rename one of them. |
