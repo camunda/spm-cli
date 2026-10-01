@@ -45,6 +45,7 @@ generated source to regenerate.
 | `src/vendor/mod.rs` | The `Vendor` trait + `for_target` dispatch — the extension point for new targets. |
 | `src/vendor/claude.rs` | Claude adapter: writes a marketplace pointer into `.claude/settings.local.json`. |
 | `src/vendor/copilot.rs` | Copilot adapter: copies skills into the gitignored, project-local `.agents/skills/spm-managed-skills/`. |
+| `skills/spm/SKILL.md` | User-facing agent skill that teaches an agent to operate `spm`, installable with `spm add ... --path skills/spm`. **Update it in the same PR whenever a command, flag, message or behavior it documents changes** (check it against `spm --help`). |
 | `tests/cli.rs` | End-to-end tests against the real binary with an isolated `SPM_HOME` per test. |
 | `schema/ai.schema.json` | Source of truth for the `ai.json` shape (draft-07); embedded by `src/schema.rs`. |
 | `docs/` | VitePress documentation site (published to GitHub Pages). User-facing docs live here — keep it in sync with `README.md` when behavior changes (`reference/` for CLI/`ai.json`/`ai.lock`/schema, `guide/` for concepts/targets). |

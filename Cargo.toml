@@ -27,6 +27,7 @@ jsonschema = { version = "0.17", default-features = false }
 # first time `cargo test`/`cargo build` runs — no manual setup step needed.
 [dev-dependencies]
 cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
+serde_yaml_ng = "0.10.0"
 
 [profile.release]
 opt-level = 3

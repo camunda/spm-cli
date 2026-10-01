@@ -210,8 +210,11 @@ spm install --protocol-fallback                                      # try as gi
   When it does, spm prints which protocol worked; if both fail, the error lists
   both attempts.
 
-Neither flag changes what is recorded: `ai.json` and `ai.lock` keep the URL you
-supplied. **Use the fallback deliberately:** switching protocols can hide a real
+Neither flag changes what is recorded: `ai.json` and `ai.lock` keep the URL as
+recorded — the expanded `https://github.com/<owner>/<repo>.git` form for a
+`github.com/...` shorthand, otherwise exactly what you supplied; the protocol
+rewrite affects only the URL handed to git. **Use the fallback deliberately:**
+switching protocols can hide a real
 credential problem (an expired SSH key quietly replaced by an anonymous HTTPS
 clone that only works for public repos, or the reverse), which is why it is off
 by default.
@@ -295,6 +298,25 @@ spm prune [--yes]                                  # wipe the global fetch cache
 spm scan [path]                                    # scan skill content for suspicious patterns (default: .)
 ```
 
+## Agent skill
+
+This repo ships a user-facing skill, [`skills/spm/SKILL.md`](skills/spm/SKILL.md),
+that teaches an AI coding agent how to operate `spm`: the commands and flags, when
+to use which, and how to fix common failures. Install it with `spm` itself:
+
+```bash
+# In a project (needs an `ai.json` — run `spm init` first if the project has none):
+spm add https://github.com/camunda/spm-cli --branch main --path skills/spm
+# ...or for every project. Pass your agent's vendor to the global init — it defaults
+# to `claude`, and no CLI command retargets a global manifest afterwards (`target add`
+# is project-only and a repeated `init` is a no-op), though you can still fix it by
+# editing the `targets` array in `$SPM_HOME/ai.json` and running `spm install -g`:
+spm init -g --target copilot && spm add -g https://github.com/camunda/spm-cli --branch main --path skills/spm
+```
+
+Use `--tag` instead of `--branch` to pin a release that contains the skill.
+`AGENTS.md` and `CLAUDE.md` are for contributors to `spm-cli`, not for users.
+
 ## Content scanning (security gate)
 
 Skills are markdown + scripts that Claude/Copilot auto-discover and act on, so a
@@ -310,7 +332,8 @@ directory. It flags:
 - **Path traversal** — `../../` requested in skill text.
 - **Auto-run triggers** — `postinstall` scripts, git hooks, bundled `Makefile`s.
 
-**High/critical findings block** `add`/`install`/`update`. To review a source (or
+**High/critical findings block** every command that syncs skills (`add`, `install`,
+`update`, `remove` and `target add`). To review a source (or
 gate it in CI) run it standalone — it exits non-zero on any blocking finding:
 
 ```bash
