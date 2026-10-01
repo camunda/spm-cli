@@ -5,6 +5,7 @@ mod init;
 mod list;
 mod remove;
 mod scan;
+mod shorthand;
 mod status;
 mod sync;
 mod target;
@@ -36,7 +37,10 @@ enum Command {
     },
     /// Add a skill dependency and install it.
     Add {
-        /// Git repository URL.
+        /// Git repository URL, or `github.com/<owner>/<repo>[@<ref>]` shorthand
+        /// (expands to `https://github.com/<owner>/<repo>.git`; `@<ref>` is looked
+        /// up as a tag or branch, or taken as a commit if it is a full SHA, and
+        /// cannot be combined with --tag/--branch/--commit).
         git: String,
         #[command(flatten)]
         version: VersionArg,

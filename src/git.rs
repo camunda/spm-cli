@@ -55,6 +55,20 @@ pub fn ls_remote(url: &str, refspecs: &[&str]) -> Result<String> {
     fallback.context("could not parse ls-remote output")
 }
 
+/// List the remote ref names (e.g. `refs/tags/v1`) that match any of `refspecs`,
+/// without cloning. Unlike [`ls_remote`], no match is an empty list rather than
+/// an error, so callers can tell "ref absent" from "remote unreachable".
+pub fn remote_ref_names(url: &str, refspecs: &[&str]) -> Result<Vec<String>> {
+    let mut args = vec!["ls-remote", url];
+    args.extend_from_slice(refspecs);
+    let out = git(&args, None)?;
+    Ok(out
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .map(|(_, name)| name.trim_end_matches("^{}").to_string())
+        .collect())
+}
+
 /// Resolve the remote's default branch (what `HEAD` points at) without cloning,
 /// via `git ls-remote --symref <url> HEAD`. Errors, rather than guessing, when
 /// the remote reports no symbolic `HEAD` (empty repo, detached `HEAD`).

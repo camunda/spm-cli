@@ -155,9 +155,25 @@ spm add git@github.com:org/repo.git --branch main           # SSH (scp-style)
 spm add ssh://git@github.com/org/repo.git --branch main     # SSH (url form)
 ```
 
-**Any git host works** — spm shells out to `git` and never detects or
-special-cases a provider, so GitHub, GitLab, Bitbucket, and self-hosted servers
-are all supported with no extra config:
+For GitHub there is a shorthand: `github.com/<owner>/<repo>[@<ref>]` expands to
+`https://github.com/<owner>/<repo>.git`, and `@<ref>` replaces the version flag.
+spm looks the ref up on the remote and treats it as a tag or a branch (a full
+40-character SHA is taken as a commit without a lookup). It is an error if the
+ref is neither, or is both a tag and a branch (use the explicit flag), or if
+`@<ref>` is combined with `--tag`, `--branch` or `--commit`. `ai.json` always
+records the expanded URL, never the shorthand. Anything not starting with
+`github.com/` is passed through untouched.
+
+```bash
+spm add github.com/org/repo@v1.0.0        # = spm add https://github.com/org/repo.git --tag v1.0.0
+spm add github.com/org/repo@main          # = ... --branch main
+spm add github.com/org/repo --tag v1.0.0  # shorthand URL, explicit flag
+spm add github.com/org/repo               # no selector = remote's default branch
+```
+
+**Any git host works** — apart from that GitHub-only shorthand, spm shells out to
+`git` and never detects or special-cases a provider, so GitHub, GitLab,
+Bitbucket, and self-hosted servers are all supported with no extra config:
 
 ```bash
 spm add git@bitbucket.org:org/repo.git --branch main        # Bitbucket
@@ -235,7 +251,7 @@ make install PREFIX=~/.local  # or a custom prefix
 
 ```bash
 spm init [--target amp|claude|cline|codex|copilot|cursor|gemini|windsurf ...] [-g]  # scaffold ai.json (repeatable / comma-separated)
-spm add <git> [--tag|--branch|--commit <v>] \      # add + install a skill (no selector = default branch)
+spm add <git> [--tag|--branch|--commit <v>] \      # add + install a skill (no selector = default branch; github.com/owner/repo@ref also works)
         [--path <subdir>] [--name <local-name>] [--all] [-g]  # --all: add every skill under --path
         [--plugin]                                 # --plugin: add a full plugin (see "Full plugins")
 spm target add [vendor ...]                        # add target vendor(s); no arg = pick interactively
@@ -396,4 +412,3 @@ A **pre-commit hook** (fmt + clippy) installs itself automatically via
 (or `cargo build`) once after cloning and the hook lands in `.git/hooks`. The
 hook source lives in [`.cargo-husky/hooks/`](.cargo-husky/hooks). Bypass a
 single commit with `git commit --no-verify`.
-
