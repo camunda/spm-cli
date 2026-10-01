@@ -72,3 +72,9 @@ install` reproduces the exact pins in `ai.lock`.
 Linux, macOS, and Windows. Prebuilt binaries cover `darwin-x64`, `darwin-arm64`,
 `linux-x64`, `linux-arm64`, and `win32-x64`. See
 [Installation](/getting-started/installation).
+
+## Can I install a skill once and use it in every project?
+
+Yes — pass `-g` / `--global` to `init`/`add`/`list`/`remove`/etc. to manage a
+**user-global** set of skills, materialized into each AI tool's personal-skills
+directory instead of a project-local one. See [Global Skills](/guide/global-skills).

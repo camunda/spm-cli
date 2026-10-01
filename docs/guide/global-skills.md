@@ -1,0 +1,69 @@
+# Global Skills
+
+Every `spm` command defaults to **project scope**: it reads/writes the `ai.json`
+and `ai.lock` in the current directory and materializes skills into a
+project-local location. Pass `-g` / `--global` to instead manage a
+**user-global** set of skills — available to your AI tools in *every* project on
+your machine, with no `ai.json` to add to each repo.
+
+```bash
+spm init -g --target copilot                        # create the global manifest ($SPM_HOME/ai.json)
+spm add  -g https://github.com/org/skills --tag v1.0.0 --name reviewer
+spm list -g                                          # list global skills
+spm status -g                                        # check they're materialized
+spm remove -g reviewer                               # drop a global skill
+spm clean  -g                                        # remove global vendor config
+```
+
+Reach for global scope for skills you want everywhere regardless of project —
+e.g. a personal code-review checklist or a house style guide — instead of
+re-declaring the same skill in every repo's `ai.json`.
+
+## Where the global manifest lives
+
+The global **manifest + lock** live under `$SPM_HOME` (default `~/.spm/ai.json`
+and `~/.spm/ai.lock`), separate from any project's files. Commit/sync them with
+your dotfiles for a reproducible personal setup across machines. They reuse the
+same [fetch cache](/guide/how-it-works) as project installs, so a skill already
+pulled for a project isn't re-cloned for global use (and vice versa).
+
+## Where global skills materialize
+
+Global skills land in each vendor's own **user-scope** directory instead of a
+project-local one:
+
+| Target    | Global directory                        |
+|-----------|------------------------------------------|
+| Copilot   | `~/.copilot/skills/<name>/`              |
+| Gemini    | `~/.gemini/skills/<name>/`               |
+| Codex     | `~/.agents/skills/<name>/`               |
+| Cursor    | `~/.cursor/skills/<name>/`               |
+| Cline     | `~/.cline/skills/<name>/`                |
+| Windsurf  | `~/.codeium/windsurf/skills/<name>/`     |
+| Amp       | `~/.config/agents/skills/<name>/`        |
+| Claude    | `$SPM_HOME/claude-global/` (marketplace) |
+
+For every shared-dir target (Copilot, Gemini, Codex, Cursor, Cline, Windsurf,
+Amp) that directory is also where you might keep **hand-authored** skills. spm
+never wipes it — it only adds/removes the entries it manages, same as in project
+scope. See [Targets & Vendors](/guide/targets) for the full per-vendor detail.
+
+Claude is the one exception: global skills materialize into a self-contained
+marketplace under `$SPM_HOME/claude-global/`, registered in
+`~/.claude/settings.json` under a distinct marketplace name, `spm-global`
+(skills are invoked as `/spm-global:<name>`, vs. `/spm:<name>` for a project
+install). The distinct name keeps it from colliding with any project's own `spm`
+marketplace.
+
+::: tip Name collisions across scopes
+Installing a skill with the same name in **both** project and global scope is
+allowed, but the two shadow each other at discovery time (a duplicate `foo`
+directory for Copilot; `/spm:foo` vs `/spm-global:foo` for Claude). Run `spm
+status` (or `spm status -g`) — it warns when it detects this.
+:::
+
+## Full command reference
+
+Every command accepts `-g` the same way; see
+[Scope: project (default) vs. global](/reference/cli-commands#scope-project-default-vs-global-g)
+for the complete flag-by-flag reference.
