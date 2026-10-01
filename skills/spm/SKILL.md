@@ -313,9 +313,18 @@ materialized and `ai.lock` is not written. Lower severities print as warnings.
 
 Failure states to know about:
 
-- `spm add` writes the new entry into `ai.json` before it resolves and fetches.
-  If the add then fails (bad ref, auth error, blocked scan), the entry stays in
-  `ai.json` with no pin (for a new name). Either fix the cause and run `spm install`, or drop it
+- A single `spm add` writes the new entry into `ai.json` *after* two pre-save
+  lookups but *before* it resolves and fetches. The pre-save lookups happen
+  first and never touch `ai.json`: expanding a `github.com/...@<ref>` shorthand
+  (a `git ls-remote` to classify the ref as a tag or branch) and, when no
+  `--tag`/`--branch`/`--commit` is given, resolving the remote's default branch.
+  So a failure *there* — a malformed shorthand, an `@<ref>` that is neither a
+  tag nor a branch, an auth/network error during either lookup, or an empty
+  repo/detached HEAD with no default branch — leaves `ai.json` untouched. Once
+  those pass, the entry is saved and only then does `sync` resolve, fetch, scan
+  and materialize; a failure at *that* stage (a bad explicit selector, an auth
+  error during the fetch, a blocked scan) leaves the entry in `ai.json` with no
+  pin (for a new name). Either fix the cause and run `spm install`, or drop it
   with `spm remove <name>`. This ordering is specific to a single `spm add`:
   `spm add --all` resolves and fetches the container (and checks each sub-skill
   against the existing *skills*) *before* it writes `ai.json`, so a bad ref, auth
@@ -324,8 +333,8 @@ Failure states to know about:
   reloads the manifest: a sub-skill whose name matches an existing *plugin* (or a
   skill bundled by one of your plugins) is saved into `ai.json` first and only
   then rejected, and — like a scan block — leaves the batch entries behind.
-  Inspect the manifest before running `spm remove` after an `--all` failure
-  rather than assuming nothing was added.
+  Inspect the manifest before running `spm remove` after any add failure
+  rather than assuming the state either way.
 - `ai.lock` is only written when a sync fully succeeds, so a failure *before*
   materialization (resolution, fetch, scan, collision check) leaves `ai.lock` and
   every materialized skill on the old pin. Materialization itself is not atomic,
