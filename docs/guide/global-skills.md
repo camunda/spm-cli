@@ -1,10 +1,13 @@
 # Global Skills
 
-Every `spm` command defaults to **project scope**: it reads/writes the `ai.json`
-and `ai.lock` in the current directory and materializes skills into a
+`spm`'s scope-aware commands (`init`, `add`, `remove`, `update`, `install`,
+`list`, `status`, `clean`) default to **project scope**: they read/write the
+`ai.json` and `ai.lock` in the current directory and materialize skills into a
 project-local location. Pass `-g` / `--global` to instead manage a
 **user-global** set of skills — available to your AI tools in *every* project on
-your machine, with no `ai.json` to add to each repo.
+your machine, with no `ai.json` to add to each repo. (`target add`, `prune`, and
+`scan` aren't scope-aware: `prune` always wipes the shared global fetch cache
+and `scan` always operates on a path.)
 
 ```bash
 spm init -g --target copilot                        # create the global manifest ($SPM_HOME/ai.json)
@@ -56,14 +59,19 @@ install). The distinct name keeps it from colliding with any project's own `spm`
 marketplace.
 
 ::: tip Name collisions across scopes
-Installing a skill with the same name in **both** project and global scope is
-allowed, but the two shadow each other at discovery time (a duplicate `foo`
-directory for Copilot; `/spm:foo` vs `/spm-global:foo` for Claude). Run `spm
-status` (or `spm status -g`) — it warns when it detects this.
+A shared-dir target (Copilot, Gemini, Codex, Cursor, Cline, Windsurf, Amp)
+installed with the same skill name in **both** scopes collides at discovery
+time — the project and global copies land in the same kind of directory, so one
+shadows the other. Claude doesn't have this problem: `/spm:foo` (project) and
+`/spm-global:foo` (global) are distinct, namespaced commands. Either way, run
+`spm status` (or `spm status -g`) — it warns on a same-name skill across scopes
+even when the two installs target different vendors, since it compares the
+names recorded in each scope's `ai.lock`.
 :::
 
 ## Full command reference
 
-Every command accepts `-g` the same way; see
+`-g` works the same way on every scope-aware command (`init`, `add`, `remove`,
+`update`, `install`, `list`, `status`, `clean`); see
 [Scope: project (default) vs. global](/reference/cli-commands#scope-project-default-vs-global-g)
 for the complete flag-by-flag reference.

@@ -10,9 +10,9 @@ AI tool (Amp, Claude Code, Cline, OpenAI Codex CLI, GitHub Copilot CLI, Cursor, 
 skills to your repo**. Anything spm materializes into the working tree is
 gitignored — no symlinks, no skills under version control.
 
-🌐 Every command works at **project scope** (the default — tracked in `ai.json`,
-shared with your team) or **user-global scope** (`-g`/`--global` — one skill set
-available to *every* project on your machine). See
+🌐 Manage skills at **project scope** (the default — tracked in `ai.json`, shared
+with your team) or **user-global scope** (`-g`/`--global` on the scope-aware
+commands — one skill set available to *every* project on your machine). See
 [Global skills](#global-skills--g----global).
 
 📖 **Documentation:** <https://camunda.github.io/spm-cli/> (built from
