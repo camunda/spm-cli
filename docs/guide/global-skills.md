@@ -47,9 +47,13 @@ project-local one:
 | Claude    | `$SPM_HOME/claude-global/` (marketplace) |
 
 For every shared-dir target (Copilot, Gemini, Codex, Cursor, Cline, Windsurf,
-Amp) that directory is also where you might keep **hand-authored** skills. spm
-never wipes it — it only adds/removes the entries it manages, same as in project
-scope. See [Targets & Vendors](/guide/targets) for the full per-vendor detail.
+Amp) that **global** directory is also where you might keep **hand-authored**
+skills, so spm never wipes it at global scope — it only adds/removes the
+entries it manages. (Note this differs from Copilot's *project* scope, where
+`.agents/skills/spm-managed-skills/` is entirely spm-owned and gets wiped and
+rebuilt on every materialize; the other targets' project directories are
+likewise shared and non-destructively managed.) See
+[Targets & Vendors](/guide/targets) for the full per-vendor detail.
 
 Claude is the one exception: global skills materialize into a self-contained
 marketplace under `$SPM_HOME/claude-global/`, registered in
