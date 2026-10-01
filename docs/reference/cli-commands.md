@@ -25,13 +25,16 @@ for `spm list`.
 
 ## Scope: project (default) vs. global (`-g`)
 
-Every command except `target add` and `prune` accepts `-g` / `--global`. Without
-it, the command operates on the **project** in the current directory. With it,
-the command manages a **user-global** set of skills available to your AI tools in
-*every* project, with its own manifest/lock under `$SPM_HOME` and its own
-per-vendor materialization locations. See [Global Skills](/guide/global-skills)
-for the full concept, where each vendor materializes global skills, and how
-cross-scope name collisions are handled.
+Scope-aware commands (`init`, `add`, `remove`, `update`, `install`, `list`,
+`status`, `clean`) accept `-g` / `--global`; `target add`, `prune`, and `scan`
+don't (`prune` always wipes the shared global fetch cache and `scan` always
+operates on a path). Without `-g`, a scope-aware command operates on the
+**project** in the current directory. With it, it manages a **user-global** set
+of skills available to your AI tools in *every* project, with its own
+manifest/lock under `$SPM_HOME` and its own per-vendor materialization
+locations. See [Global Skills](/guide/global-skills) for the full concept, where
+each vendor materializes global skills, and how cross-scope name collisions are
+handled.
 
 ```bash
 spm init -g --target copilot
