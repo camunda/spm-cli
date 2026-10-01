@@ -23,6 +23,9 @@ Three commands have short aliases that behave identically, including `-g`:
 `spm i` for `spm install`, `spm rm <name>` for `spm remove <name>`, and `spm ls`
 for `spm list`.
 
+`add`, `install`, `update`, `remove` and `target add` also accept `--protocol ssh|https` and
+`--protocol-fallback` (see [Repo URLs](#repo-urls-https-ssh)).
+
 ## Scope: project (default) vs. global (`-g`)
 
 Scope-aware commands (`init`, `add`, `remove`, `update`, `install`, `list`,
@@ -207,3 +210,33 @@ SSH auth goes through your ssh-agent / keys — spm never handles credentials.
 Private HTTPS repos use your git credential helper. spm runs git with
 `GIT_TERMINAL_PROMPT=0`, so a missing credential fails with a clear error instead
 of hanging on a prompt (helpers and ssh-agent still work).
+
+### Protocol override and opt-in fallback
+
+By default spm uses the URL exactly as you gave it: an SSH URL is contacted over
+SSH and an HTTPS URL over HTTPS, and a failure is reported as-is. Two opt-in
+flags (accepted by the commands that can contact a remote: `add`, `install`,
+`update`, `remove` and `target add`) help when your preferred
+protocol isn't set up on the current machine, e.g. no SSH key in CI, or HTTPS
+blocked but SSH allowed:
+
+```bash
+spm add git@github.com:org/repo.git --branch main --protocol https   # force HTTPS
+spm install --protocol-fallback                                      # try as given, then the other one
+```
+
+- `--protocol ssh|https` rewrites the URL to that protocol before contacting the
+  remote (`https://host/org/repo` <-> `git@host:org/repo`). URLs with no
+  equivalent form (a port, `file://`, a local path, or a `#fragment`, `?query`,
+  percent-encoding, backslash or `~` path whose meaning differs between the two
+  forms) are used as given.
+- `--protocol-fallback` retries **once** over the other protocol, and only after
+  a connection or authentication failure — never after a missing ref or path.
+  When it does, spm prints which protocol worked; if both fail, the error lists
+  both attempts.
+
+Neither flag changes what is recorded: `ai.json` and `ai.lock` keep the URL you
+supplied. **Use the fallback deliberately:** switching protocols can hide a real
+credential problem (an expired SSH key quietly replaced by an anonymous HTTPS
+clone that only works for public repos, or the reverse), which is why it is off
+by default.

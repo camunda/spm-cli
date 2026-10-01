@@ -14,7 +14,7 @@ mod update;
 use crate::scope::Scope;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use common::{ScopeArg, VersionArg};
+use common::{ScopeArg, TransportArgs, VersionArg};
 use std::path::Path;
 
 #[derive(Parser)]
@@ -67,6 +67,8 @@ enum Command {
         force: bool,
         #[command(flatten)]
         scope: ScopeArg,
+        #[command(flatten)]
+        transport: TransportArgs,
     },
     /// Manage the target vendors declared in ai.json.
     Target {
@@ -82,6 +84,8 @@ enum Command {
         plugin: bool,
         #[command(flatten)]
         scope: ScopeArg,
+        #[command(flatten)]
+        transport: TransportArgs,
     },
     /// Re-resolve branches/tags to latest commits (skills and plugins).
     Update {
@@ -89,12 +93,16 @@ enum Command {
         name: Option<String>,
         #[command(flatten)]
         scope: ScopeArg,
+        #[command(flatten)]
+        transport: TransportArgs,
     },
     /// Fetch + materialize everything from ai.lock (use after cloning).
     #[command(visible_alias = "i")]
     Install {
         #[command(flatten)]
         scope: ScopeArg,
+        #[command(flatten)]
+        transport: TransportArgs,
     },
     /// List declared skills and plugins with their locked commits.
     #[command(visible_alias = "ls")]
@@ -141,6 +149,8 @@ enum TargetCommand {
         /// windsurf. Repeatable or comma-separated. Omit to choose interactively.
         #[arg(value_delimiter = ',')]
         vendors: Vec<String>,
+        #[command(flatten)]
+        transport: TransportArgs,
     },
 }
 
@@ -158,20 +168,25 @@ pub fn run() -> Result<()> {
             plugin,
             force,
             scope,
-        } => add::add(
-            &scope.resolve(&cwd),
-            add::AddRequest {
-                git,
-                version,
-                path,
-                name,
-                all,
-                plugin,
-                force,
-            },
-        ),
+            transport,
+        } => {
+            transport.apply();
+            add::add(
+                &scope.resolve(&cwd),
+                add::AddRequest {
+                    git,
+                    version,
+                    path,
+                    name,
+                    all,
+                    plugin,
+                    force,
+                },
+            )
+        }
         Command::Target { command } => match command {
-            TargetCommand::Add { vendors } => {
+            TargetCommand::Add { vendors, transport } => {
+                transport.apply();
                 target::target_add(&Scope::Project { root: cwd }, vendors)
             }
         },
@@ -179,9 +194,21 @@ pub fn run() -> Result<()> {
             name,
             plugin,
             scope,
-        } => remove::remove(&scope.resolve(&cwd), &name, plugin),
-        Command::Update { name, scope } => update::update(&scope.resolve(&cwd), name),
-        Command::Install { scope } => {
+            transport,
+        } => {
+            transport.apply();
+            remove::remove(&scope.resolve(&cwd), &name, plugin)
+        }
+        Command::Update {
+            name,
+            scope,
+            transport,
+        } => {
+            transport.apply();
+            update::update(&scope.resolve(&cwd), name)
+        }
+        Command::Install { scope, transport } => {
+            transport.apply();
             let scope = scope.resolve(&cwd);
             let n = sync::sync(&scope, false, None)?;
             let noun = if n == 1 { "dependency" } else { "dependencies" };

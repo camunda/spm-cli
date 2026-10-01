@@ -1,5 +1,6 @@
 //! Shared clap arg groups and small helpers used across multiple subcommands.
 
+use crate::git;
 use crate::scope::Scope;
 use anyhow::Result;
 use clap::Args;
@@ -30,6 +31,32 @@ pub(crate) struct ScopeArg {
 impl ScopeArg {
     pub(crate) fn resolve(&self, cwd: &Path) -> Scope {
         Scope::new(self.global, cwd.to_path_buf())
+    }
+}
+
+/// The opt-in protocol controls shared by every command that can contact a git
+/// remote: those that run a `sync` (`add`, `install`, `update`, `remove`,
+/// `target add`). Flattened into each of those and no others; they never change
+/// what is recorded in `ai.json` / `ai.lock`.
+#[derive(Args)]
+pub(crate) struct TransportArgs {
+    /// Contact remotes over this protocol, rewriting the URL you gave (GitHub-style
+    /// `https://host/org/repo` <-> `git@host:org/repo`; other URLs are used as given).
+    #[arg(long, value_enum)]
+    pub(crate) protocol: Option<git::Protocol>,
+    /// If a remote can't be reached (network or auth failure), retry once over
+    /// the other protocol and say which one worked. Off by default: switching
+    /// protocols can mask a real credential problem.
+    #[arg(long)]
+    pub(crate) protocol_fallback: bool,
+}
+
+impl TransportArgs {
+    pub(crate) fn apply(&self) {
+        git::set_transport(git::Transport {
+            force: self.protocol,
+            fallback: self.protocol_fallback,
+        });
     }
 }
 
