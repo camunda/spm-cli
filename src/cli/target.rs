@@ -11,7 +11,7 @@ use anyhow::{anyhow, bail, Result};
 /// not an error, so the command is safe to re-run.
 pub(super) fn target_add(scope: &Scope, vendors: Vec<String>) -> Result<()> {
     let dir = scope.manifest_dir()?;
-    let mut manifest = Manifest::load(&dir)?;
+    let mut manifest = Manifest::load(&dir, scope)?;
 
     let requested = if vendors.is_empty() {
         let available: Vec<&str> = vendor::ALL_TARGETS

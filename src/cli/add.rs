@@ -29,7 +29,7 @@ pub(super) fn add(scope: &Scope, req: AddRequest) -> Result<()> {
         force,
     } = req;
     let dir = scope.manifest_dir()?;
-    let mut manifest = Manifest::load(&dir)?;
+    let mut manifest = Manifest::load(&dir, scope)?;
     if let Some(sub) = &path {
         crate::manifest::validate_subpath(sub)?;
     }

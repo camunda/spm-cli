@@ -47,6 +47,14 @@ impl Scope {
         matches!(self, Scope::Global)
     }
 
+    /// The `spm init` invocation that creates this scope's `ai.json`.
+    pub fn init_command(&self) -> &'static str {
+        match self {
+            Scope::Project { .. } => "spm init",
+            Scope::Global => "spm init --global",
+        }
+    }
+
     /// Short human label for messages (`project` / `global`).
     pub fn label(&self) -> &'static str {
         match self {
@@ -69,6 +77,15 @@ mod tests {
         assert!(!p.is_global());
         assert_eq!(p.label(), "project");
         assert_eq!(Scope::Global.label(), "global");
+    }
+
+    #[test]
+    fn init_command_matches_scope() {
+        assert_eq!(
+            Scope::new(false, PathBuf::from("/tmp")).init_command(),
+            "spm init"
+        );
+        assert_eq!(Scope::Global.init_command(), "spm init --global");
     }
 
     #[test]

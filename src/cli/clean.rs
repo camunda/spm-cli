@@ -8,7 +8,7 @@ use anyhow::Result;
 
 pub(super) fn clean(scope: &Scope) -> Result<()> {
     let dir = scope.manifest_dir()?;
-    let manifest = Manifest::load(&dir)?;
+    let manifest = Manifest::load(&dir, scope)?;
     let lock = Lockfile::load_or_default(&dir)?;
     // Plugin-bundled skills are flattened into the same shared skills dirs as
     // standalone skills (see `sync`'s `previously_managed`), so they must be

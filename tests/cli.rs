@@ -812,6 +812,108 @@ fn unknown_target_is_rejected() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("unknown target"));
 }
 
+/// Every command that loads the manifest, run with no `ai.json` present.
+fn manifest_loading_commands(sb: &Sandbox) -> Vec<Vec<String>> {
+    let url = sb.skill_url();
+    [
+        vec!["list"],
+        vec!["status"],
+        vec!["install"],
+        vec!["update"],
+        vec!["clean"],
+        vec!["remove", "greet"],
+        vec!["add", &url, "--tag", "v0.1.0"],
+    ]
+    .into_iter()
+    .map(|args| args.into_iter().map(String::from).collect())
+    .collect()
+}
+
+#[test]
+fn missing_manifest_hints_spm_init() {
+    let sb = Sandbox::new();
+    let mut commands = manifest_loading_commands(&sb);
+    commands.push(vec!["target".into(), "add".into(), "claude".into()]);
+    for args in commands {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let out = sb.spm(&args);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "spm {args:?}: {err}");
+        // The original message is preserved for scripts that match on it.
+        assert!(
+            err.starts_with("error: no ai.json found at "),
+            "spm {args:?}: {err}"
+        );
+        assert!(
+            err.trim_end()
+                .ends_with("\nhint: run `spm init` to create one"),
+            "spm {args:?}: {err}"
+        );
+    }
+}
+
+#[test]
+fn missing_global_manifest_hints_spm_init_global() {
+    let sb = Sandbox::new();
+    for args in manifest_loading_commands(&sb) {
+        let mut args: Vec<&str> = args.iter().map(String::as_str).collect();
+        args.push("--global");
+        let out = sb.spm(&args);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "spm {args:?}: {err}");
+        assert!(
+            err.starts_with("error: no ai.json found at "),
+            "spm {args:?}: {err}"
+        );
+        assert!(
+            err.trim_end()
+                .ends_with("\nhint: run `spm init --global` to create one"),
+            "spm {args:?}: {err}"
+        );
+    }
+}
+
+#[test]
+fn malformed_manifest_does_not_hint_spm_init() {
+    let sb = Sandbox::new();
+    std::fs::write(sb.project.join("ai.json"), "{ not json").unwrap();
+    let out = sb.spm(&["list"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("parsing "), "{err}");
+    assert!(!err.contains("hint"), "{err}");
+    assert!(!err.contains("spm init"), "{err}");
+}
+
+#[test]
+fn schema_invalid_manifest_does_not_hint_spm_init() {
+    let sb = Sandbox::new();
+    std::fs::write(
+        sb.project.join("ai.json"),
+        r#"{"targets":["bogus"],"skills":{}}"#,
+    )
+    .unwrap();
+    let out = sb.spm(&["list"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("does not match schema"), "{err}");
+    assert!(!err.contains("hint"), "{err}");
+}
+
+/// A manifest that exists but cannot be read (here: `ai.json` is a directory,
+/// which fails with a non-`NotFound` error on every platform and, unlike a
+/// chmod, also fails when the tests run as root) must not suggest `spm init`.
+#[test]
+fn unreadable_manifest_does_not_hint_spm_init() {
+    let sb = Sandbox::new();
+    std::fs::create_dir(sb.project.join("ai.json")).unwrap();
+    let out = sb.spm(&["list"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("no ai.json found at "), "{err}");
+    assert!(!err.contains("hint"), "{err}");
+}
+
 #[test]
 fn schema_rejects_unknown_target_value() {
     let sb = Sandbox::new();
