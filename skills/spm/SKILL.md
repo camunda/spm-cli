@@ -162,8 +162,11 @@ spm remove <name> [--plugin] [--protocol ssh|https] [--protocol-fallback] [-g]
 Alias: `spm rm`. Drops the entry from `ai.json` and removes its materialized files. Use
 `--plugin` when the name is a plugin. A name that does not exist is an error.
 Because `remove` re-runs the content scan over the remaining dependencies (see
-[Content scan](#content-scan)), it also contacts their remotes, so it accepts
-`--protocol`/`--protocol-fallback`, which behave as under [`spm add`](#spm-add).
+[Content scan](#content-scan)), it re-materializes them from their cached
+checkouts — so it works offline when every remaining pin is already in the
+store, and only reaches the network for a dependency whose cached checkout is
+missing or stale. For that case it accepts `--protocol`/`--protocol-fallback`,
+which behave as under [`spm add`](#spm-add).
 
 ### `spm target add`
 
@@ -278,12 +281,13 @@ materialize the skill for the wrong agent. It is still recoverable by hand — e
 
 Before anything is copied into an agent-visible directory, every command that
 runs a sync (`spm add`, `spm install`, `spm update`, `spm remove` and
-`spm target add`) scans the fetched content of every dependency in `ai.json`
-for prompt injection, secret exfiltration, obfuscated payloads, command
-execution and auto-run triggers. So a blocking dependency can also fail
-`remove` or `target add`, even though neither adds anything. A high or critical
-finding aborts the command: nothing is materialized and `ai.lock` is not
-written. Lower severities print as warnings.
+`spm target add`) scans the content of every dependency in `ai.json` — read
+from its cached store checkout, which is fetched only when the pin is new or the
+cache is missing or stale — for prompt injection, secret exfiltration,
+obfuscated payloads, command execution and auto-run triggers. So a blocking
+dependency can also fail `remove` or `target add`, even though neither adds
+anything. A high or critical finding aborts the command: nothing is
+materialized and `ai.lock` is not written. Lower severities print as warnings.
 
 - Run `spm scan <path>` to review content by hand or to gate a skill in CI.
 - Never bypass a block on the user's behalf. Show the user the findings and
