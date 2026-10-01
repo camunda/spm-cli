@@ -317,9 +317,13 @@ fn ls_remote_once(url: &str, refspecs: &[&str]) -> Result<String> {
 /// without cloning. Unlike [`ls_remote`], no match is an empty list rather than
 /// an error, so callers can tell "ref absent" from "remote unreachable".
 pub fn remote_ref_names(url: &str, refspecs: &[&str]) -> Result<Vec<String>> {
+    with_transport(transport(), url, |u| remote_ref_names_once(u, refspecs))
+}
+
+fn remote_ref_names_once(url: &str, refspecs: &[&str]) -> Result<Vec<String>> {
     let mut args = vec!["ls-remote", url];
     args.extend_from_slice(refspecs);
-    let out = git(&args, None)?;
+    let out = git_remote(&args, None)?;
     Ok(out
         .lines()
         .filter_map(|line| line.split_once('\t'))

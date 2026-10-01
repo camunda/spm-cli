@@ -3619,6 +3619,39 @@ fn protocol_flag_applies_to_the_default_branch_lookup() {
     assert!(!manifest.contains("https://"), "{manifest}");
 }
 
+/// Regression test: the `github.com/<owner>/<repo>@<ref>` shorthand resolves
+/// `@<ref>` to a tag or branch via its own `git ls-remote` (see
+/// `cli::shorthand::classify`), before the usual add/sync flow runs. That
+/// lookup must go through the same `--protocol` override too, not bypass it
+/// and contact the expanded `https://github.com/...` URL as given.
+#[test]
+fn protocol_flag_applies_to_the_github_shorthand_ref_lookup() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    let good = sb.skill_url();
+    // The shorthand always expands to the HTTPS form; only the SSH form (what
+    // --protocol ssh rewrites it to) is served, so the lookup only succeeds if
+    // it is actually forced over SSH.
+    let out = sb.spm_remotes(
+        &[
+            "add",
+            "github.com/org/skill@v0.1.0",
+            "--protocol",
+            "ssh",
+            "--name",
+            "greet",
+        ],
+        &[("git@github.com:org/skill.git", &good)],
+    );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let manifest: serde_json::Value = serde_json::from_str(&sb.read("ai.json")).unwrap();
+    assert_eq!(manifest["skills"]["greet"]["tag"], "v0.1.0", "{manifest}");
+    assert_eq!(
+        manifest["skills"]["greet"]["git"], "https://github.com/org/skill.git",
+        "{manifest}"
+    );
+}
+
 #[test]
 fn without_the_flags_the_url_is_used_as_given_with_no_retry() {
     let sb = Sandbox::new();
