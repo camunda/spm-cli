@@ -128,8 +128,25 @@ struct ConflictSide<'a> {
 /// would fuse unrelated skills into one transitive identity (silently deduping
 /// them or flagging a phantom conflict). We therefore preserve `.git` for local
 /// and `file://` sources and only strip it for remote URL forms.
+///
+/// Transport-equivalent spellings of the *same* remote are also folded to one
+/// identity: `https://host/o/r`, `ssh://git@host/o/r` and scp-style
+/// `git@host:o/r` all normalize to the canonical HTTPS form via
+/// [`git::remote_identity`], reusing the exact HTTPS/SSH equivalence that
+/// `--protocol` rewriting relies on, so a dependency cannot evade `(git, path)`
+/// deduplication or version-conflict detection by requesting a repo through a
+/// different protocol.
 pub fn normalize_git(url: &str) -> String {
     let s = url.trim().trim_end_matches('/');
+
+    // A remote with a cross-protocol equivalent collapses to its canonical HTTPS
+    // identity (with the `.git` convention stripped), regardless of the protocol
+    // spelling supplied. Sources with no such equivalent (`file://`, a port,
+    // userinfo, a non-`git` SSH user, a local path) return `None` and keep their
+    // literal, protocol-specific identity below.
+    if let Some(identity) = crate::git::remote_identity(s) {
+        return strip_git_suffix(&identity);
+    }
 
     if let Some(idx) = s.find("://") {
         // scheme://authority/path
@@ -628,10 +645,26 @@ mod tests {
 
     #[test]
     fn normalize_handles_scp_style() {
+        // scp-style folds to the canonical HTTPS identity (host lowercased,
+        // `.git` stripped, path case preserved).
         assert_eq!(
             normalize_git("git@GitHub.com:Org/Repo.git"),
-            "git@github.com:Org/Repo"
+            "https://github.com/Org/Repo"
         );
+    }
+
+    #[test]
+    fn normalize_folds_transport_equivalent_remote_spellings() {
+        // HTTPS, `ssh://` and scp-style spellings of the same remote must share
+        // one identity, or a dependency could evade `(git, path)` dedup and
+        // version-conflict detection by requesting a repo over a different
+        // protocol. They all canonicalize to the HTTPS form.
+        let https = normalize_git("https://github.com/o/r");
+        assert_eq!(https, "https://github.com/o/r");
+        assert_eq!(normalize_git("git@github.com:o/r.git"), https);
+        assert_eq!(normalize_git("ssh://git@github.com/o/r"), https);
+        assert_eq!(normalize_git("git@github.com:o/r"), https);
+        assert_eq!(normalize_git("HTTPS://GitHub.com/o/r.git/"), https);
     }
 
     #[test]
@@ -704,7 +737,7 @@ mod tests {
         );
         assert_eq!(
             normalize_git("git@github.com:o/r.git"),
-            "git@github.com:o/r"
+            "https://github.com/o/r"
         );
     }
 

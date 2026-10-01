@@ -181,6 +181,25 @@ fn protocol_of(url: &str) -> Option<Protocol> {
     split_remote(url).map(|p| p.protocol)
 }
 
+/// A canonical, protocol-independent identity for a remote URL that has an
+/// equivalent form in both protocols (see [`split_remote`]): the HTTPS spelling
+/// with a lowercased host, path case preserved. `https://host/path`,
+/// `ssh://git@host/path` and scp-style `git@host:path` therefore collapse to one
+/// string, so callers that key on repository identity (e.g. transitive
+/// deduplication and version-conflict detection) treat the interchangeable
+/// spellings as the same repo. Returns `None` for any source with no
+/// cross-protocol equivalent (a port, userinfo, a non-`git` SSH user, `file://`,
+/// a local path, …), which the caller must keep distinct. Built from the same
+/// equivalence `--protocol` rewriting relies on, so the two never drift.
+pub fn remote_identity(url: &str) -> Option<String> {
+    let parts = split_remote(url)?;
+    Some(format!(
+        "https://{}/{}",
+        parts.host.to_ascii_lowercase(),
+        parts.path
+    ))
+}
+
 /// Express `url` in `target`. Returns the URL unchanged when it already uses
 /// `target`, and `None` when it has no equivalent form (see [`split_remote`]).
 fn rewrite(url: &str, target: Protocol) -> Option<String> {

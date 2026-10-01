@@ -82,8 +82,19 @@ so re-running `spm install` never churns it.
 - **Diamonds** (two of your skills pull in the same dependency) resolve that
   shared skill **exactly once**. Its `requested_by` in `ai.lock` lists every
   requester.
-- **Cycles** (A depends on B depends on A) are detected and reported with the
+- **Cycles** among transitive skills (A depends on B depends on A, where neither
+  is one of your directly-declared roots) are detected and reported with the
   offending chain, rather than looping forever.
+- **Exception — a back-edge onto a direct root is not a cycle.** A skill you
+  declare yourself in `ai.json` is a *fixed install point*: it is materialized
+  exactly once as a top-level skill regardless of the graph. So when a transitive
+  edge points back at a directly-declared root — including a mutual reference
+  between two of your roots (root declares both `A` and `B`; `A`'s nested
+  manifest requires `B` and `B`'s requires `A`) — spm treats it as a satisfied
+  **diamond/dedup** and succeeds, exactly as Cargo or npm dedup a dependency that
+  is also a direct member. The install terminates and nothing is materialized
+  twice. Only a cycle whose nodes are **all** non-root transitive skills is
+  unsatisfiable, and that is the case reported as an error.
 - A hard **depth cap** (8 levels) is a backstop against pathological or hostile
   graphs, independent of the flag.
 
@@ -126,8 +137,12 @@ resolve it by pinning both requesters to the same ref, or removing one dependenc
 "Same repo" means the **same normalized git URL and `path`** — so two skills
 that legitimately point at *different* subdirectories of one monorepo never
 conflict. The normalized form treats `https://host/o/r`, `https://host/o/r.git`,
-and a differently-cased host as one identity, so a conflict can't be evaded by a
-URL spelling difference.
+and a differently-cased host as one identity, and also folds transport-equivalent
+spellings of the same remote — `https://host/o/r`, `ssh://git@host/o/r` and
+scp-style `git@host:o/r` — onto one canonical identity, so a conflict can't be
+evaded by a `.git` suffix, host casing, or an HTTPS/SSH protocol difference.
+(Local sources — a `file://` URL or a bare filesystem path — keep `repo.git` and
+`repo` distinct, since those can be genuinely different directories.)
 
 To fix a conflict, pin both requesters to the same ref, or drop one dependency.
 
