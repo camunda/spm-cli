@@ -3938,29 +3938,43 @@ fn shipped_skill_has_valid_front_matter_and_passes_scan() {
     let dir = shipped_skill_dir();
     let text = std::fs::read_to_string(dir.join("SKILL.md")).expect("skills/spm/SKILL.md exists");
 
-    // Agent Skills front matter: `name` matching the directory, plus a description.
+    // Agent Skills front matter: a leading `---` fenced block that must parse as
+    // YAML (not just satisfy string checks), with `name` matching the directory
+    // and a non-empty description within the loader's length budget.
     let mut lines = text.lines();
     assert_eq!(
         lines.next(),
         Some("---"),
         "SKILL.md must open with front matter"
     );
-    let mut front: Vec<&str> = Vec::new();
+    let mut front = String::new();
     let mut closed = false;
     for l in lines.by_ref() {
         if l == "---" {
             closed = true;
             break;
         }
-        front.push(l);
+        front.push_str(l);
+        front.push('\n');
     }
     assert!(closed, "SKILL.md front matter has no closing `---`");
-    assert!(front.contains(&"name: spm"), "{front:?}");
-    let desc = front
-        .iter()
-        .find_map(|l| l.strip_prefix("description: "))
-        .expect("description in front matter");
-    assert!(!desc.trim().is_empty() && desc.len() <= 1024, "{desc}");
+
+    #[derive(serde::Deserialize)]
+    struct FrontMatter {
+        name: String,
+        description: String,
+    }
+    let fm: FrontMatter = serde_yaml_ng::from_str(&front)
+        .unwrap_or_else(|e| panic!("front matter is not valid YAML: {e}\n---\n{front}---"));
+    assert_eq!(
+        fm.name, "spm",
+        "front matter `name` must match the skill dir"
+    );
+    assert!(
+        !fm.description.trim().is_empty() && fm.description.len() <= 1024,
+        "description must be non-empty and <= 1024 chars: {:?}",
+        fm.description
+    );
 
     // spm's own scanner must find nothing to block (or warn about).
     let out = sb.ok(&["scan", dir.to_str().unwrap()]);

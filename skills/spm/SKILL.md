@@ -210,9 +210,15 @@ Copilot in global scope, because their directories are shared with your own
 skills and undeclared entries there are not spm's to flag. It exits non-zero
 when anything is missing or when the Claude marketplace pointer is stale, so it
 can gate scripts. It compares only names, not versions: after a hand edit of
-`ai.json`, run `spm install` before trusting it. It also warns when a skill
-name is installed in both project and global scope, because the two collide at
-discovery time.
+`ai.json`, run `spm install` before trusting it. It also warns, conservatively,
+when a skill name is locked in both project and global scope. That check
+compares only lockfile names, not targets, so it is not proof of a real clash:
+for Claude the two scopes use distinct command namespaces (`/spm:<name>` vs
+`/spm-global:<name>`) and do not actually collide; the real overlap is on the
+name-keyed targets (Copilot and the shared-directory tools), where both scopes
+flatten into a single `<name>` directory. Treat it as a prompt to check, not a
+guarantee — do not rename a valid Claude-only (or different-target) install on
+the strength of this warning alone.
 
 ### `spm clean`
 
@@ -302,8 +308,8 @@ materialized and `ai.lock` is not written. Lower severities print as warnings.
 | Symptom | Cause and fix |
 | --- | --- |
 | `no ai.json found at ...` | The project is not initialized. The error now also names the fix (`spm init`, or `spm init --global` in global scope). Run it, then retry. |
-| `ref ... not found in <url>` | The tag or branch does not exist at that URL. Check the spelling and that it is pushed (`git ls-remote <url>`). Tags and branches are looked up separately, so use `--tag` for tags and `--branch` for branches. |
-| `git ... failed:` with `Permission denied`, `Authentication failed` or `could not read Username` | Auth failure. spm runs git non-interactively (`GIT_TERMINAL_PROMPT=0`), so it fails instead of prompting. For a private repo use the SSH form (`git@host:org/repo.git`) with a key loaded in ssh-agent, or the HTTPS form with a git credential helper configured. Verify with `git ls-remote <url>` in the same shell, then retry. If only one protocol works on this machine, re-run with `--protocol ssh`/`--protocol https` or `--protocol-fallback` (see [`spm add`](#spm-add)). Do not ask the user for tokens. |
+| `ref ... not found in <url>` | The tag or branch does not exist at that URL. Check the spelling and that it is pushed (`GIT_TERMINAL_PROMPT=0 git ls-remote <url>`). Tags and branches are looked up separately, so use `--tag` for tags and `--branch` for branches. |
+| `git ... failed:` with `Permission denied`, `Authentication failed` or `could not read Username` | Auth failure. spm runs git non-interactively (`GIT_TERMINAL_PROMPT=0`), so it fails instead of prompting. For a private repo use the SSH form (`git@host:org/repo.git`) with a key loaded in ssh-agent, or the HTTPS form with a git credential helper configured. Verify with `GIT_TERMINAL_PROMPT=0 git ls-remote <url>` in the same shell (the env var keeps the probe from blocking on a username/password prompt, matching spm), then retry. If only one protocol works on this machine, re-run with `--protocol ssh`/`--protocol https` or `--protocol-fallback` (see [`spm add`](#spm-add)). Do not ask the user for tokens. |
 | `a skill named ... already exists` | The name is taken. Pick another with `--name`, pass `--force` to re-pin it, or `spm remove <name>` first. |
 | `a plugin named ... already exists` or `... is declared as both a skill and a plugin` | Skills and plugins share one namespace. Use a different `--name`, or remove the other entry. `--force` does not convert a skill into a plugin. |
 | `skill name collision: ... is provided by more than one skill/plugin` | A plugin bundles a skill with the same name as another entry. Rename one of them. |
