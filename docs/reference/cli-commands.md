@@ -9,15 +9,19 @@ spm add <git> (--tag|--branch|--commit <v>) \      # add + install a skill
         [--path <subdir>] [--name <local-name>] [--all] [--force] [-g]  # --all: add every skill under --path
         [--plugin]                                 # --plugin: add a full plugin instead of a skill
 spm target add [vendor ...]                        # add target vendor(s); no arg = pick interactively
-spm remove <name> [--plugin] [-g]                  # drop a skill (or a plugin with --plugin)
+spm remove <name> [--plugin] [-g]                  # drop a skill (or a plugin with --plugin); alias: rm
 spm update [name] [-g]                             # re-resolve branches/tags to latest
-spm install [-g]                                   # rebuild from ai.lock (after clone)
-spm list [-g]                                      # show skills + pinned commits
+spm install [-g]                                   # rebuild from ai.lock (after clone); alias: i
+spm list [-g]                                      # show skills + pinned commits; alias: ls
 spm status [-g]                                    # check skills are materialized in this checkout
 spm clean [-g]                                     # remove generated vendor config
 spm prune [--yes]                                  # wipe the global fetch cache ($SPM_HOME/store, default ~/.spm/store)
 spm scan [path]                                    # scan skill content for suspicious patterns (default: .)
 ```
+
+Three commands have short aliases that behave identically, including `-g`:
+`spm i` for `spm install`, `spm rm <name>` for `spm remove <name>`, and `spm ls`
+for `spm list`.
 
 ## Scope: project (default) vs. global (`-g`)
 
