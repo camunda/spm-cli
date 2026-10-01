@@ -26,9 +26,9 @@ for `spm list`.
 ## Scope: project (default) vs. global (`-g`)
 
 Scope-aware commands (`init`, `add`, `remove`, `update`, `install`, `list`,
-`status`, `clean`) accept `-g` / `--global`; `target add`, `prune`, and `scan`
-don't (`prune` always wipes the shared global fetch cache and `scan` always
-operates on a path). Without `-g`, a scope-aware command operates on the
+`status`, `clean`) accept `-g` / `--global`; `spm target add`, `spm prune`, and
+`spm scan` don't (`prune` always wipes the shared global fetch cache and `scan`
+always operates on a path). Without `-g`, a scope-aware command operates on the
 **project** in the current directory. With it, it manages a **user-global** set
 of skills available to your AI tools in *every* project, with its own
 manifest/lock under `$SPM_HOME` and its own per-vendor materialization

@@ -5,9 +5,9 @@
 `ai.json` and `ai.lock` in the current directory and materialize skills into a
 project-local location. Pass `-g` / `--global` to instead manage a
 **user-global** set of skills — available to your AI tools in *every* project on
-your machine, with no `ai.json` to add to each repo. (`target add`, `prune`, and
-`scan` aren't scope-aware: `prune` always wipes the shared global fetch cache
-and `scan` always operates on a path.)
+your machine, with no `ai.json` to add to each repo. (`spm target add`,
+`spm prune`, and `spm scan` aren't scope-aware: `prune` always wipes the shared
+global fetch cache and `scan` always operates on a path.)
 
 ```bash
 spm init -g --target copilot                        # create the global manifest ($SPM_HOME/ai.json)
