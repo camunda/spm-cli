@@ -3497,3 +3497,26 @@ fn add_github_shorthand_rejects_malformed_input() {
         assert_eq!(sb.read("ai.json"), before);
     }
 }
+
+#[test]
+fn add_github_shorthand_in_uninitialized_project_hints_spm_init() {
+    // Regression guard: `spm add github.com/...@ref` used to run the `@ref`
+    // tag/branch lookup (a `git ls-remote`) before loading the manifest, so an
+    // uninitialized project (no `ai.json`) could fail on a network/auth error
+    // from the lookup instead of the usual missing-manifest hint. The manifest
+    // must be loaded (and the error raised) before the shorthand is expanded.
+    let sb = Sandbox::new();
+    // No `spm init` — no ai.json exists yet.
+    let out = sb.spm_github(&["add", "github.com/owner/repo@main"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.starts_with("error: no ai.json found at "),
+        "expected the missing-manifest error, got: {err}"
+    );
+    assert!(
+        err.trim_end()
+            .ends_with("\nhint: run `spm init` to create one"),
+        "expected the spm init hint, got: {err}"
+    );
+}

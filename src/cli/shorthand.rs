@@ -50,7 +50,12 @@ fn parse(input: &str) -> Result<Option<Shorthand>> {
         if r.is_empty() {
             bail!("invalid GitHub shorthand `{input}`: empty ref after `@`; {usage}");
         }
-        if r.starts_with('-') || r.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        // A leading `-` is not an option-injection risk here: `classify` always
+        // prefixes the value with `refs/heads/` or `refs/tags/` before passing
+        // it to Git, so the resulting argument never starts with `-`. Valid
+        // refs such as `refs/heads/-topic` must stay usable through shorthand,
+        // the same as through the explicit --tag/--branch selectors.
+        if r.chars().any(|c| c.is_whitespace() || c.is_control()) {
             bail!("invalid GitHub shorthand `{input}`: `{r}` is not a valid ref");
         }
     }
@@ -88,8 +93,9 @@ fn classify(url: &str, reference: &str) -> Result<VersionArg> {
         (true, false) => version.tag = Some(reference.to_string()),
         (false, true) => version.branch = Some(reference.to_string()),
         (true, true) => bail!(
-            "`@{reference}` is both a tag and a branch in {url}; pick one with \
-             --tag {reference} or --branch {reference}"
+            "`@{reference}` is both a tag and a branch in {url}; remove `@{reference}` \
+             from the shorthand, then pass --tag {reference} or --branch {reference} \
+             (adding --tag/--branch alongside `@{reference}` still conflicts)"
         ),
         (false, false) => bail!(
             "`@{reference}` is neither a tag nor a branch in {url}; for a commit, \
@@ -186,11 +192,27 @@ mod tests {
             "github.com/o b/r",
             "github.com/o/r@",
             "github.com/o/r@ v1",
-            "github.com/o/r@--upload-pack=x",
             "github.com/@v1",
         ] {
             assert!(parse(input).is_err(), "{input} should be rejected");
         }
+    }
+
+    #[test]
+    fn leading_dash_refs_are_allowed() {
+        // `classify` always prefixes the value with `refs/heads/` or
+        // `refs/tags/` before passing it to Git, so a leading `-` here never
+        // reaches Git as a bare, injectable argument. Valid refs such as
+        // `refs/heads/-topic` or `refs/tags/--upload-pack=x` must stay usable
+        // through shorthand, the same as through explicit --tag/--branch.
+        assert_eq!(
+            parse("github.com/o/r@-topic").unwrap(),
+            short("https://github.com/o/r.git", Some("-topic"))
+        );
+        assert_eq!(
+            parse("github.com/o/r@--upload-pack=x").unwrap(),
+            short("https://github.com/o/r.git", Some("--upload-pack=x"))
+        );
     }
 
     #[test]

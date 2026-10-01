@@ -29,11 +29,15 @@ pub(super) fn add(scope: &Scope, req: AddRequest) -> Result<()> {
         plugin,
         force,
     } = req;
-    // Expand a `github.com/owner/repo[@ref]` shorthand into a normal URL (plus
-    // version selector) before anything else, so the manifest records the URL.
-    let (git, version) = shorthand::expand(git, version)?;
     let dir = scope.manifest_dir()?;
     let mut manifest = Manifest::load(&dir, scope)?;
+    // Expand a `github.com/owner/repo[@ref]` shorthand into a normal URL (plus
+    // version selector) before deriving or saving the dependency, so the
+    // manifest records the URL. This runs *after* `Manifest::load` so that an
+    // uninitialized project (no `ai.json`) fails with the usual missing-manifest
+    // hint instead of a `git ls-remote` network/auth error from the shorthand's
+    // ref lookup.
+    let (git, version) = shorthand::expand(git, version)?;
     if let Some(sub) = &path {
         crate::manifest::validate_subpath(sub)?;
     }
