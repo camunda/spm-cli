@@ -4559,7 +4559,44 @@ fn case_folding_skill_name_collision_is_rejected() {
     assert!(err.contains("differ only by case"), "{err}");
 }
 
-/// `resolve_child` scopes lockfile reuse to the exact edge (its synthesized
+/// Plugins materialize into their own vendor directory, so the same
+/// case-insensitive-filesystem overwrite hazard applies independently of
+/// skills. Two plugin keys differing only by case must be rejected before any
+/// vendor writes a byte — closing the Windows/macOS collision gap for the
+/// plugin set, not just the skill set.
+#[test]
+fn case_folding_plugin_name_collision_is_rejected() {
+    let sb = Sandbox::new();
+    let plugin_json = |name: &str| {
+        format!(
+            r#"{{"name":"{name}","version":"1.0.0","mcpServers":{{"demo":{{"command":"node","args":["x"]}}}}}}"#
+        )
+    };
+    let one = make_repo(
+        &sb.root.join("plugin-one"),
+        &[(".claude-plugin/plugin.json", &plugin_json("one"))],
+    );
+    let two = make_repo(
+        &sb.root.join("plugin-two"),
+        &[(".claude-plugin/plugin.json", &plugin_json("two"))],
+    );
+    sb.ok(&["init", "--target", "claude"]);
+    // `Ds` and `ds` are distinct manifest keys that fold to the same plugin dir.
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["claude"],"plugins":{{"Ds":{{"git":"{one}","branch":"main"}},"ds":{{"git":"{two}","branch":"main"}}}}}}"#
+        ),
+    );
+    let out = sb.spm(&["install"]);
+    assert!(
+        !out.status.success(),
+        "a case-folding plugin name collision must fail the install"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("plugin name collision"), "{err}");
+    assert!(err.contains("differ only by case"), "{err}");
+}
 /// name), so a newly-declared transitive edge resolves fresh at the current tip
 /// instead of inheriting a stale pin left behind by a removed root. Guards
 /// against a brand-new child being silently pinned to an unrelated old commit.

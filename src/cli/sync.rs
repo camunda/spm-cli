@@ -235,29 +235,16 @@ pub(super) fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Re
         materialized.push(s);
     }
 
-    // Vendor skill directories are case-insensitive on Windows and the default
-    // macOS filesystem, so two skills whose names differ only by case resolve to
-    // the same directory — `copy_skills_into` would remove the first and
-    // silently overwrite it with the second. The byte-for-byte guards above
-    // catch exact clashes early with tailored guidance; this is the single
+    // Vendor skill AND plugin directories are case-insensitive on Windows and
+    // the default macOS filesystem, so two entries whose names differ only by
+    // case resolve to the same directory — the materializer would remove the
+    // first and silently overwrite it with the second. The byte-for-byte guards
+    // above catch exact clashes early with tailored guidance; this is the single
     // canonical backstop that rejects *case-folding* collisions across the whole
-    // materialized set (direct, transitive, and plugin-bundled skills) before
-    // any vendor writes a byte.
-    {
-        let mut seen: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
-        for m in &materialized {
-            if let Some(other) = seen.insert(m.name.to_lowercase(), &m.name) {
-                if other != m.name {
-                    bail!(
-                        "skill name collision: `{other}` and `{}` differ only by case — vendor \
-                         directories are case-insensitive on Windows and macOS, so one would \
-                         silently overwrite the other; rename or re-pin one of them",
-                        m.name
-                    );
-                }
-            }
-        }
-    }
+    // materialized set (direct, transitive, and plugin-bundled skills) and,
+    // separately, across plugins — before any vendor writes a byte.
+    reject_case_folding_collisions("skill", materialized.iter().map(|m| m.name.as_str()))?;
+    reject_case_folding_collisions("plugin", plugins.iter().map(|p| p.name.as_str()))?;
     // Same resolved skills + plugins projected into every configured vendor.
     if !manifest.skills.is_empty() || !manifest.plugins.is_empty() {
         println!("materializing: {}", manifest.targets.join(", "));
@@ -272,4 +259,29 @@ pub(super) fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Re
     // was never actually materialized.
     lock.save(&dir)?;
     Ok(lock.skills.len() + lock.plugins.len())
+}
+
+/// Reject materialized names that differ only by case. Vendor directories are
+/// case-insensitive on Windows and the default macOS filesystem, so two such
+/// names resolve to the same on-disk directory and the second silently
+/// overwrites the first. `kind` labels the set (`"skill"`/`"plugin"`) in the
+/// error. This is the canonical backstop; byte-for-byte guards elsewhere catch
+/// exact clashes earlier with more specific guidance.
+fn reject_case_folding_collisions<'a>(
+    kind: &str,
+    names: impl IntoIterator<Item = &'a str>,
+) -> Result<()> {
+    let mut seen: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
+    for name in names {
+        if let Some(other) = seen.insert(name.to_lowercase(), name) {
+            if other != name {
+                bail!(
+                    "{kind} name collision: `{other}` and `{name}` differ only by case — vendor \
+                     directories are case-insensitive on Windows and macOS, so one would \
+                     silently overwrite the other; rename or re-pin one of them"
+                );
+            }
+        }
+    }
+    Ok(())
 }
