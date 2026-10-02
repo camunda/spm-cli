@@ -235,6 +235,29 @@ pub(super) fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Re
         materialized.push(s);
     }
 
+    // Vendor skill directories are case-insensitive on Windows and the default
+    // macOS filesystem, so two skills whose names differ only by case resolve to
+    // the same directory — `copy_skills_into` would remove the first and
+    // silently overwrite it with the second. The byte-for-byte guards above
+    // catch exact clashes early with tailored guidance; this is the single
+    // canonical backstop that rejects *case-folding* collisions across the whole
+    // materialized set (direct, transitive, and plugin-bundled skills) before
+    // any vendor writes a byte.
+    {
+        let mut seen: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
+        for m in &materialized {
+            if let Some(other) = seen.insert(m.name.to_lowercase(), &m.name) {
+                if other != m.name {
+                    bail!(
+                        "skill name collision: `{other}` and `{}` differ only by case — vendor \
+                         directories are case-insensitive on Windows and macOS, so one would \
+                         silently overwrite the other; rename or re-pin one of them",
+                        m.name
+                    );
+                }
+            }
+        }
+    }
     // Same resolved skills + plugins projected into every configured vendor.
     if !manifest.skills.is_empty() || !manifest.plugins.is_empty() {
         println!("materializing: {}", manifest.targets.join(", "));

@@ -4527,6 +4527,38 @@ fn transitive_back_edge_onto_direct_root_is_satisfied() {
     );
 }
 
+/// Two skills whose names differ only by case materialize into the same vendor
+/// directory on case-insensitive filesystems (Windows, the default macOS APFS),
+/// so one silently overwrites the other. `install` rejects the case-folding
+/// collision before any vendor writes a byte.
+#[test]
+fn case_folding_skill_name_collision_is_rejected() {
+    let sb = Sandbox::new();
+    let foo = make_repo(
+        &sb.root.join("foo"),
+        &[("SKILL.md", "---\nname: foo\n---\nFoo.\n")],
+    );
+    let bar = make_repo(
+        &sb.root.join("bar"),
+        &[("SKILL.md", "---\nname: bar\n---\nBar.\n")],
+    );
+    sb.ok(&["init", "--target", "copilot"]);
+    // `Foo` and `foo` are distinct manifest keys but fold to the same directory.
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"skills":{{"Foo":{{"git":"{foo}","branch":"main"}},"foo":{{"git":"{bar}","branch":"main"}}}}}}"#
+        ),
+    );
+    let out = sb.spm(&["install"]);
+    assert!(
+        !out.status.success(),
+        "a case-folding name collision must fail the install"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("differ only by case"), "{err}");
+}
+
 /// `resolve_child` scopes lockfile reuse to the exact edge (its synthesized
 /// name), so a newly-declared transitive edge resolves fresh at the current tip
 /// instead of inheriting a stale pin left behind by a removed root. Guards
