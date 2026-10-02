@@ -49,6 +49,11 @@ use std::path::{Component, Path, PathBuf};
 /// refuse past this and tell the user which chain hit the limit.
 pub const MAX_DEPTH: usize = 8;
 
+/// Upper bound (bytes) on a synthesized transitive skill name. Names become
+/// directory components, and common filesystems cap a component at 255 bytes;
+/// this leaves headroom for suffixes added around the name.
+pub const MAX_SYNTH_NAME_BYTES: usize = 200;
+
 /// Hard cap on the total number of distinct transitive skills (nodes) resolved
 /// across the whole walk, independent of depth. `MAX_DEPTH` only bounds the
 /// length of a single chain; without a global budget a dependency whose
@@ -284,8 +289,26 @@ fn short_hash(key: &Key) -> String {
 
 /// Synthesize a transitive skill's materialized name:
 /// `{requester}__{declared}-{short_hash}`.
+///
+/// Names nest (a requester may itself be synthesized), so the result is bounded
+/// to [`MAX_SYNTH_NAME_BYTES`] by truncating the requester and declared parts;
+/// the identity hash suffix is always kept intact and keeps names distinct.
 fn synth_name(requester: &str, declared: &str, key: &Key) -> String {
-    format!("{requester}__{declared}-{}", short_hash(key))
+    let suffix = format!("-{}", short_hash(key));
+    let budget = MAX_SYNTH_NAME_BYTES - suffix.len() - 2;
+    // Give `declared` priority up to half the budget; the requester gets the rest.
+    let declared_max = declared.len().min(budget / 2);
+    let requester = truncate_to(requester, budget - declared_max);
+    let declared = truncate_to(declared, declared_max);
+    format!("{requester}__{declared}{suffix}")
+}
+
+fn truncate_to(s: &str, max_bytes: usize) -> &str {
+    let mut end = max_bytes.min(s.len());
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 fn chain_str(chain: &[String]) -> String {
@@ -835,6 +858,26 @@ mod tests {
             "must be a valid skill name: {a}"
         );
         assert!(a.starts_with("foo__helper-"));
+    }
+
+    #[test]
+    fn synth_name_stays_within_length_cap_at_max_depth() {
+        let key = ("https://github.com/o/r".to_string(), None);
+        let mut name = "r".repeat(100);
+        for _ in 0..MAX_DEPTH {
+            name = synth_name(&name, &"d".repeat(100), &key);
+            assert!(name.len() <= MAX_SYNTH_NAME_BYTES, "{} bytes", name.len());
+            assert!(validate_skill_name(&name).is_ok());
+            assert!(name.ends_with(&format!("-{}", short_hash(&key))));
+        }
+    }
+
+    #[test]
+    fn synth_name_truncation_respects_char_boundaries() {
+        let key = ("https://github.com/o/r".to_string(), None);
+        let name = synth_name(&"é".repeat(300), &"ü".repeat(300), &key);
+        assert!(name.len() <= MAX_SYNTH_NAME_BYTES);
+        assert!(validate_skill_name(&name).is_ok());
     }
 
     #[test]

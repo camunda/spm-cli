@@ -73,6 +73,9 @@ stable, collision-resistant materialized name:
 - `declared` — the skill's key in the dependency's `ai.json`.
 - `shorthash` — a short hash of the dependency's normalized `(git, path)`.
 
+The name is capped at 200 bytes: for deeply nested chains the `requester` and
+`declared` parts are truncated, while the `shorthash` is always kept.
+
 For example, a skill `formatter` pulled in by your `toolkit` skill materializes
 as a directory like `toolkit__formatter-1a2b3c4d/`. The name is deterministic,
 so re-running `spm install` never churns it.
