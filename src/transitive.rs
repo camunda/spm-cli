@@ -452,7 +452,18 @@ fn visit(
         let ckey = key_of(&spec.git, &spec.path);
 
         // Cycle: the child identity is an ancestor still on the current branch.
-        if let Some(pos) = w.stack.iter().position(|(k, _)| k == &ckey) {
+        // A back-edge whose identity is on the active DFS branch is a cycle —
+        // *unless* it lands on a pre-seeded direct root. A direct root is a
+        // fixed install point that legitimately satisfies and terminates a
+        // back-edge to itself (a diamond), even while it is still on the current
+        // branch; the dedup branch below records the provenance. Only a
+        // back-edge onto an active *transitive* node (one with a real
+        // `out_idx`) is a genuine self-dependency. Checking `out_idx.is_none()`
+        // on the resolved entry distinguishes the two, since only pre-seeded
+        // roots carry `out_idx: None`.
+        let on_branch = w.stack.iter().position(|(k, _)| k == &ckey);
+        let lands_on_direct_root = w.resolved.get(&ckey).is_some_and(|r| r.out_idx.is_none());
+        if let Some(pos) = on_branch.filter(|_| !lands_on_direct_root) {
             let mut chain: Vec<String> = w.stack[pos..].iter().map(|(_, n)| n.clone()).collect();
             chain.push(format!("{declared} (= {})", w.stack[pos].1));
             bail!(
@@ -665,6 +676,13 @@ mod tests {
         assert_eq!(normalize_git("ssh://git@github.com/o/r"), https);
         assert_eq!(normalize_git("git@github.com:o/r"), https);
         assert_eq!(normalize_git("HTTPS://GitHub.com/o/r.git/"), https);
+        // Schemes are case-insensitive: an uppercase `SSH://` must still fold to
+        // the HTTPS identity. (Uppercase `HTTPS://` happens to collapse via the
+        // generic lowercasing branch, but `SSH://` keeps its distinct `ssh://`
+        // scheme + `git@` there, so only a case-insensitive remote parser folds
+        // it — see `git::split_remote`.)
+        assert_eq!(normalize_git("SSH://git@GitHub.com/o/r"), https);
+        assert_eq!(normalize_git("Ssh://git@github.com/o/r.git"), https);
     }
 
     #[test]

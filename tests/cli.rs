@@ -4410,15 +4410,30 @@ fn update_named_root_does_not_cascade_refresh_to_transitive_children() {
     );
 }
 
-/// A dependency cycle (A -> B -> A) is detected and reported, not looped into a
-/// stack overflow.
+/// A dependency cycle wholly among *transitive* nodes (root -> a -> b -> a) is
+/// detected and reported, not looped into a stack overflow. The cycle must not
+/// route through a direct root (those are a satisfied back-edge, see
+/// `transitive_back_edge_onto_direct_root_is_satisfied`), so the reproducer uses
+/// a distinct root `r` whose transitive subtree `a <-> b` closes on itself.
 #[test]
 fn transitive_cycle_is_detected() {
     let sb = Sandbox::new();
+    let r_dir = sb.root.join("cyc-r");
     let a_dir = sb.root.join("cyc-a");
     let b_dir = sb.root.join("cyc-b");
+    let r_url = format!("file://{}", r_dir.display().to_string().replace('\\', "/"));
     let a_url = format!("file://{}", a_dir.display().to_string().replace('\\', "/"));
     let b_url = format!("file://{}", b_dir.display().to_string().replace('\\', "/"));
+    make_repo(
+        &r_dir,
+        &[
+            ("SKILL.md", "---\nname: r\n---\nR.\n"),
+            (
+                "ai.json",
+                &format!(r#"{{"skills":{{"a":{{"git":"{a_url}","branch":"main"}}}}}}"#),
+            ),
+        ],
+    );
     make_repo(
         &a_dir,
         &[
@@ -4443,13 +4458,73 @@ fn transitive_cycle_is_detected() {
     write_manifest(
         &sb,
         &format!(
-            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{"a":{{"git":"{a_url}","branch":"main"}}}}}}"#
+            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{"r":{{"git":"{r_url}","branch":"main"}}}}}}"#
         ),
     );
     let out = sb.spm(&["install"]);
     assert!(!out.status.success(), "a cycle must fail the install");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("dependency cycle detected"), "{err}");
+}
+
+/// A transitive back-edge whose identity lands on a directly declared root —
+/// even while that root is still on the active DFS branch (`a -> c -> a`) — is a
+/// satisfied diamond against the root's fixed install point, NOT a cycle. This
+/// is the on-branch case the stack guard previously mis-flagged: `a` is pushed
+/// for the whole walk of its own subtree, so `c -> a` sees `a` on the stack.
+#[test]
+fn transitive_back_edge_onto_direct_root_is_satisfied() {
+    let sb = Sandbox::new();
+    let a_dir = sb.root.join("be-a");
+    let c_dir = sb.root.join("be-c");
+    let a_url = format!("file://{}", a_dir.display().to_string().replace('\\', "/"));
+    let c_url = format!("file://{}", c_dir.display().to_string().replace('\\', "/"));
+    // a (direct root) -> c (transitive) -> a (back to the root).
+    make_repo(
+        &a_dir,
+        &[
+            ("SKILL.md", "---\nname: a\n---\nA.\n"),
+            (
+                "ai.json",
+                &format!(r#"{{"skills":{{"c":{{"git":"{c_url}","branch":"main"}}}}}}"#),
+            ),
+        ],
+    );
+    make_repo(
+        &c_dir,
+        &[
+            ("SKILL.md", "---\nname: c\n---\nC.\n"),
+            (
+                "ai.json",
+                &format!(r#"{{"skills":{{"a":{{"git":"{a_url}","branch":"main"}}}}}}"#),
+            ),
+        ],
+    );
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{"a":{{"git":"{a_url}","branch":"main"}}}}}}"#
+        ),
+    );
+    let out = sb.spm(&["install"]);
+    assert!(
+        out.status.success(),
+        "a back-edge onto a direct root must resolve as a diamond, not a cycle: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Both the root `a` and the transitive `c` are materialized; the back-edge
+    // dedups against the root instead of synthesizing a second copy of `a`.
+    let dirs = copilot_skill_dirs(&sb);
+    assert!(dirs.iter().any(|n| n == "a"), "root a present: {dirs:?}");
+    assert!(
+        dirs.iter().any(|n| n.contains("__c-")),
+        "transitive c present: {dirs:?}"
+    );
+    assert!(
+        !dirs.iter().any(|n| n.contains("__a-")),
+        "root a is not re-synthesized as a transitive copy: {dirs:?}"
+    );
 }
 
 /// A transitive dependency chain deeper than the hard depth cap fails fast with
