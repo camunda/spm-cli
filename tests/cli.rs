@@ -1314,6 +1314,34 @@ fn status_reports_materialized_skills() {
     assert!(!out.contains("MISSING"), "nothing should be missing: {out}");
 }
 
+/// A skill declared directly in `ai.json` is a direct dependency even if a
+/// stale or hand-edited `ai.lock` leaves a non-empty `requested_by` on its
+/// entry (lock validation permits that). `spm status` must not mislabel it
+/// `transitive; via ...` — matching `spm list`, which excludes manifest skills
+/// from the transitive section.
+#[test]
+fn status_does_not_label_a_direct_skill_as_transitive() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+
+    // Hand-edit the lock to smuggle a requester onto the direct `greet` entry.
+    let mut lock: serde_json::Value = serde_json::from_str(&sb.read("ai.lock")).unwrap();
+    lock["skills"]["greet"]["requested_by"] = serde_json::json!(["phantom-parent"]);
+    std::fs::write(
+        sb.project.join("ai.lock"),
+        serde_json::to_string_pretty(&lock).unwrap(),
+    )
+    .unwrap();
+
+    let out = sb.ok(&["status"]);
+    assert!(out.contains("greet"), "{out}");
+    assert!(
+        !out.contains("transitive; via"),
+        "a direct manifest skill must not be labeled transitive: {out}"
+    );
+}
+
 #[test]
 fn status_flags_uninstalled_worktree() {
     let sb = Sandbox::new();
