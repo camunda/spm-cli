@@ -4495,7 +4495,78 @@ fn transitive_cycle_is_detected() {
     assert!(err.contains("dependency cycle detected"), "{err}");
 }
 
-/// A transitive back-edge whose identity lands on a directly declared root —
+/// A *differing-reference* back-edge onto an active transitive ancestor
+/// (`r -> a@main -> b -> a@other`) is still a self-dependency cycle — not an
+/// independent version conflict. `b` lives inside `a`'s own subtree, so the two
+/// `a` requirements are not independent requesters; you cannot even discover
+/// `b`'s requirement without first resolving `a`. Guards the classification
+/// against regressing into a (misleading) version-conflict report, or a panic,
+/// merely because the second edge names a different ref than the ancestor.
+#[test]
+fn transitive_differing_ref_back_edge_onto_ancestor_is_a_cycle() {
+    let sb = Sandbox::new();
+    let a_dir = sb.root.join("drc-a");
+    let b_dir = sb.root.join("drc-b");
+    let b_url = format!("file://{}", b_dir.display().to_string().replace('\\', "/"));
+    // `a` carries two branches at different commits so the back-edge (`a@other`)
+    // names a genuinely different reference than the one `a` is resolved at
+    // (`a@main`). `a@other` is never fetched — the cycle fires on identity,
+    // before the differing ref is ever resolved.
+    let a_url = make_repo(
+        &a_dir,
+        &[
+            ("SKILL.md", "---\nname: a\n---\nA v1.\n"),
+            (
+                "ai.json",
+                &format!(r#"{{"skills":{{"b":{{"git":"{b_url}","branch":"main"}}}}}}"#),
+            ),
+        ],
+    );
+    git_in(&a_dir, &["checkout", "-q", "-b", "other"]);
+    std::fs::write(a_dir.join("SKILL.md"), "---\nname: a\n---\nA v2.\n").unwrap();
+    git_in(&a_dir, &["add", "-A"]);
+    git_in(&a_dir, &["commit", "-qm", "a v2"]);
+    git_in(&a_dir, &["checkout", "-q", "main"]);
+    // `b` closes the loop back onto `a`, but by the *other* branch.
+    make_repo(
+        &b_dir,
+        &[
+            ("SKILL.md", "---\nname: b\n---\nB.\n"),
+            (
+                "ai.json",
+                &format!(r#"{{"skills":{{"a":{{"git":"{a_url}","branch":"other"}}}}}}"#),
+            ),
+        ],
+    );
+    let r_url = make_repo(
+        &sb.root.join("drc-r"),
+        &[
+            ("SKILL.md", "---\nname: r\n---\nR.\n"),
+            (
+                "ai.json",
+                &format!(r#"{{"skills":{{"a":{{"git":"{a_url}","branch":"main"}}}}}}"#),
+            ),
+        ],
+    );
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{"r":{{"git":"{r_url}","branch":"main"}}}}}}"#
+        ),
+    );
+    let out = sb.spm(&["install"]);
+    assert!(
+        !out.status.success(),
+        "a self-dependency cycle must fail the install"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("dependency cycle detected"), "{err}");
+    assert!(
+        !err.contains("version conflict"),
+        "an on-branch self-dependency is a cycle, not a version conflict: {err}"
+    );
+}
 /// even while that root is still on the active DFS branch (`a -> c -> a`) — is a
 /// satisfied diamond against the root's fixed install point, NOT a cycle. This
 /// is the on-branch case the stack guard previously mis-flagged: `a` is pushed
