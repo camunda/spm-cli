@@ -321,7 +321,38 @@ impl DependencyManifest {
             .with_context(|| format!("parsing nested {}", p.display()))?;
         for (name, spec) in &dep.skills {
             validate_skill_name(name).with_context(|| format!("in nested {}", p.display()))?;
+            // The root schema constrains these fields to a non-empty string
+            // (`minLength: 1`); a nested manifest bypasses the schema, so an
+            // empty `git`/`tag`/`branch`/`path` would otherwise slip through and
+            // only surface later as a confusing failure deep in git (e.g.
+            // `branch: ""` → `refs/heads/` rejected by `git ls-remote`) or a
+            // silent repo-root pin (empty `path`). Mirror the schema here so a
+            // malformed nested manifest fails fast with a local error.
+            if spec.git.is_empty() {
+                bail!(
+                    "skill `{name}` in nested {}: `git` must be non-empty",
+                    p.display()
+                );
+            }
+            if spec.tag.as_deref() == Some("") {
+                bail!(
+                    "skill `{name}` in nested {}: `tag` must be non-empty",
+                    p.display()
+                );
+            }
+            if spec.branch.as_deref() == Some("") {
+                bail!(
+                    "skill `{name}` in nested {}: `branch` must be non-empty",
+                    p.display()
+                );
+            }
             if let Some(sub) = &spec.path {
+                if sub.is_empty() {
+                    bail!(
+                        "skill `{name}` in nested {}: `path` must be non-empty",
+                        p.display()
+                    );
+                }
                 validate_subpath(sub)
                     .with_context(|| format!("skill `{name}` in nested {}", p.display()))?;
             }
@@ -434,6 +465,47 @@ mod tests {
             "{err:#}"
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The root schema requires `git`/`tag`/`branch`/`path` to be non-empty
+    /// (`minLength: 1`); a nested manifest bypasses the schema, so `load_file`
+    /// must enforce the same so an empty selector fails locally instead of
+    /// surfacing as a confusing `refs/heads/` or a silent repo-root pin.
+    #[test]
+    fn dependency_manifest_rejects_empty_selector_fields() {
+        let base = std::env::temp_dir().join(format!(
+            "spm-depman-empty-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        for (json, needle) in [
+            (
+                r#"{"skills":{"leaf":{"git":"","branch":"main"}}}"#,
+                "`git` must be non-empty",
+            ),
+            (
+                r#"{"skills":{"leaf":{"git":"u","tag":""}}}"#,
+                "`tag` must be non-empty",
+            ),
+            (
+                r#"{"skills":{"leaf":{"git":"u","branch":""}}}"#,
+                "`branch` must be non-empty",
+            ),
+            (
+                r#"{"skills":{"leaf":{"git":"u","branch":"main","path":""}}}"#,
+                "`path` must be non-empty",
+            ),
+        ] {
+            let dir = base.join(needle.replace([' ', '`'], "_"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(Manifest::path_in(&dir), json).unwrap();
+            let err = DependencyManifest::load_file(&Manifest::path_in(&dir)).unwrap_err();
+            assert!(format!("{err:#}").contains(needle), "{json}: {err:#}");
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
     }
 
     #[test]
