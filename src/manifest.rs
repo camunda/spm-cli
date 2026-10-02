@@ -198,6 +198,37 @@ pub fn validate_skill_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Maximum size (bytes) of a nested dependency `ai.json`. A nested manifest is
+/// untrusted and parsed (twice) into memory before any edge budget applies, so
+/// the size is bounded up front; this comfortably fits `MAX_EDGES` declarations.
+pub const MAX_NESTED_MANIFEST_BYTES: u64 = 256 * 1024;
+
+/// Read a nested manifest, refusing anything over [`MAX_NESTED_MANIFEST_BYTES`].
+/// The read itself is capped (not just a metadata check), so a file that grows
+/// between check and read still cannot exhaust memory.
+fn read_bounded(p: &Path) -> Result<String> {
+    use std::io::Read;
+    let ctx = || format!("reading nested {MANIFEST_FILE} at {}", p.display());
+    let file = std::fs::File::open(p).with_context(ctx)?;
+    let mut buf = Vec::new();
+    file.take(MAX_NESTED_MANIFEST_BYTES + 1)
+        .read_to_end(&mut buf)
+        .with_context(ctx)?;
+    if buf.len() as u64 > MAX_NESTED_MANIFEST_BYTES {
+        bail!(
+            "nested {MANIFEST_FILE} at {} is larger than {MAX_NESTED_MANIFEST_BYTES} bytes; \
+             refusing to parse it",
+            p.display()
+        );
+    }
+    String::from_utf8(buf).with_context(|| {
+        format!(
+            "nested {MANIFEST_FILE} at {} is not valid UTF-8",
+            p.display()
+        )
+    })
+}
+
 /// Whether `stem` is a Windows reserved device name (case-insensitive):
 /// `CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, or `LPT1`–`LPT9`.
 fn is_windows_reserved_device_name(stem: &str) -> bool {
@@ -347,8 +378,7 @@ impl DependencyManifest {
     /// where the symlink could be swapped between the boundary check and the read
     /// to smuggle in an outside, unscanned manifest.
     pub fn load_file(p: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(p)
-            .with_context(|| format!("reading nested {MANIFEST_FILE} at {}", p.display()))?;
+        let text = read_bounded(p)?;
         let value: serde_json::Value = serde_json::from_str(&text)
             .with_context(|| format!("parsing nested {}", p.display()))?;
         if value.get("resolveTransitive").is_some() {
@@ -606,6 +636,25 @@ mod tests {
             assert!(format!("{err:#}").contains(needle), "{json}: {err:#}");
             std::fs::remove_dir_all(&dir).unwrap();
         }
+    }
+
+    #[test]
+    fn dependency_manifest_rejects_oversized_file_before_parsing() {
+        let dir = std::env::temp_dir().join(format!(
+            "spm-depman-big-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Valid JSON, but padded past the cap: must fail on size, not parse.
+        let pad = " ".repeat(MAX_NESTED_MANIFEST_BYTES as usize);
+        std::fs::write(Manifest::path_in(&dir), format!("{{\"skills\":{{}}}}{pad}")).unwrap();
+        let err = DependencyManifest::load_file(&Manifest::path_in(&dir)).unwrap_err();
+        assert!(format!("{err:#}").contains("larger than"), "{err:#}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

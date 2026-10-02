@@ -73,6 +73,8 @@ stable, collision-resistant materialized name:
 - `declared` — the skill's key in the dependency's `ai.json`.
 - `shorthash` — a short hash of the dependency's normalized `(git, path)`.
 
+A nested `ai.json` larger than 256 KiB is rejected before it is parsed.
+
 The name is capped at 200 bytes: for deeply nested chains the `requester` and
 `declared` parts are truncated, while the `shorthash` is always kept.
 
