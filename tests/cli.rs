@@ -4679,6 +4679,43 @@ fn newly_discovered_transitive_edge_does_not_reuse_stale_pin() {
     );
 }
 
+/// A nested dependency manifest that declares a skill whose name is invalid as a
+/// filesystem path component (here a Windows-invalid `*`) is rejected when the
+/// parent's `ai.json` is read — before the named child is synthesized or
+/// fetched. Guards the transitive surface against unportable/hostile names
+/// reaching the materializer on a case- or device-sensitive platform.
+#[test]
+fn transitive_nested_invalid_skill_name_is_rejected_before_fetch() {
+    let sb = Sandbox::new();
+    // The child URL points nowhere resolvable: if the guard fired *after* trying
+    // to fetch, we'd see a git/resolve error instead of the name error.
+    let child_url = "file:///nonexistent/never-fetched";
+    let dep_json =
+        format!(r#"{{"skills":{{"bad*name":{{"git":"{child_url}","branch":"main"}}}}}}"#);
+    let parent = make_repo(
+        &sb.root.join("parent"),
+        &[
+            ("SKILL.md", "---\nname: parent\n---\nParent.\n"),
+            ("ai.json", &dep_json),
+        ],
+    );
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{"parent":{{"git":"{parent}","branch":"main"}}}}}}"#
+        ),
+    );
+    let out = sb.spm(&["install"]);
+    assert!(
+        !out.status.success(),
+        "an invalid nested skill name must fail the install"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("invalid skill name"), "{err}");
+    assert!(err.contains("not allowed"), "{err}");
+}
+
 /// A transitive dependency chain deeper than the hard depth cap fails fast with
 /// a clear error instead of resolving unbounded nesting. Guards the depth-cap
 /// boundary that the cycle/diamond tests do not exercise.

@@ -143,24 +143,69 @@ impl SkillSpec {
     }
 }
 
-/// Reject a skill name that could escape the vendor `skills/` directory when it
-/// is used verbatim as a path component (e.g. `skills_dir.join(name)`). Names
-/// come straight from `ai.json` keys, so a hostile manifest could otherwise
-/// write outside the intended directory via `..`, `/`, or an absolute path.
+/// Reject a skill name that is unsafe or unportable as a path component. Names
+/// come straight from `ai.json` keys (root *and* nested dependency manifests)
+/// and become directory components under each vendor's skills dir, so this is
+/// the single canonical gate for every name that reaches the filesystem.
+///
+/// Two classes are rejected:
+///   1. **Path escapes** — `..`, `/`, `\`, or NUL would let a hostile manifest
+///      write outside the intended directory (`skills_dir.join(name)`).
+///   2. **Platform-invalid / reserved names** — characters and reserved device
+///      names that are illegal, silently rewritten, or map to device files on
+///      Windows (which is in CI and a supported platform). Rejecting them here
+///      fails fast with a clear local error instead of surfacing as a confusing
+///      filesystem error deep inside materialization on another OS — and does so
+///      *before* a nested dependency is synthesized or fetched.
 pub fn validate_skill_name(name: &str) -> Result<()> {
-    let bad = name.is_empty()
+    let path_bad = name.is_empty()
         || name == "."
         || name == ".."
         || name.contains('/')
         || name.contains('\\')
         || name.contains('\0');
-    if bad {
+    if path_bad {
         bail!(
             "invalid skill name `{name}`: names must be non-empty and must not contain \
              path separators, `.`, `..`, or NUL"
         );
     }
+    if let Some(c) = name
+        .chars()
+        .find(|c| matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*') || c.is_control())
+    {
+        bail!(
+            "invalid skill name `{name}`: character {c:?} is not allowed — names become \
+             directory components, and `< > : \" | ? *` and control characters are invalid \
+             in file names on Windows"
+        );
+    }
+    if name.ends_with('.') || name.ends_with(' ') {
+        bail!(
+            "invalid skill name `{name}`: names must not end with a space or `.` — Windows \
+             silently strips trailing spaces and dots, which would collide two distinct names"
+        );
+    }
+    // Windows reserves device names matched on the stem before the first dot, so
+    // `CON`, `con.txt`, and `aux.anything` all resolve to a device, not a file.
+    let stem = name.split('.').next().unwrap_or(name);
+    if is_windows_reserved_device_name(stem) {
+        bail!(
+            "invalid skill name `{name}`: `{stem}` is a reserved device name on Windows — \
+             choose another name"
+        );
+    }
     Ok(())
+}
+
+/// Whether `stem` is a Windows reserved device name (case-insensitive):
+/// `CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, or `LPT1`–`LPT9`.
+fn is_windows_reserved_device_name(stem: &str) -> bool {
+    let s = stem.to_ascii_uppercase();
+    matches!(s.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ((s.starts_with("COM") || s.starts_with("LPT"))
+            && s.len() == 4
+            && matches!(s.as_bytes()[3], b'1'..=b'9'))
 }
 
 /// Reject a `commit` selector that is not a full 40-character hex SHA.
@@ -437,6 +482,61 @@ mod tests {
     fn validate_subpath_accepts_plain_relative_path() {
         assert!(validate_subpath("skills/greet").is_ok());
         assert!(validate_subpath(".").is_ok());
+    }
+
+    #[test]
+    fn validate_skill_name_accepts_ordinary_names() {
+        for name in [
+            "foo", "my-skill", "foo.bar", "com0", "lpt10", "comic", "console",
+        ] {
+            assert!(
+                validate_skill_name(name).is_ok(),
+                "`{name}` should be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_skill_name_rejects_windows_invalid_chars() {
+        for name in [
+            "foo:bar",
+            "a*b",
+            "what?",
+            "pipe|d",
+            "lt<gt>",
+            "quo\"te",
+            "ctrl\u{1}x",
+        ] {
+            let err = validate_skill_name(name).unwrap_err();
+            assert!(
+                format!("{err}").contains("not allowed"),
+                "`{name}` should be rejected: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_skill_name_rejects_trailing_dot_or_space() {
+        for name in ["foo.", "foo ", "bar. "] {
+            let err = validate_skill_name(name).unwrap_err();
+            assert!(
+                format!("{err}").contains("space or `.`"),
+                "`{name}` should be rejected: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_skill_name_rejects_windows_reserved_device_names() {
+        for name in [
+            "con", "CON", "Prn", "aux", "nul", "com1", "LPT9", "con.txt", "aux.md",
+        ] {
+            let err = validate_skill_name(name).unwrap_err();
+            assert!(
+                format!("{err}").contains("reserved device name"),
+                "`{name}` should be rejected: {err}"
+            );
+        }
     }
 
     /// A nested manifest bypasses the root JSON schema, so a `commit` selector
