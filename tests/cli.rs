@@ -4597,6 +4597,8 @@ fn case_folding_plugin_name_collision_is_rejected() {
     assert!(err.contains("plugin name collision"), "{err}");
     assert!(err.contains("differ only by case"), "{err}");
 }
+
+/// `resolve_child` scopes lockfile reuse to the exact edge (its synthesized
 /// name), so a newly-declared transitive edge resolves fresh at the current tip
 /// instead of inheriting a stale pin left behind by a removed root. Guards
 /// against a brand-new child being silently pinned to an unrelated old commit.
