@@ -96,7 +96,12 @@ so re-running `spm install` never churns it.
   twice. Only a cycle whose nodes are **all** non-root transitive skills is
   unsatisfiable, and that is the case reported as an error.
 - A hard **depth cap** (8 levels) is a backstop against pathological or hostile
-  graphs, independent of the flag.
+  graphs, independent of the flag. Complementary **fan-out budgets** cap the
+  total transitive graph size — at most **256 distinct skills (nodes)** and
+  **1024 nested declarations (edges)** across the whole resolve — so a single
+  dependency with a huge `ai.json` cannot exhaust your machine before the depth
+  cap would ever trigger. Exceeding any cap fails the install and names the
+  offending chain.
 
 ## Updating: `update` vs `update <name>`
 

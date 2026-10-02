@@ -4567,6 +4567,8 @@ fn transitive_differing_ref_back_edge_onto_ancestor_is_a_cycle() {
         "an on-branch self-dependency is a cycle, not a version conflict: {err}"
     );
 }
+
+/// A transitive back-edge whose identity lands on a directly declared root —
 /// even while that root is still on the active DFS branch (`a -> c -> a`) — is a
 /// satisfied diamond against the root's fixed install point, NOT a cycle. This
 /// is the on-branch case the stack guard previously mis-flagged: `a` is pushed
@@ -4872,6 +4874,55 @@ fn transitive_depth_cap_is_enforced() {
         !copilot_skill_dirs(&sb).iter().any(|n| n.contains("d11")),
         "the beyond-cap node must not be materialized"
     );
+}
+
+/// A single nested `ai.json` with a very large fan-out is refused by the global
+/// edge budget, independently of chain depth. The depth cap bounds how *deep* a
+/// graph goes; it does nothing about one manifest declaring thousands of edges,
+/// so an abusive (or buggy) manifest could still force unbounded per-edge work.
+/// Here the edges all re-touch one identity, so the budget trips cheaply (one
+/// real fetch) — proving the counter aborts the walk before the fan-out runs
+/// away, not that the children happen to be expensive.
+#[test]
+fn transitive_fan_out_edge_budget_is_enforced() {
+    let sb = Sandbox::new();
+    let child = make_repo(
+        &sb.root.join("fan-child"),
+        &[("SKILL.md", "---\nname: child\n---\nChild.\n")],
+    );
+    // One parent manifest declaring well over MAX_EDGES (1024) distinct edges,
+    // all onto the same child identity. Distinct keys are legal and dedup to a
+    // single node, so only the edge counter — not fetching — trips the cap.
+    let mut entries = String::new();
+    for i in 0..1100 {
+        if i > 0 {
+            entries.push(',');
+        }
+        entries.push_str(&format!(
+            r#""dep{i:04}":{{"git":"{child}","branch":"main"}}"#
+        ));
+    }
+    let parent = make_repo(
+        &sb.root.join("fan-parent"),
+        &[
+            ("SKILL.md", "---\nname: parent\n---\nParent.\n"),
+            ("ai.json", &format!(r#"{{"skills":{{{entries}}}}}"#)),
+        ],
+    );
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{"parent":{{"git":"{parent}","branch":"main"}}}}}}"#
+        ),
+    );
+    let out = sb.spm(&["install"]);
+    assert!(
+        !out.status.success(),
+        "a huge single-manifest fan-out must fail the install"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("edge cap"), "reports the edge cap: {err}");
 }
 
 /// Two requesters that pull the same repo at different commits is a version

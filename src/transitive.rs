@@ -49,6 +49,23 @@ use std::path::{Component, Path, PathBuf};
 /// refuse past this and tell the user which chain hit the limit.
 pub const MAX_DEPTH: usize = 8;
 
+/// Hard cap on the total number of distinct transitive skills (nodes) resolved
+/// across the whole walk, independent of depth. `MAX_DEPTH` only bounds the
+/// length of a single chain; without a global budget a dependency whose
+/// `ai.json` fans out to thousands of distinct children — each triggering a
+/// remote resolution, checkout, scan, and materialization — could exhaust an
+/// opted-in project's time/disk (a fan-out DoS). We refuse once the budget is
+/// exceeded and name the edge that tipped it over.
+pub const MAX_NODES: usize = 256;
+
+/// Hard cap on the total number of transitive *edges* (nested dependency
+/// declarations) examined across the whole walk. Bounds work that does not add a
+/// new node but is still per-edge expensive — e.g. many edges onto one identity
+/// pinned at *different* refs each force a fresh remote resolution to check for a
+/// conflict. Kept comfortably above `MAX_NODES` so a legitimate diamond-heavy
+/// graph is unaffected while a pathological fan-out still trips.
+pub const MAX_EDGES: usize = 1024;
+
 /// Identity of a resolvable skill for transitive bookkeeping: the normalized git
 /// URL plus the optional in-repo subpath. Two entries with the same git but a
 /// different `path` are different skills (the monorepo-of-skills layout) and
@@ -102,6 +119,9 @@ struct Walk {
     stack: Vec<(Key, String)>,
     resolved: std::collections::HashMap<Key, Resolved>,
     out: Output,
+    /// Total transitive edges examined across the whole walk, capped by
+    /// [`MAX_EDGES`] to bound per-edge work that does not create a new node.
+    edges: usize,
 }
 
 /// One side of a version conflict — the reference/commit an identity was (or
@@ -365,6 +385,7 @@ pub fn expand(direct: &BTreeMap<String, LockedSkill>, ctx: &Ctx) -> Result<Outpu
             materialized: Vec::new(),
             transitive: Vec::new(),
         },
+        edges: 0,
     };
     for (name, locked) in direct {
         visit(&mut w, name, locked, 0, direct, ctx)?;
@@ -447,6 +468,21 @@ fn visit(
     w.stack.push((self_key, name.to_string()));
 
     for (declared, spec) in &dep.skills {
+        // Edge budget: count every nested declaration examined, and refuse once
+        // the whole-walk cap is hit — before any further remote resolution — so
+        // a huge fan-out (even one that only re-touches existing identities)
+        // cannot run unbounded per-edge work.
+        w.edges += 1;
+        if w.edges > MAX_EDGES {
+            let mut chain: Vec<String> = w.stack.iter().map(|(_, n)| n.clone()).collect();
+            chain.push(declared.clone());
+            bail!(
+                "transitive dependency edge cap ({MAX_EDGES}) exceeded at: {}\n\
+                 a dependency graph this wide is almost certainly a mistake (or hostile); \
+                 reduce the fan-out of nested `ai.json` dependencies",
+                chain_str(&chain)
+            );
+        }
         spec.version()
             .with_context(|| format!("nested skill `{declared}` required by `{name}`"))?;
         let ckey = key_of(&spec.git, &spec.path);
@@ -535,6 +571,19 @@ fn visit(
         // exact edge (see `resolve_child`).
         validate_skill_name(&synth)
             .with_context(|| format!("synthesized name for nested skill `{declared}`"))?;
+        // Node budget: a fresh node is the expensive unit (remote resolve,
+        // checkout, scan, materialize). Refuse before resolving it once the
+        // whole-walk cap is hit, so a wide fan-out cannot exhaust time/disk.
+        if w.out.transitive.len() >= MAX_NODES {
+            let mut chain: Vec<String> = w.stack.iter().map(|(_, n)| n.clone()).collect();
+            chain.push(declared.clone());
+            bail!(
+                "transitive dependency node cap ({MAX_NODES}) exceeded at: {}\n\
+                 a dependency graph this large is almost certainly a mistake (or hostile); \
+                 reduce the number of nested `ai.json` dependencies",
+                chain_str(&chain)
+            );
+        }
         if direct.contains_key(&synth) || w.out.transitive.iter().any(|(n, _)| n == &synth) {
             bail!(
                 "transitive skill name collision: `{synth}` (from `{declared}` required by \
