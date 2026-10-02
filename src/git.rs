@@ -154,10 +154,20 @@ fn split_remote(url: &str) -> Option<RemoteParts<'_>> {
     if url.contains(['#', '?', '%', '\\']) {
         return None;
     }
-    let (protocol, host, path) = if let Some(rest) = url.strip_prefix("https://") {
+    // URL schemes are case-insensitive (`SSH://…`, `HTTPS://…` name the same
+    // transport), so match them case-insensitively — otherwise an uppercase
+    // spelling would fall through, dodging the protocol equivalence and the
+    // identity-based deduplication built on it. The authority/path are sliced
+    // from the original (case preserved); only hosts are lowercased later.
+    let strip_scheme_ci = |prefix: &str| {
+        url.get(..prefix.len())
+            .filter(|s| s.eq_ignore_ascii_case(prefix))
+            .map(|s| &url[s.len()..])
+    };
+    let (protocol, host, path) = if let Some(rest) = strip_scheme_ci("https://") {
         let (host, path) = rest.split_once('/')?;
         (Protocol::Https, host, path)
-    } else if let Some(rest) = url.strip_prefix("ssh://") {
+    } else if let Some(rest) = strip_scheme_ci("ssh://") {
         let (authority, path) = rest.split_once('/')?;
         (Protocol::Ssh, authority.strip_prefix("git@")?, path)
     } else if !url.contains("://") {
@@ -563,6 +573,32 @@ mod tests {
         assert_eq!(protocol_of(SSH_URL), Some(Protocol::Ssh));
         assert_eq!(protocol_of(HTTPS), Some(Protocol::Https));
         assert_eq!(protocol_of("file:///tmp/repo"), None);
+    }
+
+    /// URL schemes are case-insensitive, so an uppercase or mixed-case spelling
+    /// names the same remote and must yield the same protocol-independent
+    /// identity — otherwise it dodges the HTTPS/SSH equivalence the transitive
+    /// deduplication keys on.
+    #[test]
+    fn remote_identity_folds_case_insensitive_schemes() {
+        let canonical = "https://github.com/org/repo";
+        for spelling in [
+            "https://github.com/org/repo",
+            "HTTPS://GitHub.com/org/repo",
+            "ssh://git@github.com/org/repo",
+            "SSH://git@GitHub.com/org/repo",
+            "Ssh://git@github.com/org/repo",
+            "git@github.com:org/repo",
+        ] {
+            assert_eq!(
+                remote_identity(spelling).as_deref(),
+                Some(canonical),
+                "{spelling}"
+            );
+        }
+        // Still `None` for forms with no cross-protocol equivalent.
+        assert_eq!(remote_identity("file:///tmp/repo"), None);
+        assert_eq!(remote_identity("/tmp/repo"), None);
     }
 
     /// The connectivity/auth classifier matches English stderr verbatim, so git
