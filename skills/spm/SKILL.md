@@ -40,6 +40,7 @@ gitignored and never committed. Run `spm --help` or
 | Add a skill the user named | `spm add <git-url> --tag <t> --path <dir>` |
 | Fresh clone, new git worktree, or skills missing | `spm install` |
 | Skill declared with a branch or tag should move to the latest commit | `spm update [name]` |
+| Also pull in skills a dependency itself declares | set `"resolveTransitive": true` in `ai.json`, then `spm install` |
 | Changed a version selector by editing `ai.json` | `spm install` |
 | Check what is declared and pinned | `spm list` |
 | Check what is materialized in this checkout | `spm status` |
@@ -141,7 +142,10 @@ Alias: `spm i`. Fetches and materializes everything declared in `ai.json`, reusi
 pinned in `ai.lock`. It only re-resolves an entry whose git URL, selector or
 path changed, or that has no pin yet. Prints `installed N dependencies`. Run it
 after every clone and in every new worktree. `--protocol`/`--protocol-fallback`
-behave as under [`spm add`](#spm-add).
+behave as under [`spm add`](#spm-add). When `"resolveTransitive": true` is set
+in `ai.json`, it also resolves and materializes the skills each dependency
+declares in its own nested `ai.json` (see
+[Transitive dependencies](#transitive-dependencies)).
 
 ### `spm update`
 
@@ -155,6 +159,15 @@ never moves. An unchanged pin is only ever moved by `spm update`;
 `spm install` keeps it, and re-resolves just the entries whose URL, selector or
 path you changed, or that have no pin yet. `--protocol`/`--protocol-fallback`
 behave as under [`spm add`](#spm-add).
+
+With transitive resolution enabled, `spm update` (no name) refreshes the
+**whole** frontier — every direct skill *and* every transitive child's
+moving-ref pin. `spm update <name>` is deliberately **surgical**: it advances
+the named root and re-reads its nested `ai.json` (resolving a newly declared or
+re-pinned child fresh), but a transitive child the root still requests by the
+**same** moving ref stays at its locked commit — the single-name update does
+**not** chase it to the branch/tag tip. Run a bare `spm update` to chase those
+too. See [Transitive dependencies](#transitive-dependencies).
 
 ### `spm remove`
 
@@ -193,7 +206,9 @@ spm list [-g]
 
 Alias: `spm ls`. Prints each declared skill and plugin with its git URL and its pin as
 `<selector> @ <first 8 chars of the commit>`, or `not installed` when
-`ai.lock` has no pin for it.
+`ai.lock` has no pin for it. Transitively-resolved skills are listed separately
+under a `transitive skills:` heading, each annotated with its provenance
+(`via <requester>`) — see [Transitive dependencies](#transitive-dependencies).
 
 ### `spm status`
 
@@ -202,7 +217,8 @@ spm status [-g]
 ```
 
 Reports, per target, whether each locked skill is present (`ok`) or `MISSING`.
-Separately, it lists any *stale* directories — materialized but no longer in
+A transitively-resolved skill is reported with its provenance
+(`transitive; via <requester>`). Separately, it lists any *stale* directories — materialized but no longer in
 `ai.lock`. Stale detection is best-effort: it is only performed for targets
 whose skill directory is spm-owned, so it is disabled for the shared-directory
 targets (Amp, Codex, Cursor, Cline, Gemini, Windsurf) in both scopes and for
@@ -269,6 +285,44 @@ gitignores just those, so the user's own hand-written skills there are safe.
 
 After `spm install` for Claude, the Claude session has to be restarted, or
 `/reload-plugins` run inside it, before the new skills are visible.
+
+## Transitive dependencies
+
+A skill's own repo can ship an `ai.json` listing the skills *it* needs. When you
+**opt in** by setting `"resolveTransitive": true` in your project's own
+`ai.json`, spm reads those nested manifests and recursively resolves, fetches,
+scans, and materializes the skills they declare alongside yours — the way Cargo
+or npm pull in transitive dependencies.
+
+- **Opt-in only.** The flag lives in your committed root `ai.json`, never a CLI
+  flag, so it applies uniformly to `install`, `add`, `update` and `sync`. A
+  dependency **cannot** re-enable it: `resolveTransitive` in a nested manifest is
+  rejected. It is off by default because skills carry executable agent
+  instructions, so auto-fetching repos the user never named is a larger
+  supply-chain surface.
+- **What is read.** Only the nested `ai.json` *co-located with a skill's own
+  content* (the repo root, or the skill's `path` subdirectory for a monorepo),
+  and only its `skills` map. Nested `targets` and `plugins` are ignored;
+  transitive skills always inherit your root `targets`.
+- **Scan still gates it.** Every fetched skill (direct or transitive) passes the
+  [content scan](#content-scan) **before** its nested manifest is read or its
+  own dependencies are fetched, so a blocked skill aborts before recursion.
+- **Synthesized names.** A transitive skill isn't named in your manifest, so spm
+  synthesizes a stable materialized directory name
+  `{requester}__{declared}-{shorthash}` (for example `toolkit__formatter-1a2b3c4d`),
+  deterministic so re-running `spm install` never churns it.
+- **Dedup, cycles, depth.** The same `(git, path)` pulled in by several skills
+  is materialized **once** (its `requested_by` in `ai.lock` records every
+  requester); cycles among non-root skills and an excessive depth are hard
+  errors.
+- **Version conflicts.** If two skills require the **same** normalized git URL +
+  `path` at two **different commits**, spm refuses to guess and fails, naming
+  both requesters and refs. Fix it by pinning both to the same ref, or dropping
+  one. Different subdirectories of one monorepo never conflict.
+
+`spm list` and `spm status` surface provenance (`via <requester>`), and
+`spm update` vs `spm update <name>` differ for transitive children (see those
+commands above).
 
 ## Global scope
 

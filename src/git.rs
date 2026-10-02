@@ -154,10 +154,20 @@ fn split_remote(url: &str) -> Option<RemoteParts<'_>> {
     if url.contains(['#', '?', '%', '\\']) {
         return None;
     }
-    let (protocol, host, path) = if let Some(rest) = url.strip_prefix("https://") {
+    // URL schemes are case-insensitive (`SSH://…`, `HTTPS://…` name the same
+    // transport), so match them case-insensitively — otherwise an uppercase
+    // spelling would fall through, dodging the protocol equivalence and the
+    // identity-based deduplication built on it. The authority/path are sliced
+    // from the original (case preserved); only hosts are lowercased later.
+    let strip_scheme_ci = |prefix: &str| {
+        url.get(..prefix.len())
+            .filter(|s| s.eq_ignore_ascii_case(prefix))
+            .map(|s| &url[s.len()..])
+    };
+    let (protocol, host, path) = if let Some(rest) = strip_scheme_ci("https://") {
         let (host, path) = rest.split_once('/')?;
         (Protocol::Https, host, path)
-    } else if let Some(rest) = url.strip_prefix("ssh://") {
+    } else if let Some(rest) = strip_scheme_ci("ssh://") {
         let (authority, path) = rest.split_once('/')?;
         (Protocol::Ssh, authority.strip_prefix("git@")?, path)
     } else if !url.contains("://") {
@@ -179,6 +189,25 @@ fn split_remote(url: &str) -> Option<RemoteParts<'_>> {
 /// The protocol `url` is spoken over, if it is one [`rewrite`] can switch.
 fn protocol_of(url: &str) -> Option<Protocol> {
     split_remote(url).map(|p| p.protocol)
+}
+
+/// A canonical, protocol-independent identity for a remote URL that has an
+/// equivalent form in both protocols (see [`split_remote`]): the HTTPS spelling
+/// with a lowercased host, path case preserved. `https://host/path`,
+/// `ssh://git@host/path` and scp-style `git@host:path` therefore collapse to one
+/// string, so callers that key on repository identity (e.g. transitive
+/// deduplication and version-conflict detection) treat the interchangeable
+/// spellings as the same repo. Returns `None` for any source with no
+/// cross-protocol equivalent (a port, userinfo, a non-`git` SSH user, `file://`,
+/// a local path, …), which the caller must keep distinct. Built from the same
+/// equivalence `--protocol` rewriting relies on, so the two never drift.
+pub fn remote_identity(url: &str) -> Option<String> {
+    let parts = split_remote(url)?;
+    Some(format!(
+        "https://{}/{}",
+        parts.host.to_ascii_lowercase(),
+        parts.path
+    ))
 }
 
 /// Express `url` in `target`. Returns the URL unchanged when it already uses
@@ -287,10 +316,35 @@ fn with_transport<T>(
     }
 }
 
+/// Reject a value that git could misinterpret as a command-line option.
+///
+/// Repository URLs and refspecs come straight from (possibly hostile) manifests
+/// and are passed to `git` as positional arguments. git parses with getopt, which
+/// treats **any** argument beginning with `-` as an option no matter where it sits
+/// on the line — so a value like `--upload-pack=touch /tmp/pwned` would run an
+/// attacker-chosen command instead of being read as a repository or ref. No
+/// legitimate URL or git ref name begins with `-`, so refusing that shape at
+/// every remote entry point (`ls_remote`, `remote_ref_names`, `default_branch`,
+/// `fetch_commit`) closes option injection for every caller (root,
+/// nested/transitive, and plugin specs alike), independent of the git version.
+fn reject_option_like(kind: &str, value: &str) -> Result<()> {
+    if value.starts_with('-') {
+        bail!(
+            "refusing to pass option-like {kind} `{value}` to git: values beginning with `-` \
+             could be misinterpreted as git options"
+        );
+    }
+    Ok(())
+}
+
 /// Resolve remote refs to a commit SHA without cloning. Pass multiple refspecs
 /// (e.g. a tag and its `^{}` peel) — the peeled/dereferenced commit wins, so
 /// annotated tags resolve to the underlying commit rather than the tag object.
 pub fn ls_remote(url: &str, refspecs: &[&str]) -> Result<String> {
+    reject_option_like("repository URL", url)?;
+    for refspec in refspecs {
+        reject_option_like("ref", refspec)?;
+    }
     with_transport(transport(), url, |u| ls_remote_once(u, refspecs))
 }
 
@@ -317,6 +371,10 @@ fn ls_remote_once(url: &str, refspecs: &[&str]) -> Result<String> {
 /// without cloning. Unlike [`ls_remote`], no match is an empty list rather than
 /// an error, so callers can tell "ref absent" from "remote unreachable".
 pub fn remote_ref_names(url: &str, refspecs: &[&str]) -> Result<Vec<String>> {
+    reject_option_like("repository URL", url)?;
+    for refspec in refspecs {
+        reject_option_like("ref", refspec)?;
+    }
     with_transport(transport(), url, |u| remote_ref_names_once(u, refspecs))
 }
 
@@ -335,6 +393,7 @@ fn remote_ref_names_once(url: &str, refspecs: &[&str]) -> Result<Vec<String>> {
 /// via `git ls-remote --symref <url> HEAD`. Errors, rather than guessing, when
 /// the remote reports no symbolic `HEAD` (empty repo, detached `HEAD`).
 pub fn default_branch(url: &str) -> Result<String> {
+    reject_option_like("repository URL", url)?;
     let out = with_transport(transport(), url, default_branch_once)?;
     parse_default_branch(&out).with_context(|| {
         format!(
@@ -374,6 +433,7 @@ pub fn is_at_commit(dir: &Path, sha: &str) -> bool {
 /// fetch-by-SHA (not all enable `uploadpack.allowAnySHA1InWant`), falls back to
 /// a full fetch. `dest` is created if missing.
 pub fn fetch_commit(url: &str, sha: &str, dest: &Path) -> Result<()> {
+    reject_option_like("repository URL", url)?;
     with_transport(transport(), url, |u| fetch_commit_once(u, sha, dest))
 }
 
@@ -513,6 +573,32 @@ mod tests {
         assert_eq!(protocol_of(SSH_URL), Some(Protocol::Ssh));
         assert_eq!(protocol_of(HTTPS), Some(Protocol::Https));
         assert_eq!(protocol_of("file:///tmp/repo"), None);
+    }
+
+    /// URL schemes are case-insensitive, so an uppercase or mixed-case spelling
+    /// names the same remote and must yield the same protocol-independent
+    /// identity — otherwise it dodges the HTTPS/SSH equivalence the transitive
+    /// deduplication keys on.
+    #[test]
+    fn remote_identity_folds_case_insensitive_schemes() {
+        let canonical = "https://github.com/org/repo";
+        for spelling in [
+            "https://github.com/org/repo",
+            "HTTPS://GitHub.com/org/repo",
+            "ssh://git@github.com/org/repo",
+            "SSH://git@GitHub.com/org/repo",
+            "Ssh://git@github.com/org/repo",
+            "git@github.com:org/repo",
+        ] {
+            assert_eq!(
+                remote_identity(spelling).as_deref(),
+                Some(canonical),
+                "{spelling}"
+            );
+        }
+        // Still `None` for forms with no cross-protocol equivalent.
+        assert_eq!(remote_identity("file:///tmp/repo"), None);
+        assert_eq!(remote_identity("/tmp/repo"), None);
     }
 
     /// The connectivity/auth classifier matches English stderr verbatim, so git
@@ -897,5 +983,39 @@ mod tests {
 
         std::fs::remove_dir_all(&src).unwrap();
         std::fs::remove_dir_all(&dest).unwrap();
+    }
+
+    /// A hostile manifest could set the repository URL (or a ref) to an
+    /// option-like string such as `--upload-pack=…`; git would parse it as an
+    /// option and run an attacker-chosen command. Both remote entry points must
+    /// refuse a value beginning with `-` *before* spawning git — no network or
+    /// filesystem side effect may occur.
+    #[test]
+    fn remote_ops_reject_option_like_values() {
+        let evil = "--upload-pack=touch /tmp/spm-pwned";
+        let err = ls_remote(evil, &["refs/heads/main"]).unwrap_err();
+        assert!(format!("{err}").contains("option-like"), "{err}");
+
+        let err = ls_remote("file:///tmp/repo", &["--upload-pack=evil"]).unwrap_err();
+        assert!(format!("{err}").contains("option-like"), "{err}");
+
+        // Every remote entry point is guarded, not just `ls_remote`/`fetch_commit`.
+        let err = remote_ref_names(evil, &["refs/tags/*"]).unwrap_err();
+        assert!(format!("{err}").contains("option-like"), "{err}");
+
+        let err = remote_ref_names("file:///tmp/repo", &["--upload-pack=evil"]).unwrap_err();
+        assert!(format!("{err}").contains("option-like"), "{err}");
+
+        let err = default_branch(evil).unwrap_err();
+        assert!(format!("{err}").contains("option-like"), "{err}");
+
+        let dest = scratch("evil-fetch-dest");
+        let err = fetch_commit(evil, &"a".repeat(40), &dest).unwrap_err();
+        assert!(format!("{err}").contains("option-like"), "{err}");
+        // The guard runs before any `create_dir_all`, so nothing was written.
+        assert!(
+            !dest.exists(),
+            "fetch_commit must not touch the fs for a rejected URL"
+        );
     }
 }

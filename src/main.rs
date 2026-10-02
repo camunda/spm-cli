@@ -13,6 +13,7 @@ mod schema;
 mod scope;
 mod skillcheck;
 mod store;
+mod transitive;
 mod vendor;
 
 fn main() {

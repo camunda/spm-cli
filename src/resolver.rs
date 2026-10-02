@@ -29,5 +29,6 @@ pub fn resolve(spec: &SkillSpec) -> Result<LockedSkill> {
         path: spec.path.clone(),
         commit,
         bundled_skills: Vec::new(),
+        requested_by: Vec::new(),
     })
 }

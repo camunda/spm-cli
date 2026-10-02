@@ -95,8 +95,19 @@ pub(super) fn status(scope: &Scope) -> Result<()> {
                 if missing {
                     incomplete = true;
                 }
+                // Annotate a transitively-resolved skill with its requester(s)
+                // so `spm status` surfaces the dependency graph, not just names.
+                // A name declared directly in `ai.json` is a direct skill even
+                // if a stale or hand-edited `ai.lock` left a `requested_by` on
+                // it, so exclude manifest skills here — matching `spm list`.
+                let via = lock
+                    .skills
+                    .get(name)
+                    .filter(|l| !l.requested_by.is_empty() && !manifest.skills.contains_key(name))
+                    .map(|l| format!("  (transitive; via {})", l.requested_by.join(", ")))
+                    .unwrap_or_default();
                 println!(
-                    "  {name:<width$}  {}",
+                    "  {name:<width$}  {}{via}",
                     if missing { "MISSING" } else { "ok" }
                 );
             }

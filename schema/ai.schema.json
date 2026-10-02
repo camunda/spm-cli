@@ -18,6 +18,10 @@
       "uniqueItems": true,
       "items": { "enum": ["amp", "claude", "cline", "codex", "copilot", "cursor", "gemini", "windsurf"] }
     },
+    "resolveTransitive": {
+      "type": "boolean",
+      "description": "Opt in to transitive skill dependencies: when true, spm reads each resolved skill's own co-located ai.json and recursively resolves the skills it declares. Default false. Read only from the root project's manifest; a dependency's nested ai.json cannot re-enable it."
+    },
     "skills": {
       "type": "object",
       "description": "Skill dependencies, keyed by local name.",
