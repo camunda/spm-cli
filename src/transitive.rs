@@ -450,6 +450,10 @@ fn visit(
         spec.version()
             .with_context(|| format!("nested skill `{declared}` required by `{name}`"))?;
         let ckey = key_of(&spec.git, &spec.path);
+        // Deterministic materialized name for *this* edge. Computed up front so
+        // both the version-conflict re-resolve and the fresh-node branch key
+        // lockfile reuse on the same stable identity (see `resolve_child`).
+        let synth = synth_name(name, declared, &ckey);
 
         // Cycle: the child identity is an ancestor still on the current branch.
         // A back-edge whose identity is on the active DFS branch is a cycle —
@@ -491,7 +495,7 @@ fn visit(
             // reference is requested do we resolve again, to detect a real conflict.
             let requested = spec.version()?.label();
             if requested != existing.reference {
-                let child = resolve_child(spec, ctx)
+                let child = resolve_child(spec, &synth, ctx)
                     .with_context(|| format!("resolving nested skill `{declared}` of `{name}`"))?;
                 if existing.commit != child.commit {
                     let mut cur_chain: Vec<String> =
@@ -525,10 +529,10 @@ fn visit(
             continue;
         }
 
-        // Fresh node: resolve, synthesize a stable name, and recurse.
-        let mut child = resolve_child(spec, ctx)
-            .with_context(|| format!("resolving nested skill `{declared}` of `{name}`"))?;
-        let synth = synth_name(name, declared, &ckey);
+        // Fresh node: validate the (already-computed) synthesized name *before*
+        // resolving, so a collision or bad name fails fast without a needless
+        // remote lookup. The synthesized name also scopes lockfile reuse to this
+        // exact edge (see `resolve_child`).
         validate_skill_name(&synth)
             .with_context(|| format!("synthesized name for nested skill `{declared}`"))?;
         if direct.contains_key(&synth) || w.out.transitive.iter().any(|(n, _)| n == &synth) {
@@ -538,6 +542,8 @@ fn visit(
                  dependencies to a version that does not ship it"
             );
         }
+        let mut child = resolve_child(spec, &synth, ctx)
+            .with_context(|| format!("resolving nested skill `{declared}` of `{name}`"))?;
         child.requested_by = vec![name.to_string()];
 
         let mut child_chain: Vec<String> = w.stack.iter().map(|(_, n)| n.clone()).collect();
@@ -561,9 +567,16 @@ fn visit(
 }
 
 /// Resolve a nested skill spec to a locked entry, reusing the previous
-/// lockfile's pinned commit when an unchanged (same git+ref+path) entry exists
-/// and we are not refreshing — so an unchanged transitive branch dependency is
-/// not re-`ls-remote`d every sync.
+/// lockfile's pinned commit only when *this exact edge* — keyed by its
+/// deterministic synthesized name `synth` — resolved the same `git+ref+path`
+/// last time and we are not refreshing, so an unchanged transitive branch
+/// dependency is not re-`ls-remote`d every sync.
+///
+/// Reuse is scoped to the synthesized name rather than matched against any
+/// previous entry with the same `git+ref+path`: a brand-new edge (a child the
+/// updated root did not previously reach) has no entry under its synth name, so
+/// it resolves fresh at the current tip instead of silently inheriting a stale
+/// pin left behind by a removed root — or one that belonged to another root.
 ///
 /// Freshness cascade contract — deliberately scoped to the *whole walk*, not
 /// per-parent:
@@ -585,13 +598,13 @@ fn visit(
 /// one root's subtree without risking an unrelated root's dependency. The whole
 /// transitive frontier advances only under a bare `spm update`. See
 /// `docs/guide/transitive-dependencies.md`.
-fn resolve_child(spec: &SkillSpec, ctx: &Ctx) -> Result<LockedSkill> {
+fn resolve_child(spec: &SkillSpec, synth: &str, ctx: &Ctx) -> Result<LockedSkill> {
     let reference = spec.version()?.label();
     if !ctx.refresh {
         if let Some(prev) = ctx
             .prev
-            .values()
-            .find(|l| l.git == spec.git && l.reference == reference && l.path == spec.path)
+            .get(synth)
+            .filter(|l| l.git == spec.git && l.reference == reference && l.path == spec.path)
         {
             let commit = prev.commit.clone();
             return Ok(LockedSkill {

@@ -4527,6 +4527,87 @@ fn transitive_back_edge_onto_direct_root_is_satisfied() {
     );
 }
 
+/// `resolve_child` scopes lockfile reuse to the exact edge (its synthesized
+/// name), so a newly-declared transitive edge resolves fresh at the current tip
+/// instead of inheriting a stale pin left behind by a removed root. Guards
+/// against a brand-new child being silently pinned to an unrelated old commit.
+#[test]
+fn newly_discovered_transitive_edge_does_not_reuse_stale_pin() {
+    let sb = Sandbox::new();
+    let shared_dir = sb.root.join("shared");
+    let shared = make_repo(
+        &shared_dir,
+        &[("SKILL.md", "---\nname: shared\n---\nShared v1.\n")],
+    );
+    let shared_v1 = skill_head(&shared_dir);
+
+    let dep_json = format!(r#"{{"skills":{{"shared":{{"git":"{shared}","branch":"main"}}}}}}"#);
+    let old = make_repo(
+        &sb.root.join("old-root"),
+        &[
+            ("SKILL.md", "---\nname: old\n---\nOld.\n"),
+            ("ai.json", &dep_json),
+        ],
+    );
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{"old":{{"git":"{old}","branch":"main"}}}}}}"#
+        ),
+    );
+    sb.ok(&["install"]);
+
+    let shared_pin = |sb: &Sandbox| -> String {
+        let lock: serde_json::Value = serde_json::from_str(&sb.read("ai.lock")).unwrap();
+        let skills = lock["skills"].as_object().unwrap();
+        let (_, e) = skills
+            .iter()
+            .find(|(k, _)| k.contains("__shared-"))
+            .unwrap_or_else(|| panic!("no transitive shared entry in {lock}"));
+        e["commit"].as_str().unwrap().to_string()
+    };
+    assert_eq!(
+        shared_pin(&sb),
+        shared_v1,
+        "shared pinned at v1 after install"
+    );
+
+    // Advance shared upstream to v2.
+    std::fs::write(
+        shared_dir.join("SKILL.md"),
+        "---\nname: shared\n---\nShared v2.\n",
+    )
+    .unwrap();
+    git_in(&shared_dir, &["commit", "-aqm", "shared v2"]);
+    let shared_v2 = skill_head(&shared_dir);
+    assert_ne!(shared_v1, shared_v2, "shared branch must have advanced");
+
+    // Swap `old` out for a brand-new root that also declares shared@main. The
+    // removed root's `old__shared-*` entry lingers in the previous lockfile.
+    let new = make_repo(
+        &sb.root.join("new-root"),
+        &[
+            ("SKILL.md", "---\nname: new\n---\nNew.\n"),
+            ("ai.json", &dep_json),
+        ],
+    );
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{"new":{{"git":"{new}","branch":"main"}}}}}}"#
+        ),
+    );
+    // A plain install (no refresh): the new edge has no pin of its own, so it
+    // resolves fresh at the tip rather than reusing the stale v1 pin.
+    sb.ok(&["install"]);
+    assert_eq!(
+        shared_pin(&sb),
+        shared_v2,
+        "a newly-discovered edge must resolve fresh, not reuse the removed root's stale pin"
+    );
+}
+
 /// A transitive dependency chain deeper than the hard depth cap fails fast with
 /// a clear error instead of resolving unbounded nesting. Guards the depth-cap
 /// boundary that the cycle/diamond tests do not exercise.
