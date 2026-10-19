@@ -4,6 +4,7 @@ use crate::git;
 use crate::scope::Scope;
 use anyhow::Result;
 use clap::Args;
+use serde::Serialize;
 use std::path::Path;
 
 #[derive(Args)]
@@ -32,6 +33,38 @@ impl ScopeArg {
     pub(crate) fn resolve(&self, cwd: &Path) -> Scope {
         Scope::new(self.global, cwd.to_path_buf())
     }
+}
+
+/// The `--json` switch shared by the read-only reporting commands (`list`,
+/// `status`, `scan`).
+#[derive(Args)]
+pub(crate) struct JsonArg {
+    /// Print one machine-readable JSON document on stdout instead of human
+    /// text. Exit codes are unchanged; errors still go to stderr.
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+/// Version of the `--json` output shape, emitted as top-level `schemaVersion`.
+/// Bump on any breaking change to a document's shape.
+pub(crate) const JSON_SCHEMA_VERSION: u32 = 1;
+
+/// Print `body` as the single `--json` document on stdout, with the
+/// `schemaVersion` envelope every JSON-emitting command shares.
+pub(crate) fn print_json<T: Serialize>(body: &T) -> Result<()> {
+    #[derive(Serialize)]
+    struct Envelope<'a, T> {
+        #[serde(rename = "schemaVersion")]
+        schema_version: u32,
+        #[serde(flatten)]
+        body: &'a T,
+    }
+    let doc = Envelope {
+        schema_version: JSON_SCHEMA_VERSION,
+        body,
+    };
+    println!("{}", serde_json::to_string_pretty(&doc)?);
+    Ok(())
 }
 
 /// The opt-in protocol controls shared by every command that can contact a git

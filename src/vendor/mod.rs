@@ -5,6 +5,7 @@ mod shareddir;
 
 use crate::scope::Scope;
 use anyhow::{bail, Result};
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 /// A resolved skill ready to be wired into a vendor: a name plus the absolute
@@ -34,8 +35,10 @@ pub struct MaterializedPlugin {
 /// "fresh worktree/clone not installed here" diagnostic: because spm materializes
 /// skills into gitignored dirs, a new git worktree sees nothing until
 /// `spm install` runs inside it.
+#[derive(Serialize)]
 pub struct VendorStatus {
     /// Where this vendor materializes skills in the project (project-local).
+    #[serde(serialize_with = "crate::jsonutil::serialize_path")]
     pub location: PathBuf,
     /// Declared skills that are present on disk in this checkout.
     pub present: Vec<String>,

@@ -112,7 +112,10 @@ pub struct SkillSpec {
     pub path: Option<String>,
 }
 
-/// The version selector, normalized.
+/// The version selector, normalized. Serializes externally tagged
+/// (`{"tag": "v1.2.0"}`), mirroring how the selector is written in `ai.json`.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Version {
     Tag(String),
     Branch(String),
@@ -126,6 +129,19 @@ impl Version {
             Version::Tag(t) => format!("tag:{t}"),
             Version::Branch(b) => format!("branch:{b}"),
             Version::Commit(c) => format!("commit:{c}"),
+        }
+    }
+
+    /// Inverse of [`label`](Version::label): parse an `ai.lock` `reference`
+    /// back into a selector. `None` for a label of unknown shape.
+    pub fn from_label(label: &str) -> Option<Version> {
+        let (kind, value) = label.split_once(':')?;
+        let value = value.to_string();
+        match kind {
+            "tag" => Some(Version::Tag(value)),
+            "branch" => Some(Version::Branch(value)),
+            "commit" => Some(Version::Commit(value)),
+            _ => None,
         }
     }
 }
@@ -500,6 +516,19 @@ mod tests {
             spec("u", None, None, Some(&sha)).version().unwrap(),
             Version::Commit(c) if c == sha
         ));
+    }
+
+    #[test]
+    fn version_label_round_trips_through_from_label() {
+        for v in [
+            Version::Tag("v1.2.0".into()),
+            Version::Branch("feat/x:y".into()),
+            Version::Commit("a".repeat(40)),
+        ] {
+            assert_eq!(Version::from_label(&v.label()), Some(v));
+        }
+        assert_eq!(Version::from_label("rev:abc"), None);
+        assert_eq!(Version::from_label("no-colon"), None);
     }
 
     #[test]

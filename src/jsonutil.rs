@@ -1,10 +1,18 @@
-//! Small helpers for merge-patching user-owned JSON config files (Claude's
+//! Small JSON helpers: merge-patching user-owned JSON config files (Claude's
 //! settings.local.json, Copilot's .vscode/settings.json) without clobbering keys
-//! the user set themselves.
+//! the user set themselves, plus serde glue for spm's `--json` output.
 
 use anyhow::{Context, Result};
+use serde::Serializer;
 use serde_json::{Map, Value};
 use std::path::Path;
+
+/// Serialize a path as the same string `Path::display` prints, so `--json`
+/// output matches the human output and never fails on a non-UTF-8 path (which
+/// serde's default `Path` impl rejects).
+pub fn serialize_path<S: Serializer>(p: &Path, s: S) -> std::result::Result<S::Ok, S::Error> {
+    s.serialize_str(&p.to_string_lossy())
+}
 
 /// Read a JSON object from `path`, returning an empty object if it is missing or blank.
 pub fn read_object(path: &Path) -> Result<Value> {
