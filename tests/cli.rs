@@ -3992,7 +3992,7 @@ fn shipped_skill_has_valid_front_matter_and_passes_scan() {
         name: String,
         description: String,
     }
-    let fm: FrontMatter = serde_yaml_ng::from_str(&front)
+    let fm: FrontMatter = serde_saphyr::from_str(&front)
         .unwrap_or_else(|e| panic!("front matter is not valid YAML: {e}\n---\n{front}---"));
     assert_eq!(
         fm.name, "spm",
