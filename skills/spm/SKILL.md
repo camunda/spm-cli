@@ -42,11 +42,11 @@ gitignored and never committed. Run `spm --help` or
 | Skill declared with a branch or tag should move to the latest commit | `spm update [name]` |
 | Also pull in skills a dependency itself declares | set `"resolveTransitive": true` in `ai.json`, then `spm install` |
 | Changed a version selector by editing `ai.json` | `spm install` |
-| Check what is declared and pinned | `spm list` |
-| Check what is materialized in this checkout | `spm status` |
+| Check what is declared and pinned | `spm list --json` |
+| Check what is materialized in this checkout | `spm status --json` |
 | Drop a skill | `spm remove <name>` |
 | Also use another AI tool | `spm target add <vendor>` |
-| Review a skill before installing it | `spm scan <path>` |
+| Review a skill before installing it | `spm scan <path> --json` |
 | Undo all generated tool config for this project | `spm clean` |
 | Free disk space in the global cache | `spm prune` |
 
@@ -201,7 +201,7 @@ skill, so it accepts `--protocol`/`--protocol-fallback`, which behave as under
 ### `spm list`
 
 ```bash
-spm list [-g]
+spm list [-g] [--json]
 ```
 
 Alias: `spm ls`. Prints each declared skill and plugin with its git URL and its pin as
@@ -213,7 +213,7 @@ under a `transitive skills:` heading, each annotated with its provenance
 ### `spm status`
 
 ```bash
-spm status [-g]
+spm status [-g] [--json]
 ```
 
 Reports, per target, whether each locked skill is present (`ok`) or `MISSING`.
@@ -258,12 +258,25 @@ re-fetched by the next `spm install`. It has no `-g` flag.
 ### `spm scan`
 
 ```bash
-spm scan [path]
+spm scan [path] [--json]
 ```
 
 Runs spm's deterministic content scanner over a file or directory (default
 `.`) and prints every finding. It exits non-zero when any finding is high or
 critical severity. See [Content scan](#content-scan).
+
+### Machine-readable output (`--json`)
+
+Prefer `--json` on `list`, `status` and `scan` when you need to read their
+results; do not parse the human text, whose layout can change. With `--json`,
+stdout is exactly one JSON document with `"schemaVersion": 1`, and errors stay
+on stderr. Exit codes do not change: `status --json` still fails when
+something is missing (check `"complete"` and each target's `missing`), and
+`scan --json` still fails on a blocking finding (check `summary.blocking`). The
+document is printed before the failure, so read stdout even on a non-zero exit.
+Commits are full SHAs. `list` marks transitive skills with `"transitive": true`
+and `requestedBy`, and plugins carry `bundledSkills`; `status` reports
+cross-scope name clashes under `collisions`.
 
 ## Targets
 

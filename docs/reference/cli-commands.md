@@ -12,11 +12,11 @@ spm target add [vendor ...]                        # add target vendor(s); no ar
 spm remove <name> [--plugin] [-g]                  # drop a skill (or a plugin with --plugin); alias: rm
 spm update [name] [-g]                             # re-resolve branches/tags to latest
 spm install [-g]                                   # rebuild from ai.lock (after clone); alias: i
-spm list [-g]                                      # show skills + pinned commits; alias: ls
-spm status [-g]                                    # check skills are materialized in this checkout
+spm list [-g] [--json]                             # show skills + pinned commits; alias: ls
+spm status [-g] [--json]                           # check skills are materialized in this checkout
 spm clean [-g]                                     # remove generated vendor config
 spm prune [--yes]                                  # wipe the global fetch cache ($SPM_HOME/store, default ~/.spm/store)
-spm scan [path]                                    # scan skill content for suspicious patterns (default: .)
+spm scan [path] [--json]                           # scan skill content for suspicious patterns (default: .)
 ```
 
 Three commands have short aliases that behave identically, including `-g`:
@@ -25,6 +25,9 @@ for `spm list`.
 
 `add`, `install`, `update`, `remove` and `target add` also accept `--protocol ssh|https` and
 `--protocol-fallback` (see [Repo URLs](#repo-urls-https-ssh)).
+
+`list`, `status` and `scan` accept `--json` to print a machine-readable document
+instead of text (see [Machine-readable output](#machine-readable-output-json)).
 
 ## Scope: project (default) vs. global (`-g`)
 
@@ -155,13 +158,16 @@ run on a fresh clone and in each new worktree.
 
 ### `spm list`
 
-Shows declared skills and their pinned commits.
+Shows declared skills and their pinned commits. `--json` prints them as a
+[JSON document](#machine-readable-output-json) with full commit SHAs.
 
 ### `spm status`
 
 Checks that declared skills are materialized in the current checkout. **Exits
 non-zero** when anything is missing or a Claude marketplace pointer is stale — so
 it works in scripts and git hooks. See [Worktrees & Fresh Clones](/guide/worktrees).
+`--json` prints the report as a [JSON document](#machine-readable-output-json),
+still exiting non-zero when something is missing.
 
 ### `spm clean`
 
@@ -202,10 +208,109 @@ Detected pattern categories:
 ```bash
 spm scan               # scan the current directory
 spm scan ./my-skill    # scan a specific path
+spm scan --json        # findings as a JSON document (same exit code)
 ```
 
 To override the gate for content you trust (or a false positive), set
 `SPM_ALLOW_SUSPICIOUS=1`: findings are printed as warnings but never block.
+
+## Machine-readable output (`--json`)
+
+`spm list`, `spm status` and `spm scan` accept `--json` (together with `-g` for
+`list` and `status`). With it:
+
+- stdout holds **exactly one** JSON document and nothing else; errors still go
+  to stderr as `error: ...`.
+- every document carries a top-level `"schemaVersion": 1`. The number is bumped
+  on any breaking change to a shape; new fields may be added without a bump.
+- commit SHAs are always the full 40 hex characters.
+- **exit codes are unchanged.** `status` still exits non-zero when something is
+  missing and `scan` still exits non-zero on a blocking finding — the document
+  is printed first, so you get both the data and the status. A hard error that
+  happens before a report exists (an unreadable `ai.json`, a `scan` path that
+  does not exist) prints no document.
+
+### `spm list --json`
+
+```jsonc
+{
+  "schemaVersion": 1,
+  "scope": "project",                       // or "global"
+  "skills": [                               // direct skills, then transitive ones
+    {
+      "name": "pdf-tools",
+      "git": "https://github.com/org/skills",
+      "path": "skills/pdf",                 // null when the repo root is the skill
+      "selector": { "tag": "v1.2.0" },      // or { "branch": … } / { "commit": … }
+      "commit": "<40-hex sha>",             // null when ai.lock has no pin
+      "installed": true,                    // pinned in ai.lock
+      "transitive": false,
+      "requestedBy": []                     // direct requester(s) of a transitive skill
+    }
+  ],
+  "plugins": [
+    {
+      "name": "design-system", "git": "…", "path": "plugins/cds",
+      "selector": { "branch": "main" }, "commit": "<40-hex sha>",
+      "installed": true, "bundledSkills": ["composer"]
+    }
+  ]
+}
+```
+
+### `spm status --json`
+
+```jsonc
+{
+  "schemaVersion": 1,
+  "scope": "project",                       // or "global"
+  "root": "/path/to/project",               // dir holding ai.json / ai.lock
+  "expected": [                             // every locked + plugin-bundled skill
+    { "name": "pdf-tools", "requestedBy": [] }
+  ],
+  "plugins": ["design-system"],             // plugins declared in ai.json
+  "unlockedPlugins": [],                    // declared but not pinned in ai.lock
+  "collisions": [                           // also locked in the other scope
+    { "name": "reviewer", "otherScope": "global" }
+  ],
+  "targets": [
+    {
+      "target": "claude",
+      "skills": {                           // null when no skills are expected
+        "location": "/path/to/project/.spm/claude/plugin/skills",
+        "present": ["pdf-tools"],
+        "missing": [],
+        "stale": [],                        // on disk but not in ai.lock
+        "notes": []                         // e.g. a stale marketplace pointer
+      },
+      "plugins": null                       // same shape; only for targets that
+                                            // register full plugins (Claude)
+    }
+  ],
+  "complete": true                          // false ⇔ non-zero exit
+}
+```
+
+### `spm scan --json`
+
+```jsonc
+{
+  "schemaVersion": 1,
+  "path": "./my-skill",
+  "findings": [
+    {
+      "rule": "prompt-injection",
+      "category": "prompt-injection",       // see the table under `spm scan`
+      "severity": "high",                   // low | medium | high | critical
+      "path": "SKILL.md",                   // relative to the scanned path
+      "line": 12,                           // null for file-level findings
+      "detail": "instruction-hijacking phrase: \"ignore previous instructions\"",
+      "blocking": true                      // high or critical
+    }
+  ],
+  "summary": { "total": 1, "blocking": 1 }
+}
+```
 
 ## Repo URLs (HTTPS & SSH)
 

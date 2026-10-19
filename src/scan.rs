@@ -15,6 +15,7 @@
 //! command can never disagree about what counts as suspicious.
 
 use anyhow::{bail, Context, Result};
+use serde::{Serialize, Serializer};
 use std::path::{Path, PathBuf};
 
 /// How dangerous a finding is. Ordered so `>=` comparisons express thresholds.
@@ -44,6 +45,14 @@ impl Severity {
     }
 }
 
+/// Serialized as its [`label`](Severity::label) so `spm scan --json` and the
+/// human `render` output can never disagree on the spelling.
+impl Serialize for Severity {
+    fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(self.label())
+    }
+}
+
 /// The kind of threat a rule detects. Kept coarse (one per issue category) so
 /// output groups findings the way a reviewer reasons about them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -69,13 +78,21 @@ impl Category {
     }
 }
 
+/// Serialized as its [`label`](Category::label), like [`Severity`].
+impl Serialize for Category {
+    fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(self.label())
+    }
+}
+
 /// One suspicious hit: which rule fired, where, and why. `line` is 1-based for
 /// content rules and `None` for file-level rules (e.g. an auto-run manifest).
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct Finding {
     pub rule: &'static str,
     pub category: Category,
     pub severity: Severity,
+    #[serde(serialize_with = "crate::jsonutil::serialize_path")]
     pub path: PathBuf,
     pub line: Option<usize>,
     pub detail: String,

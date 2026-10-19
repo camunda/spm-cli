@@ -14,7 +14,7 @@ mod update;
 use crate::scope::Scope;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use common::{ScopeArg, TransportArgs, VersionArg};
+use common::{JsonArg, ScopeArg, TransportArgs, VersionArg};
 use std::path::Path;
 
 #[derive(Parser)]
@@ -109,11 +109,15 @@ enum Command {
     List {
         #[command(flatten)]
         scope: ScopeArg,
+        #[command(flatten)]
+        output: JsonArg,
     },
     /// Show which declared skills and plugins are materialized in this checkout.
     Status {
         #[command(flatten)]
         scope: ScopeArg,
+        #[command(flatten)]
+        output: JsonArg,
     },
     /// Remove all generated vendor config for this project.
     Clean {
@@ -136,6 +140,8 @@ enum Command {
         /// Path to scan — a file or directory (defaults to the current directory).
         #[arg(default_value = ".")]
         path: String,
+        #[command(flatten)]
+        output: JsonArg,
     },
 }
 
@@ -215,10 +221,10 @@ pub fn run() -> Result<()> {
             println!("installed {n} {noun}");
             Ok(())
         }
-        Command::List { scope } => list::list(&scope.resolve(&cwd)),
-        Command::Status { scope } => status::status(&scope.resolve(&cwd)),
+        Command::List { scope, output } => list::list(&scope.resolve(&cwd), output.json),
+        Command::Status { scope, output } => status::status(&scope.resolve(&cwd), output.json),
         Command::Clean { scope } => clean::clean(&scope.resolve(&cwd)),
         Command::Prune { yes } => clean::prune(yes),
-        Command::Scan { path } => scan::scan_cmd(Path::new(&path)),
+        Command::Scan { path, output } => scan::scan_cmd(Path::new(&path), output.json),
     }
 }
