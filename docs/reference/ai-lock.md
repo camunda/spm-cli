@@ -34,6 +34,13 @@ the direct dependency(ies) that pulled it in (sorted and deduplicated so the
 committed lockfile stays stable). A directly-declared skill omits the field. See
 [Transitive Skill Dependencies](/guide/transitive-dependencies).
 
+When two edges request the same skill by **different** selectors that resolve to
+the same commit (say `branch:main` and `tag:v1`), the graph keeps one entry, and
+its `also_satisfies` list records the other selector(s). That is the pin
+evidence that lets later installs — including `spm install --locked` — check
+those edges without a remote lookup. It is rebuilt on every install and omitted
+when empty.
+
 ## Commit it
 
 Commit **both** `ai.json` and `ai.lock`. Never commit the materialized skills —

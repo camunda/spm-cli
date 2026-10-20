@@ -5767,3 +5767,172 @@ fn install_locked_works_with_global_scope() {
     );
     assert_eq!(lock_before, std::fs::read_to_string(&lock_path).unwrap());
 }
+
+/// Two edges requesting one shared skill by *different* selectors that resolve
+/// to the same commit dedup to one lock entry. Plain `install` records the
+/// second selector as pin evidence, so `--locked` accepts the lock unchanged
+/// (it used to report the deduplicated edge as missing).
+#[test]
+fn install_locked_accepts_mixed_selector_transitive_diamond() {
+    let sb = Sandbox::new();
+    let shared_dir = sb.root.join("shared");
+    let shared = make_repo(
+        &shared_dir,
+        &[("SKILL.md", "---\nname: shared\n---\nShared.\n")],
+    );
+    git_in(&shared_dir, &["tag", "v1"]);
+    let left = make_repo(
+        &sb.root.join("left"),
+        &[
+            ("SKILL.md", "---\nname: left\n---\nLeft.\n"),
+            (
+                "ai.json",
+                &format!(r#"{{"skills":{{"shared":{{"git":"{shared}","branch":"main"}}}}}}"#),
+            ),
+        ],
+    );
+    let right = make_repo(
+        &sb.root.join("right"),
+        &[
+            ("SKILL.md", "---\nname: right\n---\nRight.\n"),
+            (
+                "ai.json",
+                &format!(r#"{{"skills":{{"shared":{{"git":"{shared}","tag":"v1"}}}}}}"#),
+            ),
+        ],
+    );
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{"left":{{"git":"{left}","branch":"main"}},"right":{{"git":"{right}","branch":"main"}}}}}}"#
+        ),
+    );
+    sb.ok(&["install"]);
+    let lock_before = sb.read("ai.lock");
+    assert!(lock_before.contains("\"also_satisfies\""), "{lock_before}");
+    sb.ok(&["install", "--locked"]);
+    assert_eq!(lock_before, sb.read("ai.lock"));
+    // Plain install is stable too: the evidence round-trips without churn.
+    sb.ok(&["install"]);
+    assert_eq!(lock_before, sb.read("ai.lock"));
+}
+
+/// A nested edge onto a *direct root* by a different selector (same commit) is
+/// likewise recorded on the root's entry and accepted by `--locked`.
+#[test]
+fn install_locked_accepts_differing_selector_edge_onto_direct_root() {
+    let sb = Sandbox::new();
+    let shared_dir = sb.root.join("shared");
+    let shared = make_repo(
+        &shared_dir,
+        &[("SKILL.md", "---\nname: shared\n---\nShared.\n")],
+    );
+    git_in(&shared_dir, &["tag", "v1"]);
+    let top = make_repo(
+        &sb.root.join("top"),
+        &[
+            ("SKILL.md", "---\nname: top\n---\nTop.\n"),
+            (
+                "ai.json",
+                &format!(r#"{{"skills":{{"shared":{{"git":"{shared}","branch":"main"}}}}}}"#),
+            ),
+        ],
+    );
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{"shared":{{"git":"{shared}","tag":"v1"}},"top":{{"git":"{top}","branch":"main"}}}}}}"#
+        ),
+    );
+    sb.ok(&["install"]);
+    let lock_before = sb.read("ai.lock");
+    let lock: serde_json::Value = serde_json::from_str(&lock_before).unwrap();
+    assert_eq!(
+        lock["skills"]["shared"]["also_satisfies"],
+        serde_json::json!(["branch:main"]),
+        "{lock_before}"
+    );
+    sb.ok(&["install", "--locked"]);
+    assert_eq!(lock_before, sb.read("ai.lock"));
+}
+
+/// Stale transitive pins are reported alongside unrelated mismatches (a stale
+/// plugin, a removed root) rather than being suppressed by them — only a
+/// subtree that was actually skipped (a root that failed its own pin check)
+/// holds back judgement on its children.
+#[test]
+fn install_locked_reports_stale_transitive_pins_with_other_mismatches() {
+    let sb = Sandbox::new();
+    sb.add_plugin();
+    let url = sb.skill_url();
+    let leaf = make_repo(
+        &sb.root.join("leaf"),
+        &[("SKILL.md", "---\nname: leaf\n---\nLeaf.\n")],
+    );
+    let top_dir = sb.root.join("top");
+    let top = make_repo(
+        &top_dir,
+        &[
+            ("SKILL.md", "---\nname: top\n---\nTop.\n"),
+            (
+                "ai.json",
+                &format!(r#"{{"skills":{{"leaf":{{"git":"{leaf}","branch":"main"}}}}}}"#),
+            ),
+        ],
+    );
+    git_in(&top_dir, &["tag", "v1"]);
+    let manifest = |transitive: bool, top_sel: Option<&str>, plugin: bool| {
+        let top_entry = top_sel
+            .map(|sel| format!(r#""top":{{"git":"{top}",{sel}}}"#))
+            .unwrap_or_default();
+        let plugins = if plugin {
+            format!(r#","plugins":{{"ds":{{"git":"{url}","branch":"main","path":"pkg"}}}}"#)
+        } else {
+            String::new()
+        };
+        format!(
+            r#"{{"targets":["copilot"],"resolveTransitive":{transitive},"skills":{{{top_entry}}}{plugins}}}"#
+        )
+    };
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(&sb, &manifest(true, Some(r#""branch":"main""#), true));
+    sb.ok(&["install"]);
+    let good_lock = sb.read("ai.lock");
+    let lock: serde_json::Value = serde_json::from_str(&good_lock).unwrap();
+    let leaf_name = lock["skills"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .find(|k| k.starts_with("top__leaf-"))
+        .unwrap()
+        .clone();
+    let stale_leaf = format!("transitive skill `{leaf_name}`: in ai.lock but no longer required");
+
+    // Plugin removed + resolveTransitive disabled: both reported together.
+    write_manifest(&sb, &manifest(false, Some(r#""branch":"main""#), false));
+    let err = fails(&sb, &["install", "--locked"]);
+    assert!(
+        err.contains("plugin `ds`: in ai.lock but not declared"),
+        "{err}"
+    );
+    assert!(err.contains(&stale_leaf), "{err}");
+
+    // Direct root removed: the root and its now-unused child are both stale.
+    write_manifest(&sb, &manifest(true, None, true));
+    let err = fails(&sb, &["install", "--locked"]);
+    assert!(
+        err.contains("skill `top`: in ai.lock but not declared"),
+        "{err}"
+    );
+    assert!(err.contains(&stale_leaf), "{err}");
+
+    // Root's own pin changed: its subtree is skipped, so the child is not
+    // misreported as stale.
+    write_manifest(&sb, &manifest(true, Some(r#""tag":"v1""#), true));
+    let err = fails(&sb, &["install", "--locked"]);
+    assert!(err.contains("skill `top`: changed since ai.lock"), "{err}");
+    assert!(!err.contains("no longer required"), "{err}");
+    assert_eq!(good_lock, sb.read("ai.lock"));
+}

@@ -4,6 +4,7 @@ use crate::scope::Scope;
 use crate::vendor::{MaterializedPlugin, MaterializedSkill};
 use crate::{resolver, store, transitive};
 use anyhow::{bail, Context, Result};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Core pipeline shared by add/remove/update/install:
 /// resolve manifest -> ai.lock -> populate store -> materialize vendor config.
@@ -43,6 +44,9 @@ pub(super) fn sync(
     let mut prev = Lockfile::load_or_default(&dir)?;
     // `--locked` only: every way `ai.lock` disagrees with `ai.json`.
     let mut mismatches: Vec<String> = Vec::new();
+    // `--locked` only: direct skills that failed the pin check and so are not
+    // walked (their transitive subtree is never visited).
+    let mut skipped_roots: BTreeSet<String> = BTreeSet::new();
 
     // Skill names spm materialized on the previous sync. Captured before the
     // resolve loop mutates `prev`, so global/shared-dir vendors (which share a
@@ -109,6 +113,7 @@ pub(super) fn sync(
             Ok(l) => Some(l),
             Err(why) if locked => {
                 mismatches.push(format!("skill `{name}`: {why}"));
+                skipped_roots.insert(name.clone());
                 continue;
             }
             Err(_) => None,
@@ -156,6 +161,7 @@ pub(super) fn sync(
             ),
         };
         locked.bundled_skills.clear();
+        locked.also_satisfies.clear();
         let short = &locked.commit[..locked.commit.len().min(8)];
         println!("  {name:<width$}  {reference} @ {short}  (plugin, {how})");
         lock.plugins.insert(name.clone(), locked);
@@ -252,24 +258,27 @@ pub(super) fn sync(
         },
     )?;
     let mut materialized: Vec<MaterializedSkill> = expansion.materialized;
+    // `also_satisfies` evidence is rebuilt by every walk: a direct root keeps
+    // only what this walk recorded for it (nothing when transitive is off).
+    let mut direct_also_satisfies = expansion.direct_also_satisfies;
+    for (name, l) in &mut lock.skills {
+        l.also_satisfies = direct_also_satisfies.remove(name).unwrap_or_default();
+    }
     if locked {
-        // A transitive pin the walk no longer reaches is stale. Only judged when
-        // every direct root and edge was pinned: a skipped root never walks its
-        // subtree, so its (still valid) children would otherwise be misreported.
-        if mismatches.is_empty() && expansion.lock_misses.is_empty() {
-            for (name, _) in prev
-                .skills
-                .iter()
-                .filter(|(_, l)| !l.requested_by.is_empty())
-            {
-                if !expansion.transitive.iter().any(|(t, _)| t == name) {
-                    mismatches.push(format!(
-                        "transitive skill `{name}`: in ai.lock but no longer required"
-                    ));
-                }
-            }
-        }
-        mismatches.extend(expansion.lock_misses);
+        let reached: BTreeSet<&str> = expansion
+            .transitive
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect();
+        mismatches.extend(stale_transitive_pins(
+            &prev.skills,
+            &reached,
+            manifest.resolve_transitive,
+            skipped_roots
+                .into_iter()
+                .chain(expansion.lock_misses.iter().map(|(n, _)| n.clone())),
+        ));
+        mismatches.extend(expansion.lock_misses.into_iter().map(|(_, m)| m));
     }
     // Fold the transitively-resolved skills into `ai.lock`. A synthesized name
     // colliding with a directly-declared dependency is a hard error (the
@@ -384,6 +393,46 @@ fn reusable_pin(
         None => Ok(l),
         Some(changes) => Err(format!("changed since ai.lock was written ({changes})")),
     })
+}
+
+/// `--locked`: describe every transitive pin left in `prev` (direct entries
+/// already removed) that the walk did not reach. A pin that hangs off a
+/// subtree the walk skipped — a direct root or edge that itself failed the pin
+/// check, seeded by `unwalked` — may still be needed, so it is not judged (that
+/// root's own mismatch is already reported). With `resolveTransitive` off
+/// nothing is walked, so every transitive pin is stale.
+fn stale_transitive_pins(
+    prev: &BTreeMap<String, LockedSkill>,
+    reached: &BTreeSet<&str>,
+    resolve_transitive: bool,
+    unwalked: impl IntoIterator<Item = String>,
+) -> Vec<String> {
+    let unreached: Vec<(&String, &LockedSkill)> = prev
+        .iter()
+        .filter(|(n, l)| !l.requested_by.is_empty() && !reached.contains(n.as_str()))
+        .collect();
+    let mut unwalked: BTreeSet<String> = if resolve_transitive {
+        unwalked.into_iter().collect()
+    } else {
+        BTreeSet::new()
+    };
+    // Fixed point: anything requested by an unwalked node is itself unwalked.
+    loop {
+        let before = unwalked.len();
+        for (n, l) in &unreached {
+            if l.requested_by.iter().any(|r| unwalked.contains(r)) {
+                unwalked.insert((*n).clone());
+            }
+        }
+        if unwalked.len() == before {
+            break;
+        }
+    }
+    unreached
+        .into_iter()
+        .filter(|(n, _)| !unwalked.contains(*n))
+        .map(|(n, _)| format!("transitive skill `{n}`: in ai.lock but no longer required"))
+        .collect()
 }
 
 /// How to fix a `--locked` failure, spelled for the scope in use.

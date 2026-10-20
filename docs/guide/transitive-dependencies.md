@@ -86,7 +86,8 @@ so re-running `spm install` never churns it.
 
 - **Diamonds** (two of your skills pull in the same dependency) resolve that
   shared skill **exactly once**. Its `requested_by` in `ai.lock` lists every
-  requester.
+  requester. If the requesters use different selectors that land on the same
+  commit, the extra selectors are recorded in the entry's `also_satisfies`.
 - **Cycles** among transitive skills (A depends on B depends on A, where neither
   is one of your directly-declared roots) are detected and reported with the
   offending chain, rather than looping forever.

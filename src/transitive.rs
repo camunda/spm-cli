@@ -104,9 +104,14 @@ pub struct Output {
     pub materialized: Vec<MaterializedSkill>,
     /// Synthesized-name → locked entry for every transitively-resolved skill.
     pub transitive: Vec<(String, LockedSkill)>,
-    /// `--locked` only: one line per transitive edge that would have needed a
-    /// fresh resolution because `ai.lock` has no matching pin for it.
-    pub lock_misses: Vec<String>,
+    /// `also_satisfies` evidence recorded for *direct* roots (by name): the
+    /// other selectors nested edges requested for a root's identity that
+    /// resolved to the root's commit. Transitive entries carry theirs in place.
+    pub direct_also_satisfies: BTreeMap<String, Vec<String>>,
+    /// `--locked` only: `(synthesized name, description)` for each transitive
+    /// edge that would have needed a fresh resolution because `ai.lock` has no
+    /// matching pin for it. That edge's subtree is not walked.
+    pub lock_misses: Vec<(String, String)>,
 }
 
 /// One resolved identity in the global dedup/conflict map.
@@ -414,6 +419,7 @@ pub fn expand(direct: &BTreeMap<String, LockedSkill>, ctx: &Ctx) -> Result<Outpu
         out: Output {
             materialized: Vec::new(),
             transitive: Vec::new(),
+            direct_also_satisfies: BTreeMap::new(),
             lock_misses: Vec::new(),
         },
         edges: 0,
@@ -428,6 +434,12 @@ pub fn expand(direct: &BTreeMap<String, LockedSkill>, ctx: &Ctx) -> Result<Outpu
     for (_, l) in &mut out.transitive {
         l.requested_by.sort();
         l.requested_by.dedup();
+        l.also_satisfies.sort();
+        l.also_satisfies.dedup();
+    }
+    for v in out.direct_also_satisfies.values_mut() {
+        v.sort();
+        v.dedup();
     }
     Ok(out)
 }
@@ -560,17 +572,38 @@ fn visit(
             // commit the second time and report a *phantom* version conflict for
             // what is really one shared node. Only when a genuinely different
             // reference is requested do we resolve again, to detect a real conflict.
+            //
+            // The deduplicated graph keeps a single lock entry per identity, so a
+            // differing selector has no pin of its own. Instead, the entry records
+            // in `also_satisfies` every other selector verified to resolve to its
+            // commit; that evidence is reused (unless refreshing) so this edge is
+            // re-checked without a remote lookup — and `install --locked` accepts
+            // a lock that plain `install` produced.
             let requested = spec.version()?.label();
             if requested != existing.reference {
-                let Some(child) = resolve_child(spec, &synth, ctx)
-                    .with_context(|| format!("resolving nested skill `{declared}` of `{name}`"))?
-                else {
-                    w.out
-                        .lock_misses
-                        .push(lock_miss(&synth, declared, name, spec, ctx)?);
-                    continue;
+                let pinned = match existing.out_idx {
+                    Some(idx) => ctx.prev.get(&w.out.transitive[idx].0),
+                    None => direct.get(&existing.chain[0]),
                 };
-                if existing.commit != child.commit {
+                let evidenced = !ctx.refresh
+                    && pinned.is_some_and(|p| {
+                        p.commit == existing.commit && p.also_satisfies.contains(&requested)
+                    });
+                let child_commit = if evidenced {
+                    existing.commit.clone()
+                } else {
+                    let Some(child) = resolve_child(spec, &synth, ctx).with_context(|| {
+                        format!("resolving nested skill `{declared}` of `{name}`")
+                    })?
+                    else {
+                        w.out
+                            .lock_misses
+                            .push((synth.clone(), lock_miss(&synth, declared, name, spec, ctx)?));
+                        continue;
+                    };
+                    child.commit
+                };
+                if existing.commit != child_commit {
                     let mut cur_chain: Vec<String> =
                         w.stack.iter().map(|(_, n)| n.clone()).collect();
                     cur_chain.push(declared.clone());
@@ -582,11 +615,20 @@ fn visit(
                             chain: &existing.chain,
                         },
                         ConflictSide {
-                            reference: &child.reference,
-                            commit: &child.commit,
+                            reference: &requested,
+                            commit: &child_commit,
                             chain: &cur_chain,
                         },
                     ));
+                }
+                match existing.out_idx {
+                    Some(idx) => w.out.transitive[idx].1.also_satisfies.push(requested),
+                    None => w
+                        .out
+                        .direct_also_satisfies
+                        .entry(existing.chain[0].clone())
+                        .or_default()
+                        .push(requested),
                 }
             }
             // Same identity, no conflict: a diamond. This also covers an edge
@@ -633,7 +675,7 @@ fn visit(
         else {
             w.out
                 .lock_misses
-                .push(lock_miss(&synth, declared, name, spec, ctx)?);
+                .push((synth.clone(), lock_miss(&synth, declared, name, spec, ctx)?));
             continue;
         };
         child.requested_by = vec![name.to_string()];
@@ -706,6 +748,7 @@ fn resolve_child(spec: &SkillSpec, synth: &str, ctx: &Ctx) -> Result<Option<Lock
                     commit,
                     bundled_skills: Vec::new(),
                     requested_by: Vec::new(),
+                    also_satisfies: Vec::new(),
                 }));
             }
         }
