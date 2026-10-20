@@ -6314,6 +6314,7 @@ fn outdated_marks_transitive_skills() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn outdated_works_in_global_scope() {
     let sb = Sandbox::new();
