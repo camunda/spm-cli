@@ -109,7 +109,16 @@ pub(super) fn sync(
         let refresh = force_refresh && only.is_none_or(|o| o == name);
 
         // Reuse the pinned commit if the request is unchanged and we're not refreshing.
-        let reuse = match reusable_pin(prev.skills.remove(name), spec, refresh)? {
+        let prev_entry = prev.skills.remove(name);
+        let prev_evidence = prev_entry.as_ref().map(|p| {
+            (
+                p.git.clone(),
+                p.path.clone(),
+                p.commit.clone(),
+                p.also_satisfies.clone(),
+            )
+        });
+        let reuse = match reusable_pin(prev_entry, spec, refresh)? {
             Ok(l) => Some(l),
             Err(why) if locked => {
                 mismatches.push(format!("skill `{name}`: {why}"));
@@ -133,6 +142,17 @@ pub(super) fn sync(
         // "transitive" purely on a non-empty `requested_by`) never misreport a
         // direct skill as transitive. Freshly resolved entries are already empty.
         locked.requested_by.clear();
+        // Re-resolved (e.g. `spm update <name>`) to the very same git + path +
+        // commit: the selectors previously verified to resolve to that commit
+        // still do, so keep them as evidence. Otherwise a nested edge onto this
+        // root by another, since-moved selector would be re-resolved — cascading
+        // a named update into the transitive frontier — and report a spurious
+        // conflict. A bare `spm update` refreshes the walk and ignores evidence.
+        if let Some((git, path, commit, evidence)) = prev_evidence {
+            if git == locked.git && path == locked.path && commit == locked.commit {
+                locked.also_satisfies = evidence;
+            }
+        }
         let short = &locked.commit[..locked.commit.len().min(8)];
         println!("  {name:<width$}  {reference} @ {short}  ({how})");
         lock.skills.insert(name.clone(), locked);

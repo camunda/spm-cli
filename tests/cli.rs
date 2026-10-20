@@ -5936,3 +5936,48 @@ fn install_locked_reports_stale_transitive_pins_with_other_mismatches() {
     assert!(!err.contains("no longer required"), "{err}");
     assert_eq!(good_lock, sb.read("ai.lock"));
 }
+
+/// `spm update <name>` re-resolving a direct root to the *same* commit keeps
+/// its `also_satisfies` evidence: a nested edge onto that root by another
+/// (since-moved) selector must not be re-resolved and reported as a conflict —
+/// a named update does not cascade into the transitive frontier.
+#[test]
+fn named_update_keeps_selector_evidence_for_unchanged_root() {
+    let sb = Sandbox::new();
+    let shared_dir = sb.root.join("shared");
+    let shared = make_repo(
+        &shared_dir,
+        &[("SKILL.md", "---\nname: shared\n---\nShared.\n")],
+    );
+    git_in(&shared_dir, &["tag", "v1"]);
+    let top = make_repo(
+        &sb.root.join("top"),
+        &[
+            ("SKILL.md", "---\nname: top\n---\nTop.\n"),
+            (
+                "ai.json",
+                &format!(r#"{{"skills":{{"shared":{{"git":"{shared}","branch":"main"}}}}}}"#),
+            ),
+        ],
+    );
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{"shared":{{"git":"{shared}","tag":"v1"}},"top":{{"git":"{top}","branch":"main"}}}}}}"#
+        ),
+    );
+    sb.ok(&["install"]);
+    let lock_before = sb.read("ai.lock");
+
+    std::fs::write(
+        shared_dir.join("SKILL.md"),
+        "---\nname: shared\n---\nMoved.\n",
+    )
+    .unwrap();
+    git_in(&shared_dir, &["commit", "-qam", "move main"]);
+
+    sb.ok(&["update", "shared"]);
+    assert_eq!(lock_before, sb.read("ai.lock"));
+    sb.ok(&["install", "--locked"]);
+}
