@@ -90,6 +90,10 @@ pub struct Ctx<'a> {
     /// deliberately leaves it `false` and does not cascade into the named
     /// root's transitive frontier.
     pub refresh: bool,
+    /// `spm install --locked`: never resolve a transitive child. A child whose
+    /// edge has no matching `ai.lock` pin is recorded in [`Output::lock_misses`]
+    /// (and its subtree skipped) instead of being resolved.
+    pub locked: bool,
     /// Column width for the aligned per-skill fetch output.
     pub width: usize,
 }
@@ -100,6 +104,14 @@ pub struct Output {
     pub materialized: Vec<MaterializedSkill>,
     /// Synthesized-name → locked entry for every transitively-resolved skill.
     pub transitive: Vec<(String, LockedSkill)>,
+    /// `also_satisfies` evidence recorded for *direct* roots (by name): the
+    /// other selectors nested edges requested for a root's identity that
+    /// resolved to the root's commit. Transitive entries carry theirs in place.
+    pub direct_also_satisfies: BTreeMap<String, Vec<String>>,
+    /// `--locked` only: `(synthesized name, description)` for each transitive
+    /// edge that would have needed a fresh resolution because `ai.lock` has no
+    /// matching pin for it. That edge's subtree is not walked.
+    pub lock_misses: Vec<(String, String)>,
 }
 
 /// One resolved identity in the global dedup/conflict map.
@@ -407,6 +419,8 @@ pub fn expand(direct: &BTreeMap<String, LockedSkill>, ctx: &Ctx) -> Result<Outpu
         out: Output {
             materialized: Vec::new(),
             transitive: Vec::new(),
+            direct_also_satisfies: BTreeMap::new(),
+            lock_misses: Vec::new(),
         },
         edges: 0,
     };
@@ -420,6 +434,12 @@ pub fn expand(direct: &BTreeMap<String, LockedSkill>, ctx: &Ctx) -> Result<Outpu
     for (_, l) in &mut out.transitive {
         l.requested_by.sort();
         l.requested_by.dedup();
+        l.also_satisfies.sort();
+        l.also_satisfies.dedup();
+    }
+    for v in out.direct_also_satisfies.values_mut() {
+        v.sort();
+        v.dedup();
     }
     Ok(out)
 }
@@ -552,11 +572,38 @@ fn visit(
             // commit the second time and report a *phantom* version conflict for
             // what is really one shared node. Only when a genuinely different
             // reference is requested do we resolve again, to detect a real conflict.
+            //
+            // The deduplicated graph keeps a single lock entry per identity, so a
+            // differing selector has no pin of its own. Instead, the entry records
+            // in `also_satisfies` every other selector verified to resolve to its
+            // commit; that evidence is reused (unless refreshing) so this edge is
+            // re-checked without a remote lookup — and `install --locked` accepts
+            // a lock that plain `install` produced.
             let requested = spec.version()?.label();
             if requested != existing.reference {
-                let child = resolve_child(spec, &synth, ctx)
-                    .with_context(|| format!("resolving nested skill `{declared}` of `{name}`"))?;
-                if existing.commit != child.commit {
+                let pinned = match existing.out_idx {
+                    Some(idx) => ctx.prev.get(&w.out.transitive[idx].0),
+                    None => direct.get(&existing.chain[0]),
+                };
+                let evidenced = !ctx.refresh
+                    && pinned.is_some_and(|p| {
+                        p.commit == existing.commit && p.also_satisfies.contains(&requested)
+                    });
+                let child_commit = if evidenced {
+                    existing.commit.clone()
+                } else {
+                    let Some(child) = resolve_child(spec, &synth, ctx).with_context(|| {
+                        format!("resolving nested skill `{declared}` of `{name}`")
+                    })?
+                    else {
+                        w.out
+                            .lock_misses
+                            .push((synth.clone(), lock_miss(&synth, declared, name, spec, ctx)?));
+                        continue;
+                    };
+                    child.commit
+                };
+                if existing.commit != child_commit {
                     let mut cur_chain: Vec<String> =
                         w.stack.iter().map(|(_, n)| n.clone()).collect();
                     cur_chain.push(declared.clone());
@@ -568,11 +615,20 @@ fn visit(
                             chain: &existing.chain,
                         },
                         ConflictSide {
-                            reference: &child.reference,
-                            commit: &child.commit,
+                            reference: &requested,
+                            commit: &child_commit,
                             chain: &cur_chain,
                         },
                     ));
+                }
+                match existing.out_idx {
+                    Some(idx) => w.out.transitive[idx].1.also_satisfies.push(requested),
+                    None => w
+                        .out
+                        .direct_also_satisfies
+                        .entry(existing.chain[0].clone())
+                        .or_default()
+                        .push(requested),
                 }
             }
             // Same identity, no conflict: a diamond. This also covers an edge
@@ -614,8 +670,14 @@ fn visit(
                  dependencies to a version that does not ship it"
             );
         }
-        let mut child = resolve_child(spec, &synth, ctx)
-            .with_context(|| format!("resolving nested skill `{declared}` of `{name}`"))?;
+        let Some(mut child) = resolve_child(spec, &synth, ctx)
+            .with_context(|| format!("resolving nested skill `{declared}` of `{name}`"))?
+        else {
+            w.out
+                .lock_misses
+                .push((synth.clone(), lock_miss(&synth, declared, name, spec, ctx)?));
+            continue;
+        };
         child.requested_by = vec![name.to_string()];
 
         let mut child_chain: Vec<String> = w.stack.iter().map(|(_, n)| n.clone()).collect();
@@ -670,27 +732,51 @@ fn visit(
 /// one root's subtree without risking an unrelated root's dependency. The whole
 /// transitive frontier advances only under a bare `spm update`. See
 /// `docs/guide/transitive-dependencies.md`.
-fn resolve_child(spec: &SkillSpec, synth: &str, ctx: &Ctx) -> Result<LockedSkill> {
-    let reference = spec.version()?.label();
+///
+/// Under `--locked` (`ctx.locked`) a child without a reusable pin is never
+/// resolved: `Ok(None)` is returned and the caller records the miss.
+fn resolve_child(spec: &SkillSpec, synth: &str, ctx: &Ctx) -> Result<Option<LockedSkill>> {
     if !ctx.refresh {
-        if let Some(prev) = ctx
-            .prev
-            .get(synth)
-            .filter(|l| l.git == spec.git && l.reference == reference && l.path == spec.path)
-        {
-            let commit = prev.commit.clone();
-            return Ok(LockedSkill {
-                git: spec.git.clone(),
-                reference,
-                store: store_key(&spec.git, &commit),
-                path: spec.path.clone(),
-                commit,
-                bundled_skills: Vec::new(),
-                requested_by: Vec::new(),
-            });
+        if let Some(prev) = ctx.prev.get(synth) {
+            if prev.drift_from(spec)?.is_none() {
+                let commit = prev.commit.clone();
+                return Ok(Some(LockedSkill {
+                    git: spec.git.clone(),
+                    reference: spec.version()?.label(),
+                    store: store_key(&spec.git, &commit),
+                    path: spec.path.clone(),
+                    commit,
+                    bundled_skills: Vec::new(),
+                    requested_by: Vec::new(),
+                    also_satisfies: Vec::new(),
+                }));
+            }
         }
     }
-    resolver::resolve(spec)
+    if ctx.locked {
+        return Ok(None);
+    }
+    resolver::resolve(spec).map(Some)
+}
+
+/// Describe a transitive edge that `--locked` refused to resolve.
+fn lock_miss(
+    synth: &str,
+    declared: &str,
+    parent: &str,
+    spec: &SkillSpec,
+    ctx: &Ctx,
+) -> Result<String> {
+    let what = match ctx.prev.get(synth) {
+        Some(prev) => format!(
+            "changed in ai.lock ({})",
+            prev.drift_from(spec)?.unwrap_or_default()
+        ),
+        None => "missing from ai.lock".to_string(),
+    };
+    Ok(format!(
+        "transitive skill `{synth}` (`{declared}` required by `{parent}`): {what}"
+    ))
 }
 
 fn conflict_error(key: &Key, a: ConflictSide, b: ConflictSide) -> anyhow::Error {

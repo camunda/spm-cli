@@ -30,5 +30,6 @@ pub fn resolve(spec: &SkillSpec) -> Result<LockedSkill> {
         commit,
         bundled_skills: Vec::new(),
         requested_by: Vec::new(),
+        also_satisfies: Vec::new(),
     })
 }

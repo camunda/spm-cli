@@ -42,6 +42,8 @@ ai.json ──resolve──▶ ai.lock ──fetch──▶ ~/.spm/store/<repo>@
 
 On a fresh clone, teammates run `spm install` — it repopulates their own fetch cache and re-materializes the project-local skills from `ai.lock`. Same model as `node_modules`.
 
+In CI, run `spm install --locked` (like `npm ci` / `cargo build --locked`): it installs exactly the commits pinned in `ai.lock` and **fails** instead of re-resolving when `ai.lock` is out of sync with `ai.json` — a dependency missing from the lock, one whose `git`/selector/`path` changed, a stale lock entry no longer declared, or (with `resolveTransitive`) a transitive child without a pin. Every mismatch is reported in one error, and `ai.lock` is never written. It still fetches into the store; it is not an offline mode.
+
 ## ai.json
 
 ```json
@@ -309,7 +311,7 @@ spm add <git> [--tag|--branch|--commit <v>] \      # add + install a skill (no s
 spm target add [vendor ...]                        # add target vendor(s); no arg = pick interactively
 spm remove <name> [--plugin] [-g]                  # drop a skill (or a plugin with --plugin); alias: rm
 spm update [name] [-g]                              # re-resolve branches/tags to latest
-spm install [-g]                                   # rebuild from ai.lock (after clone); alias: i
+spm install [-g] [--locked]                        # rebuild from ai.lock (after clone); alias: i; --locked fails if ai.lock is out of sync (CI)
 spm list [-g] [--json]                             # show skills + pinned commits; alias: ls
 spm status [-g] [--json]                           # check skills are materialized in this checkout
 spm clean [-g]                                     # remove generated vendor config

@@ -1,3 +1,4 @@
+use crate::manifest::SkillSpec;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -66,6 +67,41 @@ pub struct LockedSkill {
     /// regardless of traversal order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requested_by: Vec<String>,
+    /// With `resolveTransitive`: other version selectors (`reference` labels)
+    /// that nested `ai.json` edges request for this same skill identity and that
+    /// resolved to this same `commit`. The deduplicated graph keeps one entry
+    /// per identity, so this is the pin evidence that lets those edges be
+    /// re-checked without a remote lookup (and lets `install --locked` accept
+    /// them). Rebuilt on every sync; sorted and deduplicated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub also_satisfies: Vec<String>,
+}
+
+impl LockedSkill {
+    /// Compare this pin against the request it would satisfy. `None` when the
+    /// pin was resolved from exactly `spec`'s git + selector + path, so it can
+    /// be reused without re-resolving; otherwise a human-readable description of
+    /// what changed. The single canonical reuse rule for direct skills, plugins
+    /// and transitive children.
+    pub fn drift_from(&self, spec: &SkillSpec) -> Result<Option<String>> {
+        let reference = spec.version()?.label();
+        let mut changes = Vec::new();
+        if self.git != spec.git {
+            changes.push(format!("git `{}` -> `{}`", self.git, spec.git));
+        }
+        if self.reference != reference {
+            changes.push(format!("`{}` -> `{reference}`", self.reference));
+        }
+        if self.path != spec.path {
+            let show = |p: &Option<String>| p.as_deref().unwrap_or("<repo root>").to_string();
+            changes.push(format!(
+                "path `{}` -> `{}`",
+                show(&self.path),
+                show(&spec.path)
+            ));
+        }
+        Ok((!changes.is_empty()).then(|| changes.join(", ")))
+    }
 }
 
 impl Lockfile {
@@ -139,6 +175,11 @@ fn validate_locked_map(map: &BTreeMap<String, LockedSkill>, kind: &str) -> Resul
         for r in &l.requested_by {
             crate::manifest::validate_skill_name(r)
                 .with_context(|| format!("{kind} `{name}`: requested_by name"))?;
+        }
+        for r in &l.also_satisfies {
+            if crate::manifest::Version::from_label(r).is_none() {
+                bail!("{kind} `{name}`: also_satisfies entry `{r}` is not a version selector");
+            }
         }
     }
     Ok(())
@@ -272,6 +313,7 @@ mod tests {
                 store: "totally-not-the-derived-key".into(),
                 bundled_skills: Vec::new(),
                 requested_by: Vec::new(),
+                also_satisfies: Vec::new(),
             },
         );
         let lock = Lockfile {
@@ -301,6 +343,7 @@ mod tests {
                 store: store_key(git, &sha),
                 bundled_skills: vec!["../evil".into()],
                 requested_by: Vec::new(),
+                also_satisfies: Vec::new(),
             },
         );
         let lock = Lockfile {
@@ -329,6 +372,7 @@ mod tests {
                 store: store_key(git, &sha),
                 bundled_skills: Vec::new(),
                 requested_by: Vec::new(),
+                also_satisfies: Vec::new(),
             },
         );
         let lock = Lockfile {
@@ -380,6 +424,7 @@ mod tests {
                 store: store_key(git, &sha),
                 bundled_skills: Vec::new(),
                 requested_by: Vec::new(),
+                also_satisfies: Vec::new(),
             },
         );
         skills.insert(
@@ -392,6 +437,7 @@ mod tests {
                 store: store_key(git, &sha),
                 bundled_skills: Vec::new(),
                 requested_by: vec!["top".into()],
+                also_satisfies: Vec::new(),
             },
         );
         let lock = Lockfile {
@@ -448,6 +494,7 @@ mod tests {
                 store: store_key(git, &sha),
                 bundled_skills: Vec::new(),
                 requested_by: vec!["../evil".into()],
+                also_satisfies: Vec::new(),
             },
         );
         let lock = Lockfile {

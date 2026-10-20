@@ -1,16 +1,28 @@
-use crate::lockfile::Lockfile;
-use crate::manifest::Manifest;
+use crate::lockfile::{LockedSkill, Lockfile};
+use crate::manifest::{Manifest, SkillSpec};
 use crate::scope::Scope;
 use crate::vendor::{MaterializedPlugin, MaterializedSkill};
 use crate::{resolver, store, transitive};
 use anyhow::{bail, Context, Result};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Core pipeline shared by add/remove/update/install:
 /// resolve manifest -> ai.lock -> populate store -> materialize vendor config.
 ///
 /// `force_refresh` re-resolves refs to their latest commit; `only` limits the
 /// refresh to a single skill (used by `update <name>`).
-pub(super) fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Result<usize> {
+///
+/// `locked` (`spm install --locked`) forbids any re-resolution: every direct
+/// and transitive dependency must already be pinned in `ai.lock` for exactly
+/// the request in `ai.json`, `ai.lock` must not carry stale entries, and it is
+/// never written. Every mismatch is collected and reported in one error before
+/// anything is materialized. Fetching into the store is still allowed.
+pub(super) fn sync(
+    scope: &Scope,
+    force_refresh: bool,
+    only: Option<&str>,
+    locked: bool,
+) -> Result<usize> {
     let dir = scope.manifest_dir()?;
     let manifest = Manifest::load(&dir, scope)?;
     if manifest.targets.is_empty() {
@@ -22,7 +34,19 @@ pub(super) fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Re
         .iter()
         .map(|t| crate::vendor::for_target(t))
         .collect::<Result<Vec<_>>>()?;
+    if locked && !Lockfile::path_in(&dir).exists() {
+        bail!(
+            "--locked: {} not found\n{}",
+            Lockfile::path_in(&dir).display(),
+            locked_fix_hint(scope)
+        );
+    }
     let mut prev = Lockfile::load_or_default(&dir)?;
+    // `--locked` only: every way `ai.lock` disagrees with `ai.json`.
+    let mut mismatches: Vec<String> = Vec::new();
+    // `--locked` only: direct skills that failed the pin check and so are not
+    // walked (their transitive subtree is never visited).
+    let mut skipped_roots: BTreeSet<String> = BTreeSet::new();
 
     // Skill names spm materialized on the previous sync. Captured before the
     // resolve loop mutates `prev`, so global/shared-dir vendors (which share a
@@ -47,6 +71,9 @@ pub(super) fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Re
 
     // Stable, path-independent project id: reuse the locked one, else mint & persist.
     let id = if prev.id.is_empty() {
+        if locked {
+            mismatches.push("ai.lock has no project `id`".to_string());
+        }
         crate::lockfile::generate_id(&dir)
     } else {
         prev.id.clone()
@@ -82,9 +109,24 @@ pub(super) fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Re
         let refresh = force_refresh && only.is_none_or(|o| o == name);
 
         // Reuse the pinned commit if the request is unchanged and we're not refreshing.
-        let reuse = prev.skills.remove(name).filter(|l| {
-            !refresh && l.git == spec.git && l.reference == reference && l.path == spec.path
+        let prev_entry = prev.skills.remove(name);
+        let prev_evidence = prev_entry.as_ref().map(|p| {
+            (
+                p.git.clone(),
+                p.path.clone(),
+                p.commit.clone(),
+                p.also_satisfies.clone(),
+            )
         });
+        let reuse = match reusable_pin(prev_entry, spec, refresh)? {
+            Ok(l) => Some(l),
+            Err(why) if locked => {
+                mismatches.push(format!("skill `{name}`: {why}"));
+                skipped_roots.insert(name.clone());
+                continue;
+            }
+            Err(_) => None,
+        };
 
         let (mut locked, how) = match reuse {
             Some(l) => (l, "locked"),
@@ -100,6 +142,17 @@ pub(super) fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Re
         // "transitive" purely on a non-empty `requested_by`) never misreport a
         // direct skill as transitive. Freshly resolved entries are already empty.
         locked.requested_by.clear();
+        // Re-resolved (e.g. `spm update <name>`) to the very same git + path +
+        // commit: the selectors previously verified to resolve to that commit
+        // still do, so keep them as evidence. Otherwise a nested edge onto this
+        // root by another, since-moved selector would be re-resolved — cascading
+        // a named update into the transitive frontier — and report a spurious
+        // conflict. A bare `spm update` refreshes the walk and ignores evidence.
+        if let Some((git, path, commit, evidence)) = prev_evidence {
+            if git == locked.git && path == locked.path && commit == locked.commit {
+                locked.also_satisfies = evidence;
+            }
+        }
         let short = &locked.commit[..locked.commit.len().min(8)];
         println!("  {name:<width$}  {reference} @ {short}  ({how})");
         lock.skills.insert(name.clone(), locked);
@@ -112,9 +165,14 @@ pub(super) fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Re
         let requested = spec.version()?;
         let reference = requested.label();
         let refresh = force_refresh && only.is_none_or(|o| o == name);
-        let reuse = prev.plugins.remove(name).filter(|l| {
-            !refresh && l.git == spec.git && l.reference == reference && l.path == spec.path
-        });
+        let reuse = match reusable_pin(prev.plugins.remove(name), spec, refresh)? {
+            Ok(l) => Some(l),
+            Err(why) if locked => {
+                mismatches.push(format!("plugin `{name}`: {why}"));
+                continue;
+            }
+            Err(_) => None,
+        };
         let (mut locked, how) = match reuse {
             Some(l) => (l, "locked"),
             None => (
@@ -123,9 +181,31 @@ pub(super) fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Re
             ),
         };
         locked.bundled_skills.clear();
+        locked.also_satisfies.clear();
         let short = &locked.commit[..locked.commit.len().min(8)];
         println!("  {name:<width$}  {reference} @ {short}  (plugin, {how})");
         lock.plugins.insert(name.clone(), locked);
+    }
+
+    // Direct entries left in the previous lock are no longer declared. Skills
+    // with a non-empty `requested_by` are transitive; they are judged after the
+    // walk below.
+    if locked {
+        for name in prev
+            .skills
+            .iter()
+            .filter(|(_, l)| l.requested_by.is_empty())
+            .map(|(n, _)| n)
+        {
+            mismatches.push(format!(
+                "skill `{name}`: in ai.lock but not declared in ai.json"
+            ));
+        }
+        for name in prev.plugins.keys() {
+            mismatches.push(format!(
+                "plugin `{name}`: in ai.lock but not declared in ai.json"
+            ));
+        }
     }
 
     // Populate the store for plugins first: we need each plugin's checkout to
@@ -193,10 +273,33 @@ pub(super) fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Re
             // subtree could advance an unrelated root's dependency. See
             // `resolve_child` and docs/guide/transitive-dependencies.md.
             refresh: force_refresh && only.is_none(),
+            locked,
             width,
         },
     )?;
     let mut materialized: Vec<MaterializedSkill> = expansion.materialized;
+    // `also_satisfies` evidence is rebuilt by every walk: a direct root keeps
+    // only what this walk recorded for it (nothing when transitive is off).
+    let mut direct_also_satisfies = expansion.direct_also_satisfies;
+    for (name, l) in &mut lock.skills {
+        l.also_satisfies = direct_also_satisfies.remove(name).unwrap_or_default();
+    }
+    if locked {
+        let reached: BTreeSet<&str> = expansion
+            .transitive
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect();
+        mismatches.extend(stale_transitive_pins(
+            &prev.skills,
+            &reached,
+            manifest.resolve_transitive,
+            skipped_roots
+                .into_iter()
+                .chain(expansion.lock_misses.iter().map(|(n, _)| n.clone())),
+        ));
+        mismatches.extend(expansion.lock_misses.into_iter().map(|(_, m)| m));
+    }
     // Fold the transitively-resolved skills into `ai.lock`. A synthesized name
     // colliding with a directly-declared dependency is a hard error (the
     // synthesized names are hash-suffixed to make this astronomically unlikely).
@@ -245,6 +348,35 @@ pub(super) fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Re
     // separately, across plugins — before any vendor writes a byte.
     reject_case_folding_collisions("skill", materialized.iter().map(|m| m.name.as_str()))?;
     reject_case_folding_collisions("plugin", plugins.iter().map(|p| p.name.as_str()))?;
+    if locked {
+        // Backstop for the whole defect class: whatever the specific checks above
+        // missed (a hand-edited `bundled_skills`/`requested_by`/store key, ...),
+        // `--locked` must never install a set that differs from the committed
+        // lock. Compared as JSON values, so line endings/formatting don't matter.
+        if mismatches.is_empty() {
+            let on_disk: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(Lockfile::path_in(&dir))?)?;
+            if on_disk != serde_json::to_value(&lock)? {
+                mismatches.push(
+                    "ai.lock differs from what spm would write (e.g. a plugin's bundled skills \
+                     or a transitive skill's requesters changed)"
+                        .to_string(),
+                );
+            }
+        }
+        if !mismatches.is_empty() {
+            bail!(
+                "--locked: ai.lock is out of sync with ai.json ({} problem(s)):\n{}\n{}",
+                mismatches.len(),
+                mismatches
+                    .iter()
+                    .map(|m| format!("  - {m}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                locked_fix_hint(scope)
+            );
+        }
+    }
     // Same resolved skills + plugins projected into every configured vendor.
     if !manifest.skills.is_empty() || !manifest.plugins.is_empty() {
         println!("materializing: {}", manifest.targets.join(", "));
@@ -256,9 +388,81 @@ pub(super) fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Re
     // Only persist `ai.lock` once every fallible step (resolution, fetching,
     // collision checks, and vendor materialization) has succeeded — otherwise
     // a failed `install` could leave behind a lockfile pointing at state that
-    // was never actually materialized.
-    lock.save(&dir)?;
+    // was never actually materialized. `--locked` never writes it: it already
+    // matches (checked above).
+    if !locked {
+        lock.save(&dir)?;
+    }
     Ok(lock.skills.len() + lock.plugins.len())
+}
+
+/// The pin in `prev` if it can be reused for `spec` without re-resolving, else
+/// why not (missing, refreshing, or the request changed).
+fn reusable_pin(
+    prev: Option<LockedSkill>,
+    spec: &SkillSpec,
+    refresh: bool,
+) -> Result<std::result::Result<LockedSkill, String>> {
+    let Some(l) = prev else {
+        return Ok(Err("missing from ai.lock".to_string()));
+    };
+    if refresh {
+        return Ok(Err("refreshing".to_string()));
+    }
+    Ok(match l.drift_from(spec)? {
+        None => Ok(l),
+        Some(changes) => Err(format!("changed since ai.lock was written ({changes})")),
+    })
+}
+
+/// `--locked`: describe every transitive pin left in `prev` (direct entries
+/// already removed) that the walk did not reach. A pin that hangs off a
+/// subtree the walk skipped — a direct root or edge that itself failed the pin
+/// check, seeded by `unwalked` — may still be needed, so it is not judged (that
+/// root's own mismatch is already reported). With `resolveTransitive` off
+/// nothing is walked, so every transitive pin is stale.
+fn stale_transitive_pins(
+    prev: &BTreeMap<String, LockedSkill>,
+    reached: &BTreeSet<&str>,
+    resolve_transitive: bool,
+    unwalked: impl IntoIterator<Item = String>,
+) -> Vec<String> {
+    let unreached: Vec<(&String, &LockedSkill)> = prev
+        .iter()
+        .filter(|(n, l)| !l.requested_by.is_empty() && !reached.contains(n.as_str()))
+        .collect();
+    let mut unwalked: BTreeSet<String> = if resolve_transitive {
+        unwalked.into_iter().collect()
+    } else {
+        BTreeSet::new()
+    };
+    // Fixed point: anything requested by an unwalked node is itself unwalked.
+    loop {
+        let before = unwalked.len();
+        for (n, l) in &unreached {
+            if l.requested_by.iter().any(|r| unwalked.contains(r)) {
+                unwalked.insert((*n).clone());
+            }
+        }
+        if unwalked.len() == before {
+            break;
+        }
+    }
+    unreached
+        .into_iter()
+        .filter(|(n, _)| !unwalked.contains(*n))
+        .map(|(n, _)| format!("transitive skill `{n}`: in ai.lock but no longer required"))
+        .collect()
+}
+
+/// How to fix a `--locked` failure, spelled for the scope in use.
+fn locked_fix_hint(scope: &Scope) -> String {
+    let g = if matches!(scope, Scope::Global) {
+        " -g"
+    } else {
+        ""
+    };
+    format!("run `spm install{g}` (without --locked) and commit ai.lock")
 }
 
 /// Reject materialized names that differ only by case. Vendor directories are

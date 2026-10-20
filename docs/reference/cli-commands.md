@@ -11,7 +11,7 @@ spm add <git> [--tag|--branch|--commit <v>] \      # add + install a skill (no s
 spm target add [vendor ...]                        # add target vendor(s); no arg = pick interactively
 spm remove <name> [--plugin] [-g]                  # drop a skill (or a plugin with --plugin); alias: rm
 spm update [name] [-g]                             # re-resolve branches/tags to latest
-spm install [-g]                                   # rebuild from ai.lock (after clone); alias: i
+spm install [-g] [--locked]                        # rebuild from ai.lock (after clone); alias: i; --locked fails if ai.lock is out of sync (CI)
 spm list [-g] [--json]                             # show skills + pinned commits; alias: ls
 spm status [-g] [--json]                           # check skills are materialized in this checkout
 spm clean [-g]                                     # remove generated vendor config
@@ -154,7 +154,35 @@ pinned. Refresh the whole graph — every transitive child — with a bare
 ### `spm install`
 
 Rebuilds the materialized skills from `ai.lock`. This is the command teammates
-run on a fresh clone and in each new worktree.
+run on a fresh clone and in each new worktree. An entry whose `git`, selector or
+`path` changed in `ai.json`, or that has no pin yet, is re-resolved and
+`ai.lock` is rewritten.
+
+#### `spm install --locked`
+
+Use this in CI. It installs exactly what `ai.lock` pins and **never**
+re-resolves a ref (no `ls-remote`), so a branch that moved upstream still
+installs the locked commit. Instead of quietly updating the lock it fails when
+`ai.lock` is out of sync with `ai.json`:
+
+- a skill or plugin declared in `ai.json` is missing from `ai.lock`;
+- its `git`, `tag`/`branch`/`commit` or `path` changed since the lock was written;
+- `ai.lock` still has an entry no longer declared in `ai.json`;
+- with `"resolveTransitive": true`, a transitive child has no matching pin (or a
+  transitive pin is no longer reached);
+- `ai.lock` is missing, or differs in any other way from what spm would write.
+
+Every mismatch is listed in one error, ending with the fix:
+
+```text
+error: --locked: ai.lock is out of sync with ai.json (2 problem(s)):
+  - skill `reviewer`: changed since ai.lock was written (`tag:v1.0.0` -> `tag:v1.1.0`)
+  - skill `linter`: missing from ai.lock
+run `spm install` (without --locked) and commit ai.lock
+```
+
+`ai.lock` is never written in this mode. Fetching into the store is still
+allowed, so it is not an offline mode. Works with `-g` too.
 
 ### `spm list`
 

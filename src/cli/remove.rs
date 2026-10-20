@@ -18,7 +18,7 @@ pub(super) fn remove(scope: &Scope, name: &str, plugin: bool) -> Result<()> {
         );
     }
     manifest.save(&dir)?;
-    sync(scope, false, None)?;
+    sync(scope, false, None, false)?;
     println!("removed {kind} {name}");
     Ok(())
 }

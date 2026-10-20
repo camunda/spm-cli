@@ -34,6 +34,13 @@ the direct dependency(ies) that pulled it in (sorted and deduplicated so the
 committed lockfile stays stable). A directly-declared skill omits the field. See
 [Transitive Skill Dependencies](/guide/transitive-dependencies).
 
+When two edges request the same skill by **different** selectors that resolve to
+the same commit (say `branch:main` and `tag:v1`), the graph keeps one entry, and
+its `also_satisfies` list records the other selector(s). That is the pin
+evidence that lets later installs — including `spm install --locked` — check
+those edges without a remote lookup. It is rebuilt on every install and omitted
+when empty.
+
 ## Commit it
 
 Commit **both** `ai.json` and `ai.lock`. Never commit the materialized skills —
@@ -55,6 +62,15 @@ spm update reviewer   # re-resolve just one skill
 
 Until you run `spm update`, `spm install` always reproduces the exact commits
 recorded in `ai.lock` — even for a skill declared as `"branch": "main"`.
+
+## Verifying the lock in CI
+
+Plain `spm install` quietly re-resolves (and rewrites `ai.lock` for) any entry
+you added or changed in `ai.json` without updating the lock. In CI, run
+`spm install --locked` instead: it never re-resolves and never writes
+`ai.lock`, and fails listing every dependency (direct or transitive) that is
+missing, changed or stale in the lock. Fix it by running `spm install` locally
+and committing `ai.lock`. See [`spm install --locked`](/reference/cli-commands#spm-install-locked).
 
 ## Fresh clones
 
