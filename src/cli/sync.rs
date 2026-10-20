@@ -1,5 +1,5 @@
-use crate::lockfile::Lockfile;
-use crate::manifest::Manifest;
+use crate::lockfile::{LockedSkill, Lockfile};
+use crate::manifest::{Manifest, SkillSpec};
 use crate::scope::Scope;
 use crate::vendor::{MaterializedPlugin, MaterializedSkill};
 use crate::{resolver, store, transitive};
@@ -10,7 +10,18 @@ use anyhow::{bail, Context, Result};
 ///
 /// `force_refresh` re-resolves refs to their latest commit; `only` limits the
 /// refresh to a single skill (used by `update <name>`).
-pub(super) fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Result<usize> {
+///
+/// `locked` (`spm install --locked`) forbids any re-resolution: every direct
+/// and transitive dependency must already be pinned in `ai.lock` for exactly
+/// the request in `ai.json`, `ai.lock` must not carry stale entries, and it is
+/// never written. Every mismatch is collected and reported in one error before
+/// anything is materialized. Fetching into the store is still allowed.
+pub(super) fn sync(
+    scope: &Scope,
+    force_refresh: bool,
+    only: Option<&str>,
+    locked: bool,
+) -> Result<usize> {
     let dir = scope.manifest_dir()?;
     let manifest = Manifest::load(&dir, scope)?;
     if manifest.targets.is_empty() {
@@ -22,7 +33,16 @@ pub(super) fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Re
         .iter()
         .map(|t| crate::vendor::for_target(t))
         .collect::<Result<Vec<_>>>()?;
+    if locked && !Lockfile::path_in(&dir).exists() {
+        bail!(
+            "--locked: {} not found\n{}",
+            Lockfile::path_in(&dir).display(),
+            locked_fix_hint(scope)
+        );
+    }
     let mut prev = Lockfile::load_or_default(&dir)?;
+    // `--locked` only: every way `ai.lock` disagrees with `ai.json`.
+    let mut mismatches: Vec<String> = Vec::new();
 
     // Skill names spm materialized on the previous sync. Captured before the
     // resolve loop mutates `prev`, so global/shared-dir vendors (which share a
@@ -47,6 +67,9 @@ pub(super) fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Re
 
     // Stable, path-independent project id: reuse the locked one, else mint & persist.
     let id = if prev.id.is_empty() {
+        if locked {
+            mismatches.push("ai.lock has no project `id`".to_string());
+        }
         crate::lockfile::generate_id(&dir)
     } else {
         prev.id.clone()
@@ -82,9 +105,14 @@ pub(super) fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Re
         let refresh = force_refresh && only.is_none_or(|o| o == name);
 
         // Reuse the pinned commit if the request is unchanged and we're not refreshing.
-        let reuse = prev.skills.remove(name).filter(|l| {
-            !refresh && l.git == spec.git && l.reference == reference && l.path == spec.path
-        });
+        let reuse = match reusable_pin(prev.skills.remove(name), spec, refresh)? {
+            Ok(l) => Some(l),
+            Err(why) if locked => {
+                mismatches.push(format!("skill `{name}`: {why}"));
+                continue;
+            }
+            Err(_) => None,
+        };
 
         let (mut locked, how) = match reuse {
             Some(l) => (l, "locked"),
@@ -112,9 +140,14 @@ pub(super) fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Re
         let requested = spec.version()?;
         let reference = requested.label();
         let refresh = force_refresh && only.is_none_or(|o| o == name);
-        let reuse = prev.plugins.remove(name).filter(|l| {
-            !refresh && l.git == spec.git && l.reference == reference && l.path == spec.path
-        });
+        let reuse = match reusable_pin(prev.plugins.remove(name), spec, refresh)? {
+            Ok(l) => Some(l),
+            Err(why) if locked => {
+                mismatches.push(format!("plugin `{name}`: {why}"));
+                continue;
+            }
+            Err(_) => None,
+        };
         let (mut locked, how) = match reuse {
             Some(l) => (l, "locked"),
             None => (
@@ -126,6 +159,27 @@ pub(super) fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Re
         let short = &locked.commit[..locked.commit.len().min(8)];
         println!("  {name:<width$}  {reference} @ {short}  (plugin, {how})");
         lock.plugins.insert(name.clone(), locked);
+    }
+
+    // Direct entries left in the previous lock are no longer declared. Skills
+    // with a non-empty `requested_by` are transitive; they are judged after the
+    // walk below.
+    if locked {
+        for name in prev
+            .skills
+            .iter()
+            .filter(|(_, l)| l.requested_by.is_empty())
+            .map(|(n, _)| n)
+        {
+            mismatches.push(format!(
+                "skill `{name}`: in ai.lock but not declared in ai.json"
+            ));
+        }
+        for name in prev.plugins.keys() {
+            mismatches.push(format!(
+                "plugin `{name}`: in ai.lock but not declared in ai.json"
+            ));
+        }
     }
 
     // Populate the store for plugins first: we need each plugin's checkout to
@@ -193,10 +247,30 @@ pub(super) fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Re
             // subtree could advance an unrelated root's dependency. See
             // `resolve_child` and docs/guide/transitive-dependencies.md.
             refresh: force_refresh && only.is_none(),
+            locked,
             width,
         },
     )?;
     let mut materialized: Vec<MaterializedSkill> = expansion.materialized;
+    if locked {
+        // A transitive pin the walk no longer reaches is stale. Only judged when
+        // every direct root and edge was pinned: a skipped root never walks its
+        // subtree, so its (still valid) children would otherwise be misreported.
+        if mismatches.is_empty() && expansion.lock_misses.is_empty() {
+            for (name, _) in prev
+                .skills
+                .iter()
+                .filter(|(_, l)| !l.requested_by.is_empty())
+            {
+                if !expansion.transitive.iter().any(|(t, _)| t == name) {
+                    mismatches.push(format!(
+                        "transitive skill `{name}`: in ai.lock but no longer required"
+                    ));
+                }
+            }
+        }
+        mismatches.extend(expansion.lock_misses);
+    }
     // Fold the transitively-resolved skills into `ai.lock`. A synthesized name
     // colliding with a directly-declared dependency is a hard error (the
     // synthesized names are hash-suffixed to make this astronomically unlikely).
@@ -245,6 +319,35 @@ pub(super) fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Re
     // separately, across plugins — before any vendor writes a byte.
     reject_case_folding_collisions("skill", materialized.iter().map(|m| m.name.as_str()))?;
     reject_case_folding_collisions("plugin", plugins.iter().map(|p| p.name.as_str()))?;
+    if locked {
+        // Backstop for the whole defect class: whatever the specific checks above
+        // missed (a hand-edited `bundled_skills`/`requested_by`/store key, ...),
+        // `--locked` must never install a set that differs from the committed
+        // lock. Compared as JSON values, so line endings/formatting don't matter.
+        if mismatches.is_empty() {
+            let on_disk: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(Lockfile::path_in(&dir))?)?;
+            if on_disk != serde_json::to_value(&lock)? {
+                mismatches.push(
+                    "ai.lock differs from what spm would write (e.g. a plugin's bundled skills \
+                     or a transitive skill's requesters changed)"
+                        .to_string(),
+                );
+            }
+        }
+        if !mismatches.is_empty() {
+            bail!(
+                "--locked: ai.lock is out of sync with ai.json ({} problem(s)):\n{}\n{}",
+                mismatches.len(),
+                mismatches
+                    .iter()
+                    .map(|m| format!("  - {m}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                locked_fix_hint(scope)
+            );
+        }
+    }
     // Same resolved skills + plugins projected into every configured vendor.
     if !manifest.skills.is_empty() || !manifest.plugins.is_empty() {
         println!("materializing: {}", manifest.targets.join(", "));
@@ -256,9 +359,41 @@ pub(super) fn sync(scope: &Scope, force_refresh: bool, only: Option<&str>) -> Re
     // Only persist `ai.lock` once every fallible step (resolution, fetching,
     // collision checks, and vendor materialization) has succeeded — otherwise
     // a failed `install` could leave behind a lockfile pointing at state that
-    // was never actually materialized.
-    lock.save(&dir)?;
+    // was never actually materialized. `--locked` never writes it: it already
+    // matches (checked above).
+    if !locked {
+        lock.save(&dir)?;
+    }
     Ok(lock.skills.len() + lock.plugins.len())
+}
+
+/// The pin in `prev` if it can be reused for `spec` without re-resolving, else
+/// why not (missing, refreshing, or the request changed).
+fn reusable_pin(
+    prev: Option<LockedSkill>,
+    spec: &SkillSpec,
+    refresh: bool,
+) -> Result<std::result::Result<LockedSkill, String>> {
+    let Some(l) = prev else {
+        return Ok(Err("missing from ai.lock".to_string()));
+    };
+    if refresh {
+        return Ok(Err("refreshing".to_string()));
+    }
+    Ok(match l.drift_from(spec)? {
+        None => Ok(l),
+        Some(changes) => Err(format!("changed since ai.lock was written ({changes})")),
+    })
+}
+
+/// How to fix a `--locked` failure, spelled for the scope in use.
+fn locked_fix_hint(scope: &Scope) -> String {
+    let g = if matches!(scope, Scope::Global) {
+        " -g"
+    } else {
+        ""
+    };
+    format!("run `spm install{g}` (without --locked) and commit ai.lock")
 }
 
 /// Reject materialized names that differ only by case. Vendor directories are

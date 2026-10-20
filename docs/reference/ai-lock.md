@@ -56,6 +56,15 @@ spm update reviewer   # re-resolve just one skill
 Until you run `spm update`, `spm install` always reproduces the exact commits
 recorded in `ai.lock` — even for a skill declared as `"branch": "main"`.
 
+## Verifying the lock in CI
+
+Plain `spm install` quietly re-resolves (and rewrites `ai.lock` for) any entry
+you added or changed in `ai.json` without updating the lock. In CI, run
+`spm install --locked` instead: it never re-resolves and never writes
+`ai.lock`, and fails listing every dependency (direct or transitive) that is
+missing, changed or stale in the lock. Fix it by running `spm install` locally
+and committing `ai.lock`. See [`spm install --locked`](/reference/cli-commands#spm-install-locked).
+
 ## Fresh clones
 
 On a fresh clone or a new worktree, `spm install` reads `ai.lock`, repopulates

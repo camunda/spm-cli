@@ -1,3 +1,4 @@
+use crate::manifest::SkillSpec;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -66,6 +67,33 @@ pub struct LockedSkill {
     /// regardless of traversal order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requested_by: Vec<String>,
+}
+
+impl LockedSkill {
+    /// Compare this pin against the request it would satisfy. `None` when the
+    /// pin was resolved from exactly `spec`'s git + selector + path, so it can
+    /// be reused without re-resolving; otherwise a human-readable description of
+    /// what changed. The single canonical reuse rule for direct skills, plugins
+    /// and transitive children.
+    pub fn drift_from(&self, spec: &SkillSpec) -> Result<Option<String>> {
+        let reference = spec.version()?.label();
+        let mut changes = Vec::new();
+        if self.git != spec.git {
+            changes.push(format!("git `{}` -> `{}`", self.git, spec.git));
+        }
+        if self.reference != reference {
+            changes.push(format!("`{}` -> `{reference}`", self.reference));
+        }
+        if self.path != spec.path {
+            let show = |p: &Option<String>| p.as_deref().unwrap_or("<repo root>").to_string();
+            changes.push(format!(
+                "path `{}` -> `{}`",
+                show(&self.path),
+                show(&spec.path)
+            ));
+        }
+        Ok((!changes.is_empty()).then(|| changes.join(", ")))
+    }
 }
 
 impl Lockfile {

@@ -113,7 +113,7 @@ pub(super) fn add(scope: &Scope, req: AddRequest) -> Result<()> {
             manifest.skills.insert(name.clone(), spec);
         }
         manifest.save(&dir)?;
-        sync(scope, false, None)?;
+        sync(scope, false, None, false)?;
         println!("added {kind} {name}");
     }
     Ok(())
@@ -201,7 +201,7 @@ fn add_all(
         );
     }
     manifest.save(&dir)?;
-    sync(scope, false, None)?;
+    sync(scope, false, None, false)?;
     println!("added {} skill(s): {}", subs.len(), subs.join(", "));
     Ok(())
 }

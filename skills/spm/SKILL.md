@@ -39,6 +39,7 @@ gitignored and never committed. Run `spm --help` or
 | New project with no `ai.json` | `spm init --target <vendor>` |
 | Add a skill the user named | `spm add <git-url> --tag <t> --path <dir>` |
 | Fresh clone, new git worktree, or skills missing | `spm install` |
+| CI, or check `ai.lock` matches `ai.json` without changing it | `spm install --locked` |
 | Skill declared with a branch or tag should move to the latest commit | `spm update [name]` |
 | Also pull in skills a dependency itself declares | set `"resolveTransitive": true` in `ai.json`, then `spm install` |
 | Changed a version selector by editing `ai.json` | `spm install` |
@@ -135,7 +136,7 @@ spm add https://github.com/org/design-system --branch main \
 ### `spm install`
 
 ```bash
-spm install [--protocol ssh|https] [--protocol-fallback] [-g]
+spm install [--locked] [--protocol ssh|https] [--protocol-fallback] [-g]
 ```
 
 Alias: `spm i`. Fetches and materializes everything declared in `ai.json`, reusing the commits
@@ -146,6 +147,13 @@ behave as under [`spm add`](#spm-add). When `"resolveTransitive": true` is set
 in `ai.json`, it also resolves and materializes the skills each dependency
 declares in its own nested `ai.json` (see
 [Transitive dependencies](#transitive-dependencies)).
+
+With `--locked` (use it in CI) it never re-resolves and never writes `ai.lock`.
+It fails, listing every problem in one error, when a direct or transitive
+dependency is missing from `ai.lock`, its `git`/selector/`path` changed, an
+`ai.lock` entry is no longer declared, or `ai.lock` is missing. The error ends
+with ``run `spm install` (without --locked) and commit ai.lock`` (`spm install -g`
+for the global scope); do exactly that. It still fetches, so it is not offline.
 
 ### `spm update`
 

@@ -99,6 +99,12 @@ enum Command {
     /// Fetch + materialize everything from ai.lock (use after cloning).
     #[command(visible_alias = "i")]
     Install {
+        /// Fail instead of re-resolving if ai.lock is out of sync with ai.json
+        /// (a dependency missing, changed or stale in ai.lock, including
+        /// transitive ones). Never writes ai.lock; still fetches into the store.
+        /// Use in CI.
+        #[arg(long)]
+        locked: bool,
         #[command(flatten)]
         scope: ScopeArg,
         #[command(flatten)]
@@ -213,10 +219,14 @@ pub fn run() -> Result<()> {
             transport.apply();
             update::update(&scope.resolve(&cwd), name)
         }
-        Command::Install { scope, transport } => {
+        Command::Install {
+            locked,
+            scope,
+            transport,
+        } => {
             transport.apply();
             let scope = scope.resolve(&cwd);
-            let n = sync::sync(&scope, false, None)?;
+            let n = sync::sync(&scope, false, None, locked)?;
             let noun = if n == 1 { "dependency" } else { "dependencies" };
             println!("installed {n} {noun}");
             Ok(())

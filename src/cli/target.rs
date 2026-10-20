@@ -53,7 +53,7 @@ pub(super) fn target_add(scope: &Scope, vendors: Vec<String>) -> Result<()> {
 
     manifest.save(&dir)?;
     // Materialize existing skills into the newly-added vendor(s).
-    sync(scope, false, None)?;
+    sync(scope, false, None, false)?;
     println!("added target(s): {}", added.join(", "));
     Ok(())
 }
