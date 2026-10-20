@@ -1,7 +1,7 @@
 # Global Skills
 
 `spm`'s scope-aware commands (`init`, `add`, `remove`, `update`, `install`,
-`list`, `status`, `clean`) default to **project scope**: they read/write the
+`list`, `status`, `outdated`, `clean`) default to **project scope**: they read/write the
 `ai.json` and `ai.lock` in the current directory and materialize skills into a
 project-local location. Pass `-g` / `--global` to instead manage a
 **user-global** set of skills — available to your AI tools in *every* project on
@@ -76,6 +76,6 @@ names recorded in each scope's `ai.lock`.
 ## Full command reference
 
 `-g` works the same way on every scope-aware command (`init`, `add`, `remove`,
-`update`, `install`, `list`, `status`, `clean`); see
+`update`, `install`, `list`, `status`, `outdated`, `clean`); see
 [Scope: project (default) vs. global](/reference/cli-commands#scope-project-default-vs-global-g)
 for the complete flag-by-flag reference.

@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
 use std::process::Command;
@@ -371,22 +372,41 @@ fn ls_remote_once(url: &str, refspecs: &[&str]) -> Result<String> {
 /// without cloning. Unlike [`ls_remote`], no match is an empty list rather than
 /// an error, so callers can tell "ref absent" from "remote unreachable".
 pub fn remote_ref_names(url: &str, refspecs: &[&str]) -> Result<Vec<String>> {
+    Ok(remote_refs(url, refspecs)?.into_keys().collect())
+}
+
+/// Map every remote ref matching any of `refspecs` (globs such as
+/// `refs/tags/*` allowed) to the commit it points at, in one `ls-remote` and
+/// without cloning. An annotated tag maps to its peeled commit, not the tag
+/// object, matching [`ls_remote`]. No match is an empty map, not an error.
+pub fn remote_refs(url: &str, refspecs: &[&str]) -> Result<BTreeMap<String, String>> {
     reject_option_like("repository URL", url)?;
     for refspec in refspecs {
         reject_option_like("ref", refspec)?;
     }
-    with_transport(transport(), url, |u| remote_ref_names_once(u, refspecs))
+    with_transport(transport(), url, |u| {
+        let mut args = vec!["ls-remote", u];
+        args.extend_from_slice(refspecs);
+        Ok(parse_ref_shas(&git_remote(&args, None)?))
+    })
 }
 
-fn remote_ref_names_once(url: &str, refspecs: &[&str]) -> Result<Vec<String>> {
-    let mut args = vec!["ls-remote", url];
-    args.extend_from_slice(refspecs);
-    let out = git_remote(&args, None)?;
-    Ok(out
-        .lines()
-        .filter_map(|line| line.split_once('\t'))
-        .map(|(_, name)| name.trim_end_matches("^{}").to_string())
-        .collect())
+/// Parse `ls-remote` output (`<sha>\t<ref>` lines) into `ref -> sha`, letting a
+/// `<ref>^{}` peel line override the tag-object SHA whichever order they come in.
+fn parse_ref_shas(out: &str) -> BTreeMap<String, String> {
+    let mut refs = BTreeMap::new();
+    let mut peeled = Vec::new();
+    for (sha, name) in out.lines().filter_map(|line| line.split_once('\t')) {
+        let sha = sha.to_lowercase();
+        match name.strip_suffix("^{}") {
+            Some(base) => peeled.push((base.to_string(), sha)),
+            None => {
+                refs.insert(name.to_string(), sha);
+            }
+        }
+    }
+    refs.extend(peeled);
+    refs
 }
 
 /// Resolve the remote's default branch (what `HEAD` points at) without cloning,
@@ -928,6 +948,19 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// An annotated tag's `^{}` peel line must win over the tag-object SHA, in
+    /// either order, so a tag compares against the commit `ai.lock` records.
+    #[test]
+    fn parse_ref_shas_prefers_peeled_commit() {
+        let out = "AAAA\trefs/tags/v1\nbbbb\trefs/tags/v1^{}\ncccc\trefs/heads/main\n\
+                   eeee\trefs/tags/v2^{}\ndddd\trefs/tags/v2";
+        let refs = parse_ref_shas(out);
+        assert_eq!(refs.len(), 3);
+        assert_eq!(refs["refs/tags/v1"], "bbbb");
+        assert_eq!(refs["refs/tags/v2"], "eeee");
+        assert_eq!(refs["refs/heads/main"], "cccc");
+    }
+
     #[test]
     fn parse_default_branch_handles_output_shapes() {
         assert_eq!(
@@ -1004,6 +1037,12 @@ mod tests {
         assert!(format!("{err}").contains("option-like"), "{err}");
 
         let err = remote_ref_names("file:///tmp/repo", &["--upload-pack=evil"]).unwrap_err();
+        assert!(format!("{err}").contains("option-like"), "{err}");
+
+        let err = remote_refs(evil, &["refs/tags/*"]).unwrap_err();
+        assert!(format!("{err}").contains("option-like"), "{err}");
+
+        let err = remote_refs("file:///tmp/repo", &["--upload-pack=evil"]).unwrap_err();
         assert!(format!("{err}").contains("option-like"), "{err}");
 
         let err = default_branch(evil).unwrap_err();

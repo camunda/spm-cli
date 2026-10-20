@@ -36,7 +36,7 @@ impl ScopeArg {
 }
 
 /// The `--json` switch shared by the read-only reporting commands (`list`,
-/// `status`, `scan`).
+/// `status`, `outdated`, `scan`).
 #[derive(Args)]
 pub(crate) struct JsonArg {
     /// Print one machine-readable JSON document on stdout instead of human
@@ -69,8 +69,8 @@ pub(crate) fn print_json<T: Serialize>(body: &T) -> Result<()> {
 
 /// The opt-in protocol controls shared by every command that can contact a git
 /// remote: those that run a `sync` (`add`, `install`, `update`, `remove`,
-/// `target add`). Flattened into each of those and no others; they never change
-/// what is recorded in `ai.json` / `ai.lock`.
+/// `target add`) plus the read-only `outdated`. Flattened into each of those and
+/// no others; they never change what is recorded in `ai.json` / `ai.lock`.
 #[derive(Args)]
 pub(crate) struct TransportArgs {
     /// Contact remotes over this protocol, rewriting the URL you gave (GitHub-style

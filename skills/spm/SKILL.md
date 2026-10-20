@@ -25,7 +25,7 @@ gitignored and never committed. Run `spm --help` or
   then run `spm install`.
 - Do not commit materialized skills. spm adds them to `.gitignore` for you.
 - By default commands work on the project in the current directory. `init`,
-  `add`, `remove`, `update`, `install`, `list`, `status` and `clean` accept `-g`
+  `add`, `remove`, `update`, `install`, `list`, `status`, `outdated` and `clean` accept `-g`
   or `--global` to switch to the user-global scope (see
   [Global scope](#global-scope)). `target add` is always project-only, `scan`
   works on the path it is given, and `prune` always empties the global cache;
@@ -40,6 +40,7 @@ gitignored and never committed. Run `spm --help` or
 | Add a skill the user named | `spm add <git-url> --tag <t> --path <dir>` |
 | Fresh clone, new git worktree, or skills missing | `spm install` |
 | CI, or check `ai.lock` matches `ai.json` without changing it | `spm install --locked` |
+| See which pins have newer upstream versions, without changing anything | `spm outdated --json` |
 | Skill declared with a branch or tag should move to the latest commit | `spm update [name]` |
 | Also pull in skills a dependency itself declares | set `"resolveTransitive": true` in `ai.json`, then `spm install` |
 | Changed a version selector by editing `ai.json` | `spm install` |
@@ -122,7 +123,7 @@ The URL can be any form `git` understands: `https://...`, `git@host:org/repo.git
   shorthand, otherwise exactly what you supplied.
   Silent switching can mask a real credential problem, so reach for these only
   when a URL fails for protocol or auth reasons. The same two flags are accepted
-  by `install`, `update`, `remove` and `target add`.
+  by `install`, `update`, `remove`, `target add` and `outdated`.
 
 ```bash
 spm add github.com/org/skills --path skills/pdf --name pdf-tools
@@ -244,6 +245,29 @@ flatten into a single `<name>` directory. Treat it as a prompt to check, not a
 guarantee — do not rename a valid Claude-only (or different-target) install on
 the strength of this warning alone.
 
+### `spm outdated`
+
+```bash
+spm outdated [name] [--exit-code] [--json] [--protocol ssh|https] [--protocol-fallback] [-g]
+```
+
+Read-only: reports which `ai.lock` pins have newer upstream versions using only
+`git ls-remote`. It never writes `ai.json`/`ai.lock`, fetches into the store or
+touches materialized skills, so it is safe to run any time and in CI. Per entry
+the status is `behind` (branch tip moved), `newer tag` (a newer semver tag
+exists; non-semver and floating tags such as `v1` are ignored), `tag moved`
+(the pinned tag now points at a different commit — also printed as a warning;
+treat it as suspicious and tell the user before updating), `pinned` (a commit;
+never queried), `up to date`, or `error` (remote unreachable or ref gone; the
+other rows are still checked). Plugins are included; transitive skills are
+marked `transitive; via <requester>`, and the fix belongs in that requester's
+own `ai.json`, not this one. With a name, only that entry is checked.
+
+It exits 0 even when things are outdated; `--exit-code` makes it exit non-zero
+when anything is outdated. Any `error` row always makes it exit non-zero.
+`--protocol`/`--protocol-fallback` behave as under [`spm add`](#spm-add). To
+apply what it reports, run `spm update [name]`.
+
 ### `spm clean`
 
 ```bash
@@ -275,11 +299,13 @@ critical severity. See [Content scan](#content-scan).
 
 ### Machine-readable output (`--json`)
 
-Prefer `--json` on `list`, `status` and `scan` when you need to read their
+Prefer `--json` on `list`, `status`, `outdated` and `scan` when you need to read their
 results; do not parse the human text, whose layout can change. With `--json`,
 stdout is exactly one JSON document with `"schemaVersion": 1`, and errors stay
 on stderr. Exit codes do not change: `status --json` still fails when
-something is missing (check `"complete"` and each target's `missing`), and
+something is missing (check `"complete"` and each target's `missing`),
+`outdated --json` fails when a remote errored (check each row's `status` and
+`error`; `outdated` is true for `behind`, `newer-tag` and `tag-moved`), and
 `scan --json` still fails on a blocking finding (check `summary.blocking`). The
 document is printed before the failure, so read stdout even on a non-zero exit.
 Commits are full SHAs. `list` marks transitive skills with `"transitive": true`

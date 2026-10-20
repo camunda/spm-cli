@@ -1,0 +1,420 @@
+use super::common::print_json;
+use crate::git;
+use crate::lockfile::{LockedSkill, Lockfile};
+use crate::manifest::{Manifest, Version};
+use crate::scope::Scope;
+use anyhow::{bail, Result};
+use serde::Serialize;
+use std::collections::BTreeMap;
+
+/// How a locked dependency compares to its remote.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum Status {
+    UpToDate,
+    /// The branch tip moved past the locked commit.
+    Behind,
+    /// A newer semver tag than the pinned one exists on the remote.
+    NewerTag,
+    /// The pinned tag itself now resolves to a different commit.
+    TagMoved,
+    /// A commit selector: immutable, never queried.
+    Pinned,
+    /// The remote could not be checked; see `error`.
+    Error,
+}
+
+impl Status {
+    fn is_outdated(self) -> bool {
+        matches!(self, Status::Behind | Status::NewerTag | Status::TagMoved)
+    }
+
+    fn text(self) -> &'static str {
+        match self {
+            Status::UpToDate => "up to date",
+            Status::Behind => "behind",
+            Status::NewerTag => "newer tag",
+            Status::TagMoved => "tag moved",
+            Status::Pinned => "pinned",
+            Status::Error => "error",
+        }
+    }
+}
+
+/// Everything `spm outdated` reports, collected once and rendered either as
+/// human text or as the `--json` document. Both renderings share [`outcome`]
+/// so the exit status never depends on the output format.
+///
+/// [`outcome`]: OutdatedReport::outcome
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OutdatedReport<'a> {
+    scope: &'static str,
+    /// Locked skills, direct and transitive.
+    skills: Vec<Row<'a>>,
+    plugins: Vec<Row<'a>>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Row<'a> {
+    /// Plugins are reported in their own array, so this only drives the text.
+    #[serde(skip)]
+    plugin: bool,
+    name: &'a str,
+    git: &'a str,
+    path: Option<&'a str>,
+    /// The locked selector; `null` if `ai.lock` holds an unrecognized reference.
+    selector: Option<Version>,
+    /// Full locked commit SHA.
+    locked: &'a str,
+    /// Full SHA the selector resolves to on the remote now (branch tip, or the
+    /// pinned tag's current commit); `null` for commits and errors.
+    remote_commit: Option<String>,
+    /// Newest semver tag on the remote, only when newer than the pinned tag.
+    latest_tag: Option<String>,
+    /// Full SHA `latestTag` points at.
+    latest_tag_commit: Option<String>,
+    status: Status,
+    outdated: bool,
+    /// Resolved through another skill's `ai.json`: update it there, not here.
+    transitive: bool,
+    requested_by: &'a [String],
+    error: Option<String>,
+}
+
+impl OutdatedReport<'_> {
+    fn rows(&self) -> impl Iterator<Item = &Row<'_>> {
+        self.skills.iter().chain(&self.plugins)
+    }
+
+    /// The command's exit status, shared by the text and JSON renderings: a
+    /// remote that could not be checked always fails; being outdated fails only
+    /// with `--exit-code`.
+    fn outcome(&self, exit_code: bool) -> Result<()> {
+        let errors = self.rows().filter(|r| r.status == Status::Error).count();
+        if errors > 0 {
+            bail!("could not check {errors} {}", noun(errors));
+        }
+        let outdated = self.rows().filter(|r| r.outdated).count();
+        if exit_code && outdated > 0 {
+            bail!("{outdated} {} outdated", noun(outdated));
+        }
+        Ok(())
+    }
+}
+
+fn noun(n: usize) -> &'static str {
+    if n == 1 {
+        "dependency"
+    } else {
+        "dependencies"
+    }
+}
+
+/// Report which locked dependencies have newer upstream versions. Strictly
+/// read-only: it only runs `git ls-remote` (once per repository) and never
+/// writes `ai.json`/`ai.lock`, fetches into the store or touches vendor dirs.
+pub(super) fn outdated(
+    scope: &Scope,
+    name: Option<&str>,
+    json: bool,
+    exit_code: bool,
+) -> Result<()> {
+    let dir = scope.manifest_dir()?;
+    let manifest = Manifest::load(&dir, scope)?;
+    let lock = Lockfile::load_or_default(&dir)?;
+    if let Some(name) = name {
+        if !lock.skills.contains_key(name) && !lock.plugins.contains_key(name) {
+            bail!("`{name}` is not in ai.lock — run `spm install` first, or check the name");
+        }
+    }
+    let wanted = |n: &str| name.is_none_or(|want| want == n);
+    let mut remotes = Remotes::default();
+    let report = OutdatedReport {
+        scope: scope.label(),
+        skills: lock
+            .skills
+            .iter()
+            .filter(|(n, _)| wanted(n))
+            .map(|(n, l)| {
+                let transitive = !l.requested_by.is_empty() && !manifest.skills.contains_key(n);
+                check(n, l, false, transitive, &mut remotes)
+            })
+            .collect(),
+        plugins: lock
+            .plugins
+            .iter()
+            .filter(|(n, _)| wanted(n))
+            .map(|(n, l)| check(n, l, true, false, &mut remotes))
+            .collect(),
+    };
+    if json {
+        print_json(&report)?;
+    } else {
+        render_text(&report, manifest.skills.len() + manifest.plugins.len());
+    }
+    report.outcome(exit_code)
+}
+
+/// Remote refs (`refs/heads/*` + `refs/tags/*`), fetched once per repository
+/// URL so a monorepo of skills costs a single `ls-remote`. Failures are cached
+/// too, so an unreachable remote is reported on each of its rows without being
+/// retried.
+#[derive(Default)]
+struct Remotes(BTreeMap<String, Result<BTreeMap<String, String>, String>>);
+
+impl Remotes {
+    fn get(&mut self, url: &str) -> Result<&BTreeMap<String, String>, String> {
+        self.0
+            .entry(url.to_string())
+            .or_insert_with(|| {
+                git::remote_refs(url, &["refs/heads/*", "refs/tags/*"])
+                    .map_err(|e| format!("{e:#}"))
+            })
+            .as_ref()
+            .map_err(Clone::clone)
+    }
+}
+
+fn check<'a>(
+    name: &'a str,
+    l: &'a LockedSkill,
+    plugin: bool,
+    transitive: bool,
+    remotes: &mut Remotes,
+) -> Row<'a> {
+    let selector = Version::from_label(&l.reference);
+    let mut row = Row {
+        plugin,
+        name,
+        git: &l.git,
+        path: l.path.as_deref(),
+        selector: None,
+        locked: &l.commit,
+        remote_commit: None,
+        latest_tag: None,
+        latest_tag_commit: None,
+        status: Status::Error,
+        outdated: false,
+        transitive,
+        requested_by: &l.requested_by,
+        error: None,
+    };
+    if let Err(e) = compare(&mut row, selector.as_ref(), &l.reference, remotes) {
+        row.status = Status::Error;
+        row.error = Some(e);
+    }
+    row.outdated = row.status.is_outdated();
+    row.selector = selector;
+    row
+}
+
+fn compare(
+    row: &mut Row,
+    selector: Option<&Version>,
+    reference: &str,
+    remotes: &mut Remotes,
+) -> Result<(), String> {
+    let locked = row.locked;
+    match selector {
+        None => Err(format!("unrecognized reference `{reference}` in ai.lock")),
+        Some(Version::Commit(_)) => {
+            row.status = Status::Pinned;
+            Ok(())
+        }
+        Some(Version::Branch(b)) => {
+            let refs = remotes.get(row.git)?;
+            let tip = refs
+                .get(&format!("refs/heads/{b}"))
+                .ok_or_else(|| format!("branch `{b}` not found on the remote"))?;
+            row.status = if tip.eq_ignore_ascii_case(locked) {
+                Status::UpToDate
+            } else {
+                Status::Behind
+            };
+            row.remote_commit = Some(tip.clone());
+            Ok(())
+        }
+        Some(Version::Tag(t)) => {
+            let refs = remotes.get(row.git)?;
+            let now = refs
+                .get(&format!("refs/tags/{t}"))
+                .ok_or_else(|| format!("tag `{t}` no longer exists on the remote"))?;
+            if let Some((tag, sha)) = newest_tag(refs, t) {
+                row.latest_tag = Some(tag.to_string());
+                row.latest_tag_commit = Some(sha.to_string());
+            }
+            row.status = if !now.eq_ignore_ascii_case(locked) {
+                Status::TagMoved
+            } else if row.latest_tag.is_some() {
+                Status::NewerTag
+            } else {
+                Status::UpToDate
+            };
+            row.remote_commit = Some(now.clone());
+            Ok(())
+        }
+    }
+}
+
+/// Parse a tag as strict semver, allowing a leading `v` (`v1.2.0`). Floating
+/// or non-semver tags (`v1`, `latest`, `stable`) yield `None`.
+fn semver_of(tag: &str) -> Option<semver::Version> {
+    semver::Version::parse(tag.strip_prefix('v').unwrap_or(tag)).ok()
+}
+
+/// The newest semver tag in `refs` (name and commit) that is strictly newer
+/// than `pinned`, or `None` when `pinned` is already newest or is not semver.
+/// Pre-releases are only considered when the pinned tag is itself one, so a
+/// stable pin is never nudged towards an `-rc`.
+fn newest_tag<'r>(refs: &'r BTreeMap<String, String>, pinned: &str) -> Option<(&'r str, &'r str)> {
+    let current = semver_of(pinned)?;
+    let allow_pre = !current.pre.is_empty();
+    refs.iter()
+        .filter_map(|(r, sha)| {
+            let tag = r.strip_prefix("refs/tags/")?;
+            let v = semver_of(tag)?;
+            (allow_pre || v.pre.is_empty()).then_some((v, tag, sha.as_str()))
+        })
+        .max_by(|a, b| a.0.cmp(&b.0))
+        .filter(|(v, _, _)| *v > current)
+        .map(|(_, tag, sha)| (tag, sha))
+}
+
+fn short(sha: &str) -> &str {
+    &sha[..sha.len().min(8)]
+}
+
+fn render_text(report: &OutdatedReport, declared: usize) {
+    if report.skills.is_empty() && report.plugins.is_empty() {
+        if declared == 0 {
+            println!("no skills or plugins declared");
+        } else {
+            println!("nothing locked yet — run `spm install`");
+        }
+        return;
+    }
+    let rows: Vec<[String; 6]> = report
+        .rows()
+        .map(|r| {
+            let selector = match &r.selector {
+                Some(Version::Commit(c)) => format!("commit:{}", short(c)),
+                Some(v) => v.label(),
+                None => "?".into(),
+            };
+            let latest = match (r.status, &r.latest_tag, &r.remote_commit) {
+                (Status::NewerTag, Some(tag), _) => format!("tag:{tag}"),
+                (Status::UpToDate, _, _) if matches!(r.selector, Some(Version::Tag(_))) => {
+                    selector.clone()
+                }
+                (_, _, Some(sha)) => short(sha).to_string(),
+                _ => "-".into(),
+            };
+            let mut notes = Vec::new();
+            if r.plugin {
+                notes.push("plugin".to_string());
+            }
+            if r.transitive {
+                notes.push(format!("transitive; via {}", r.requested_by.join(", ")));
+            }
+            if let (Status::TagMoved, Some(tag)) = (r.status, &r.latest_tag) {
+                notes.push(format!("newer tag: {tag}"));
+            }
+            let notes = if notes.is_empty() {
+                String::new()
+            } else {
+                format!("({})", notes.join("; "))
+            };
+            [
+                r.name.to_string(),
+                selector,
+                short(r.locked).to_string(),
+                latest,
+                r.status.text().to_string(),
+                notes,
+            ]
+        })
+        .collect();
+    let header = ["name", "selector", "locked", "latest", "status", ""].map(String::from);
+    let mut widths = [0usize; 6];
+    for line in std::iter::once(&header).chain(&rows) {
+        for (w, cell) in widths.iter_mut().zip(line) {
+            *w = (*w).max(cell.chars().count());
+        }
+    }
+    for line in std::iter::once(&header).chain(&rows) {
+        let cells: Vec<String> = line
+            .iter()
+            .zip(widths)
+            .map(|(cell, w)| format!("{cell:<w$}"))
+            .collect();
+        println!("{}", cells.join("  ").trim_end());
+    }
+
+    for r in report.rows() {
+        if r.status == Status::TagMoved {
+            if let (Some(Version::Tag(t)), Some(now)) = (&r.selector, &r.remote_commit) {
+                eprintln!(
+                    "warning: tag `{t}` of `{}` now points at {} but ai.lock pins {} — \
+                     someone re-pointed the tag; review it before `spm update`",
+                    r.name,
+                    short(now),
+                    short(r.locked)
+                );
+            }
+        }
+        if let Some(e) = &r.error {
+            eprintln!("error: `{}`: {e}", r.name);
+        }
+    }
+    let outdated = report.rows().filter(|r| r.outdated).count();
+    if outdated == 0 {
+        println!("\neverything is up to date");
+    } else {
+        let transitive = report.rows().filter(|r| r.outdated && r.transitive).count();
+        print!(
+            "\n{outdated} {} outdated — run `spm update`",
+            noun(outdated)
+        );
+        if transitive > 0 {
+            print!(" (transitive skills update through the skill that requests them)");
+        }
+        println!();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::newest_tag;
+    use std::collections::BTreeMap;
+
+    fn refs(tags: &[&str]) -> BTreeMap<String, String> {
+        tags.iter()
+            .map(|t| (format!("refs/tags/{t}"), format!("sha-{t}")))
+            .collect()
+    }
+
+    #[test]
+    fn newest_tag_uses_semver_order_and_ignores_non_semver() {
+        let r = refs(&["v1.2.0", "v1.10.0", "v1.9.0", "v1", "latest", "v2.0.0-rc.1"]);
+        assert_eq!(newest_tag(&r, "v1.2.0"), Some(("v1.10.0", "sha-v1.10.0")));
+        assert_eq!(newest_tag(&r, "v1.10.0"), None, "already newest");
+        assert_eq!(newest_tag(&r, "v1"), None, "non-semver pin is not compared");
+    }
+
+    #[test]
+    fn newest_tag_considers_prereleases_only_for_prerelease_pins() {
+        let r = refs(&["v2.0.0-rc.1", "v2.0.0-rc.2", "v1.0.0"]);
+        assert_eq!(newest_tag(&r, "v1.0.0"), None);
+        assert_eq!(
+            newest_tag(&r, "v2.0.0-rc.1"),
+            Some(("v2.0.0-rc.2", "sha-v2.0.0-rc.2"))
+        );
+        // Unprefixed tags are semver too.
+        assert_eq!(
+            newest_tag(&refs(&["1.0.0", "1.1.0"]), "1.0.0"),
+            Some(("1.1.0", "sha-1.1.0"))
+        );
+    }
+}

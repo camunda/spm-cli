@@ -212,7 +212,7 @@ instead of hanging on a prompt (helpers and ssh-agent still work).
 By default spm uses the URL exactly as you gave it: an SSH URL is contacted over
 SSH and an HTTPS URL over HTTPS, and a failure is reported as-is. Two opt-in
 flags (accepted by the commands that can contact a remote: `add`, `install`,
-`update`, `remove` and `target add`) help when your preferred
+`update`, `remove`, `target add` and `outdated`) help when your preferred
 protocol isn't set up on the current machine, e.g. no SSH key in CI, or HTTPS
 blocked but SSH allowed:
 
@@ -314,12 +314,13 @@ spm update [name] [-g]                              # re-resolve branches/tags t
 spm install [-g] [--locked]                        # rebuild from ai.lock (after clone); alias: i; --locked fails if ai.lock is out of sync (CI)
 spm list [-g] [--json]                             # show skills + pinned commits; alias: ls
 spm status [-g] [--json]                           # check skills are materialized in this checkout
+spm outdated [name] [-g] [--json] [--exit-code]       # report newer upstream versions (read-only)
 spm clean [-g]                                     # remove generated vendor config
 spm prune [--yes]                                  # wipe the global fetch cache ($SPM_HOME/store, default ~/.spm/store)
 spm scan [path] [--json]                           # scan skill content for suspicious patterns (default: .)
 ```
 
-`list`, `status` and `scan` accept `--json` for scripts, CI and agents: stdout
+`list`, `status`, `outdated` and `scan` accept `--json` for scripts, CI and agents: stdout
 then holds exactly one JSON document with a top-level `"schemaVersion": 1` and
 full commit SHAs, and exit codes are unchanged (the document is printed before a
 non-zero exit). See [Machine-readable output](docs/reference/cli-commands.md#machine-readable-output---json)
@@ -375,7 +376,7 @@ To override the gate for content you trust (or a false positive), set
 
 By default every command operates on the **project** in the current directory.
 Scope-aware commands (`init`, `add`, `remove`, `update`, `install`, `list`,
-`status`, `clean`) accept `-g` (`--global`) to instead manage a **user-global**
+`status`, `outdated`, `clean`) accept `-g` (`--global`) to instead manage a **user-global**
 set of skills that is available to your AI tools in *every* project. `spm target
 add`, `spm prune`, and `spm scan` aren't scope-aware: `prune` always wipes the
 shared global fetch cache and `scan` always operates on a path.

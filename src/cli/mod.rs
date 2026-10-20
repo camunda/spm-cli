@@ -3,6 +3,7 @@ mod clean;
 mod common;
 mod init;
 mod list;
+mod outdated;
 mod remove;
 mod scan;
 mod shorthand;
@@ -125,6 +126,23 @@ enum Command {
         #[command(flatten)]
         output: JsonArg,
     },
+    /// Report locked skills and plugins with newer upstream versions (moved
+    /// branches, newer semver tags, re-pointed tags). Read-only: never writes
+    /// ai.json/ai.lock, fetches into the store or touches vendor dirs. Exits
+    /// non-zero if a remote could not be checked.
+    Outdated {
+        /// Skill or plugin to check; omit to check all.
+        name: Option<String>,
+        /// Exit non-zero when anything is outdated (to gate a pipeline).
+        #[arg(long)]
+        exit_code: bool,
+        #[command(flatten)]
+        scope: ScopeArg,
+        #[command(flatten)]
+        output: JsonArg,
+        #[command(flatten)]
+        transport: TransportArgs,
+    },
     /// Remove all generated vendor config for this project.
     Clean {
         #[command(flatten)]
@@ -233,6 +251,21 @@ pub fn run() -> Result<()> {
         }
         Command::List { scope, output } => list::list(&scope.resolve(&cwd), output.json),
         Command::Status { scope, output } => status::status(&scope.resolve(&cwd), output.json),
+        Command::Outdated {
+            name,
+            exit_code,
+            scope,
+            output,
+            transport,
+        } => {
+            transport.apply();
+            outdated::outdated(
+                &scope.resolve(&cwd),
+                name.as_deref(),
+                output.json,
+                exit_code,
+            )
+        }
         Command::Clean { scope } => clean::clean(&scope.resolve(&cwd)),
         Command::Prune { yes } => clean::prune(yes),
         Command::Scan { path, output } => scan::scan_cmd(Path::new(&path), output.json),

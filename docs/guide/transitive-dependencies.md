@@ -132,6 +132,10 @@ subtree could silently move an *unrelated* root's dependency. If you want a
 root's moving-ref children chased to their latest commits, run a bare
 `spm update`.
 
+`spm outdated` lists transitive skills too, marked `(transitive; via <requester>)`,
+so you can see when a child's moving ref has advanced; `spm update` (no name)
+is what chases it.
+
 ## Version conflicts
 
 If two skills — directly or transitively — require the **same repo** at two
