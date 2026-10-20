@@ -266,7 +266,11 @@ own `ai.json`, not this one. With a name, only that entry is checked.
 It exits 0 even when things are outdated; `--exit-code` makes it exit non-zero
 when anything is outdated. Any `error` row always makes it exit non-zero.
 `--protocol`/`--protocol-fallback` behave as under [`spm add`](#spm-add). To
-apply what it reports, run `spm update [name]`.
+apply what it reports: `behind`/`tag moved` are refreshed by `spm update [name]`
+(it re-resolves the same selector). `newer tag` is **not** applied by
+`spm update` — change the tag in the declaring `ai.json` (for a transitive
+skill, in the requester's upstream `ai.json`), then run `spm install`. Keep
+`-g` on these commands in global scope.
 
 ### `spm clean`
 

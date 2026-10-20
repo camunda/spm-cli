@@ -203,7 +203,7 @@ still exiting non-zero when something is missing.
 Reports which locked skills and plugins have newer upstream versions than
 `ai.lock` pins, **without changing anything**: it only runs `git ls-remote`
 (once per repository, no clone) and never writes `ai.json`/`ai.lock`, fetches
-into the store or touches vendor dirs. Use it to decide what to `spm update`, or
+into the store or touches vendor dirs. Use it to decide what to update, or
 in a scheduled CI job or bot that reports drift.
 
 | selector | check | status |
@@ -219,8 +219,18 @@ pdf-tools  tag:v1.2.0       11223344  tag:v1.3.0  newer tag
 pinned     commit:a1b2c3d4  a1b2c3d4  -           pinned
 reviewer   branch:main      a1b2c3d4  9f8e7d6c    behind
 
-2 dependencies outdated — run `spm update`
+2 dependencies outdated:
+  reviewer: run `spm update` to re-pin to the moved branch/tag
+  pdf-tools: newer tag — change the tag in ai.json, then run `spm install`
 ```
+
+The summary says how to apply each change. A moved branch (or re-pointed tag)
+is refreshed by `spm update`, which re-resolves the **same** selector. A newer
+tag is a **different** selector, so `spm update` will not adopt it: change the
+tag in `ai.json` (for a transitive skill, in the requesting skill's upstream
+`ai.json`) and then run `spm install`. In global scope the suggested commands
+carry `-g`. If any row errored, the summary says the check is incomplete
+instead of claiming everything is up to date.
 
 Plugins are included (marked `(plugin)`), and transitive skills are listed but
 marked `(transitive; via <requester>)`, because their pin is set by the

@@ -277,8 +277,9 @@ fn newest_tag<'r>(refs: &'r BTreeMap<String, String>, pinned: &str) -> Option<(&
             let v = semver_of(tag)?;
             (allow_pre || v.pre.is_empty()).then_some((v, tag, sha.as_str()))
         })
-        .max_by(|a, b| a.0.cmp(&b.0))
-        .filter(|(v, _, _)| *v > current)
+        // SemVer precedence ignores build metadata (`1.2.3+b2` == `1.2.3`).
+        .max_by(|a, b| a.0.cmp_precedence(&b.0))
+        .filter(|(v, _, _)| v.cmp_precedence(&current).is_gt())
         .map(|(_, tag, sha)| (tag, sha))
 }
 
@@ -368,25 +369,80 @@ fn render_text(report: &OutdatedReport, declared: usize) {
             eprintln!("error: `{}`: {e}", r.name);
         }
     }
-    let outdated = report.rows().filter(|r| r.outdated).count();
-    if outdated == 0 {
-        println!("\neverything is up to date");
-    } else {
-        let transitive = report.rows().filter(|r| r.outdated && r.transitive).count();
-        print!(
-            "\n{outdated} {} outdated — run `spm update`",
-            noun(outdated)
-        );
-        if transitive > 0 {
-            print!(" (transitive skills update through the skill that requests them)");
-        }
-        println!();
+    println!();
+    for line in summary(report) {
+        println!("{line}");
     }
+}
+
+/// The closing summary: what is outdated and how to apply each kind of
+/// change. Moved refs are refreshed by `spm update`, but a newer tag is a
+/// different selector, which only an edit to the declaring `ai.json` adopts.
+fn summary(report: &OutdatedReport) -> Vec<String> {
+    let g = if report.scope == Scope::Global.label() {
+        " -g"
+    } else {
+        ""
+    };
+    let errors = report.rows().filter(|r| r.error.is_some()).count();
+    let outdated: Vec<&Row> = report.rows().filter(|r| r.outdated).collect();
+    let mut lines = Vec::new();
+    if outdated.is_empty() {
+        lines.push(if errors == 0 {
+            "everything is up to date".to_string()
+        } else {
+            "everything that could be checked is up to date".to_string()
+        });
+    } else {
+        lines.push(format!(
+            "{} {} outdated:",
+            outdated.len(),
+            noun(outdated.len())
+        ));
+        let names = |pick: &dyn Fn(&Row) -> bool| -> Vec<&str> {
+            outdated
+                .iter()
+                .filter(|r| pick(r))
+                .map(|r| r.name)
+                .collect()
+        };
+        let moved = names(&|r| r.status != Status::NewerTag);
+        if !moved.is_empty() {
+            lines.push(format!(
+                "  {}: run `spm update{g}` to re-pin to the moved branch/tag",
+                moved.join(", ")
+            ));
+        }
+        let tagged = names(&|r| r.status == Status::NewerTag && !r.transitive);
+        if !tagged.is_empty() {
+            lines.push(format!(
+                "  {}: newer tag — change the tag in ai.json, then run `spm install{g}`",
+                tagged.join(", ")
+            ));
+        }
+        for r in outdated
+            .iter()
+            .filter(|r| r.status == Status::NewerTag && r.transitive)
+        {
+            lines.push(format!(
+                "  {}: newer tag — bump it in the upstream ai.json of {}, then run `spm update{g}`",
+                r.name,
+                r.requested_by.join(", ")
+            ));
+        }
+    }
+    if errors > 0 {
+        lines.push(format!(
+            "incomplete: {errors} {} could not be checked (see the errors above)",
+            noun(errors)
+        ));
+    }
+    lines
 }
 
 #[cfg(test)]
 mod tests {
-    use super::newest_tag;
+    use super::{newest_tag, summary, OutdatedReport, Row, Status};
     use std::collections::BTreeMap;
 
     fn refs(tags: &[&str]) -> BTreeMap<String, String> {
@@ -415,6 +471,79 @@ mod tests {
         assert_eq!(
             newest_tag(&refs(&["1.0.0", "1.1.0"]), "1.0.0"),
             Some(("1.1.0", "sha-1.1.0"))
+        );
+    }
+
+    #[test]
+    fn newest_tag_ignores_build_metadata_only_differences() {
+        let r = refs(&["v1.2.3", "v1.2.3+build.2"]);
+        assert_eq!(newest_tag(&r, "v1.2.3"), None);
+        assert_eq!(newest_tag(&r, "v1.2.3+build.1"), None);
+    }
+
+    fn row<'a>(name: &'a str, status: Status, requested_by: &'a [String]) -> Row<'a> {
+        Row {
+            plugin: false,
+            name,
+            git: "g",
+            path: None,
+            selector: None,
+            locked: "0",
+            remote_commit: None,
+            latest_tag: None,
+            latest_tag_commit: None,
+            status,
+            outdated: matches!(status, Status::Behind | Status::NewerTag | Status::TagMoved),
+            transitive: !requested_by.is_empty(),
+            requested_by,
+            error: (status == Status::Error).then(|| "unreachable".to_string()),
+        }
+    }
+
+    #[test]
+    fn summary_routes_each_kind_of_change_to_the_command_that_applies_it() {
+        let via = ["top".to_string()];
+        let report = OutdatedReport {
+            scope: "global",
+            skills: vec![
+                row("br", Status::Behind, &[]),
+                row("moved", Status::TagMoved, &[]),
+                row("tg", Status::NewerTag, &[]),
+                row("leaf", Status::NewerTag, &via),
+                row("gone", Status::Error, &[]),
+            ],
+            plugins: vec![],
+        };
+        assert_eq!(
+            summary(&report),
+            [
+                "4 dependencies outdated:",
+                "  br, moved: run `spm update -g` to re-pin to the moved branch/tag",
+                "  tg: newer tag — change the tag in ai.json, then run `spm install -g`",
+                "  leaf: newer tag — bump it in the upstream ai.json of top, then run `spm update -g`",
+                "incomplete: 1 dependency could not be checked (see the errors above)",
+            ]
+        );
+    }
+
+    #[test]
+    fn summary_never_claims_success_when_a_row_errored() {
+        let report = OutdatedReport {
+            scope: "project",
+            skills: vec![
+                row("ok", Status::UpToDate, &[]),
+                row("gone", Status::Error, &[]),
+            ],
+            plugins: vec![],
+        };
+        let lines = summary(&report);
+        assert!(
+            !lines.contains(&"everything is up to date".to_string()),
+            "{lines:?}"
+        );
+        assert_eq!(
+            lines.last().unwrap(),
+            "incomplete: 1 dependency could not be checked (see the errors above)"
         );
     }
 }

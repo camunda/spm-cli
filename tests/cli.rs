@@ -6115,6 +6115,15 @@ fn outdated_reports_behind_newer_tag_and_pinned_without_writing_anything() {
     let ds = line("ds");
     assert!(ds.contains("behind") && ds.contains("(plugin)"), "{ds}");
     assert!(text.contains("3 dependencies outdated"), "{text}");
+    // Moved refs are refreshed by `update`; a newer tag needs an ai.json edit.
+    assert!(
+        text.contains("br, ds: run `spm update` to re-pin"),
+        "{text}"
+    );
+    assert!(
+        text.contains("tg: newer tag — change the tag in ai.json, then run `spm install`"),
+        "{text}"
+    );
 
     // --exit-code turns "outdated" into a failure.
     let out = sb.spm(&["outdated", "--exit-code"]);
@@ -6253,6 +6262,11 @@ fn outdated_reports_an_unreachable_remote_per_row_and_fails() {
             .any(|l| l.starts_with("gone ") && l.contains("error")),
         "{text}"
     );
+    assert!(!text.contains("everything is up to date"), "{text}");
+    assert!(
+        text.contains("incomplete: 1 dependency could not be checked"),
+        "{text}"
+    );
     let err = stderr_of(&out);
     assert!(err.contains("error: `gone`:"), "{err}");
     assert!(err.contains("could not check 1 dependency"), "{err}");
@@ -6308,10 +6322,7 @@ fn outdated_marks_transitive_skills() {
 
     let text = sb.ok(&["outdated"]);
     assert!(text.contains("(transitive; via top)"), "{text}");
-    assert!(
-        text.contains("through the skill that requests them"),
-        "{text}"
-    );
+    assert!(text.contains(": run `spm update` to re-pin"), "{text}");
 }
 
 #[cfg(unix)]
@@ -6334,6 +6345,8 @@ fn outdated_works_in_global_scope() {
     let greet = outdated_row(&doc, "greet");
     assert_eq!(greet["status"], "behind", "{doc}");
     assert_eq!(greet["remoteCommit"], tip.as_str(), "{doc}");
+    let text = sb.ok(&["outdated", "-g"]);
+    assert!(text.contains("run `spm update -g`"), "{text}");
     // The project scope has no ai.json, so it is unaffected.
     assert!(!sb.spm(&["outdated"]).status.success());
 }
