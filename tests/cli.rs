@@ -6492,6 +6492,26 @@ fn outdated_checks_secondary_selectors_of_deduplicated_dependencies() {
     );
     sb.ok(&["outdated", "--exit-code"]);
 
+    // A newer semver tag at the same commit leaves both selectors' refs
+    // unchanged, but the secondary tag selector is still outdated.
+    git_in(&leaf_dir, &["tag", "v1.1.0"]);
+    let out = sb.spm(&["outdated", "--json"]);
+    let doc = json_doc(&out);
+    let row = leaf_row(&doc);
+    assert_eq!(row["status"], "up-to-date", "{doc}");
+    assert_eq!(row["outdated"], true, "{doc}");
+    let sec = &row["alsoSatisfies"][0];
+    assert_eq!(sec["status"], "newer-tag", "{doc}");
+    assert_eq!(sec["latestTag"], "v1.1.0", "{doc}");
+    let out = sb.spm(&["outdated", "--exit-code"]);
+    assert!(!out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("also tag:v1.0.0: newer tag v1.1.0"), "{text}");
+    assert!(
+        text.contains("newer tag v1.1.0 for tag:v1.0.0 — bump it in the upstream ai.json"),
+        "{text}"
+    );
+
     // Re-point the tag at a commit off `main`, leaving the branch untouched.
     git_in(&leaf_dir, &["checkout", "-q", "-b", "side"]);
     std::fs::write(leaf_dir.join("NOTES.md"), "x\n").unwrap();

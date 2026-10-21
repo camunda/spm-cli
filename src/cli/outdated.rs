@@ -86,7 +86,7 @@ struct Row<'a> {
     #[serde(skip)]
     requesters_track_branch: bool,
     /// The other selectors this deduplicated entry satisfies, each checked.
-    also_satisfies: Vec<Secondary>,
+    also_satisfies: Vec<SelectorCheck>,
     error: Option<String>,
 }
 
@@ -96,13 +96,17 @@ struct Row<'a> {
 /// up-to-date primary selector.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Secondary {
+struct SelectorCheck {
     /// `null` if `ai.lock` holds an unrecognized reference.
     selector: Option<Version>,
     /// Full SHA the selector resolves to on the remote now; `null` for
     /// commits and errors.
     remote_commit: Option<String>,
-    /// `up-to-date`, `behind`, `tag-moved`, `pinned` or `error`.
+    /// Newest semver tag on the remote, only when newer than a tag selector.
+    latest_tag: Option<String>,
+    /// Full SHA `latestTag` points at.
+    latest_tag_commit: Option<String>,
+    /// Same values as a row's `status`.
     status: Status,
     error: Option<String>,
 }
@@ -226,7 +230,6 @@ fn check<'a>(
     transitive: bool,
     remotes: &mut Remotes,
 ) -> Row<'a> {
-    let selector = Version::from_label(&l.reference);
     let mut row = Row {
         plugin,
         name,
@@ -245,19 +248,42 @@ fn check<'a>(
         also_satisfies: Vec::new(),
         error: None,
     };
-    if let Err(e) = compare(&mut row, selector.as_ref(), &l.reference, remotes) {
-        row.status = Status::Error;
-        row.error = Some(e);
-    }
+    let primary = evaluate(&l.reference, &l.git, &l.commit, remotes);
+    row.remote_commit = primary.remote_commit;
+    row.latest_tag = primary.latest_tag;
+    row.latest_tag_commit = primary.latest_tag_commit;
+    row.status = primary.status;
+    row.error = primary.error;
     row.also_satisfies = l
         .also_satisfies
         .iter()
-        .map(|label| check_secondary(label, &l.git, &l.commit, remotes))
+        .map(|label| evaluate(label, &l.git, &l.commit, remotes))
         .collect();
     row.outdated =
         row.status.is_outdated() || row.also_satisfies.iter().any(|s| s.status.is_outdated());
-    row.selector = selector;
+    row.selector = primary.selector;
     row
+}
+
+/// Compare one selector (the primary `reference` or an `also_satisfies`
+/// entry) with the locked commit. Primary and secondary selectors share this
+/// so neither can miss a check the other gets.
+fn evaluate(label: &str, git: &str, locked: &str, remotes: &mut Remotes) -> SelectorCheck {
+    let selector = Version::from_label(label);
+    let mut out = SelectorCheck {
+        selector: None,
+        remote_commit: None,
+        latest_tag: None,
+        latest_tag_commit: None,
+        status: Status::Error,
+        error: None,
+    };
+    if let Err(e) = compare(&mut out, selector.as_ref(), label, git, locked, remotes) {
+        out.status = Status::Error;
+        out.error = Some(e);
+    }
+    out.selector = selector;
+    out
 }
 
 /// The commit a branch/tag selector resolves to on the remote now (`None`
@@ -286,53 +312,29 @@ fn remote_commit_of(
     }
 }
 
-fn check_secondary(label: &str, git: &str, locked: &str, remotes: &mut Remotes) -> Secondary {
-    let selector = Version::from_label(label);
-    let (status, remote_commit, error) =
-        match remote_commit_of(selector.as_ref(), label, git, remotes) {
-            Err(e) => (Status::Error, None, Some(e)),
-            Ok(None) => (Status::Pinned, None, None),
-            Ok(Some(now)) => {
-                let status = if now.eq_ignore_ascii_case(locked) {
-                    Status::UpToDate
-                } else if matches!(selector, Some(Version::Tag(_))) {
-                    Status::TagMoved
-                } else {
-                    Status::Behind
-                };
-                (status, Some(now), None)
-            }
-        };
-    Secondary {
-        selector,
-        remote_commit,
-        status,
-        error,
-    }
-}
-
 fn compare(
-    row: &mut Row,
+    out: &mut SelectorCheck,
     selector: Option<&Version>,
     reference: &str,
+    git: &str,
+    locked: &str,
     remotes: &mut Remotes,
 ) -> Result<(), String> {
-    let locked = row.locked;
-    let now = remote_commit_of(selector, reference, row.git, remotes)?;
+    let now = remote_commit_of(selector, reference, git, remotes)?;
     if let Some(Version::Tag(t)) = selector {
-        if let Some((tag, sha)) = newest_tag(remotes.get(row.git)?, t) {
-            row.latest_tag = Some(tag.to_string());
-            row.latest_tag_commit = Some(sha.to_string());
+        if let Some((tag, sha)) = newest_tag(remotes.get(git)?, t) {
+            out.latest_tag = Some(tag.to_string());
+            out.latest_tag_commit = Some(sha.to_string());
         }
     }
-    row.status = match (selector, &now) {
+    out.status = match (selector, &now) {
         (_, None) => Status::Pinned,
         (Some(Version::Tag(_)), Some(now)) if !now.eq_ignore_ascii_case(locked) => Status::TagMoved,
         (_, Some(now)) if !now.eq_ignore_ascii_case(locked) => Status::Behind,
-        _ if row.latest_tag.is_some() => Status::NewerTag,
+        _ if out.latest_tag.is_some() => Status::NewerTag,
         _ => Status::UpToDate,
     };
-    row.remote_commit = now;
+    out.remote_commit = now;
     Ok(())
 }
 
@@ -405,8 +407,12 @@ fn render_text(report: &OutdatedReport, declared: usize) {
                 notes.push(format!("newer tag: {tag}"));
             }
             for sec in r.also_satisfies.iter().filter(|s| s.status.is_outdated()) {
+                let newer = match (sec.status, &sec.latest_tag) {
+                    (Status::NewerTag, Some(t)) => format!(" {t}"),
+                    _ => String::new(),
+                };
                 notes.push(format!(
-                    "also {}: {}",
+                    "also {}: {}{newer}",
                     label_of(&sec.selector),
                     sec.status.text()
                 ));
@@ -517,8 +523,9 @@ fn summary(report: &OutdatedReport) -> Vec<String> {
                 .map(|r| r.name)
                 .collect()
         };
+        let moved_status = |s: Status| matches!(s, Status::Behind | Status::TagMoved);
         let moved = names(&|r| {
-            r.status != Status::NewerTag || r.also_satisfies.iter().any(|s| s.status.is_outdated())
+            moved_status(r.status) || r.also_satisfies.iter().any(|s| moved_status(s.status))
         });
         if !moved.is_empty() {
             lines.push(format!(
@@ -553,6 +560,24 @@ fn summary(report: &OutdatedReport) -> Vec<String> {
                 r.name,
                 r.requested_by.join(", ")
             ));
+        }
+        // A secondary selector comes from some requester's upstream ai.json
+        // edge, never from this project's own entry for the name.
+        for r in &outdated {
+            for sec in r
+                .also_satisfies
+                .iter()
+                .filter(|s| s.status == Status::NewerTag)
+            {
+                lines.push(format!(
+                    "  {}: newer tag {} for {} — bump it in the upstream ai.json that requests \
+                     it, then move that requester onto the change (`spm update{g}` if it \
+                     tracks a branch)",
+                    r.name,
+                    sec.latest_tag.as_deref().unwrap_or("?"),
+                    label_of(&sec.selector)
+                ));
+            }
         }
     }
     if errors > 0 {

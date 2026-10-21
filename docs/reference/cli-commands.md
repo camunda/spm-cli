@@ -248,8 +248,11 @@ checked.
 When several requesters share one deduplicated entry through different
 selectors (say `branch: main` and `tag: v1.0.0` at the same commit), every
 selector recorded in `ai.lock` is checked, not just the primary one. If one of
-them moved, the row is outdated and the note says which, e.g.
-`(also tag:v1.0.0: tag moved)`; a moved tag also prints a warning.
+them moved or a tag selector has a newer semver tag, the row is outdated and
+the note says which, e.g. `(also tag:v1.0.0: tag moved)` or
+`(also tag:v1.0.0: newer tag v1.1.0)`; a moved tag also prints a warning. A
+secondary tag is declared in a requester's upstream `ai.json`, so a newer one
+is adopted the same way as a transitive newer tag (see above).
 
 Exit codes: `0` by default, even when something is outdated. With
 `--exit-code`, it exits non-zero when anything is outdated (`behind`,
@@ -409,7 +412,9 @@ with `-g` for `list`, `status` and `outdated`). With it:
         {                                   // satisfies (ai.lock `also_satisfies`)
           "selector": { "branch": "main" },
           "remoteCommit": "<40-hex sha>",
-          "status": "up-to-date",           // up-to-date | behind | tag-moved | pinned | error
+          "latestTag": null,                // as above, for a tag selector
+          "latestTagCommit": null,
+          "status": "up-to-date",           // same values as the row's status
           "error": null
         }
       ],
