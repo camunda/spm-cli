@@ -226,10 +226,18 @@ reviewer   branch:main      a1b2c3d4  9f8e7d6c    behind
 
 The summary says how to apply each change. A moved branch (or re-pointed tag)
 is refreshed by `spm update`, which re-resolves the **same** selector. A newer
-tag is a **different** selector, so `spm update` will not adopt it: change the
-tag in `ai.json` (for a transitive skill, in the requesting skill's upstream
-`ai.json`) and then run `spm install`. In global scope the suggested commands
-carry `-g`. If any row errored, the summary says the check is incomplete
+tag is a **different** selector, so `spm update` will not adopt it:
+
+- **Direct dependency:** change the tag in your `ai.json`, then run
+  `spm install`.
+- **Transitive dependency:** the tag is declared in the requesting skill's
+  upstream `ai.json`. Publish the bump there, then move the requester onto that
+  change. If the requester tracks a branch, run `spm update` (`spm install`
+  would reuse the requester's locked commit and its old manifest). If the
+  requester is pinned to a tag or commit, first change its selector in your
+  `ai.json` to one that includes the bump, then run `spm install`.
+
+In global scope the suggested commands carry `-g`. If any row errored, the summary says the check is incomplete
 instead of claiming everything is up to date.
 
 Plugins are included (marked `(plugin)`), and transitive skills are listed but

@@ -424,8 +424,25 @@ fn summary(report: &OutdatedReport) -> Vec<String> {
             .iter()
             .filter(|r| r.status == Status::NewerTag && r.transitive)
         {
+            // `install` reuses a requester's locked commit (and its old
+            // manifest), so only a branch-tracking requester picks up an
+            // upstream bump via `update`; a pinned one must be re-pinned.
+            let tracks_branch = |req: &String| {
+                report
+                    .rows()
+                    .find(|q| q.name == req.as_str())
+                    .is_some_and(|q| matches!(q.selector, Some(Version::Branch(_))))
+            };
+            let apply = if r.requested_by.iter().all(tracks_branch) {
+                format!("then run `spm update{g}`")
+            } else {
+                format!(
+                    "then point {} at a version that includes it and run `spm install{g}`",
+                    r.requested_by.join(", ")
+                )
+            };
             lines.push(format!(
-                "  {}: newer tag — bump it in the upstream ai.json of {}, then run `spm update{g}`",
+                "  {}: newer tag — bump it in the upstream ai.json of {}, {apply}",
                 r.name,
                 r.requested_by.join(", ")
             ));
@@ -442,7 +459,7 @@ fn summary(report: &OutdatedReport) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{newest_tag, summary, OutdatedReport, Row, Status};
+    use super::{newest_tag, summary, OutdatedReport, Row, Status, Version};
     use std::collections::BTreeMap;
 
     fn refs(tags: &[&str]) -> BTreeMap<String, String> {
@@ -503,6 +520,7 @@ mod tests {
     #[test]
     fn summary_routes_each_kind_of_change_to_the_command_that_applies_it() {
         let via = ["top".to_string()];
+        let pinned_via = ["fixed".to_string()];
         let report = OutdatedReport {
             scope: "global",
             skills: vec![
@@ -510,17 +528,28 @@ mod tests {
                 row("moved", Status::TagMoved, &[]),
                 row("tg", Status::NewerTag, &[]),
                 row("leaf", Status::NewerTag, &via),
+                row("deep", Status::NewerTag, &pinned_via),
                 row("gone", Status::Error, &[]),
+                Row {
+                    selector: Some(Version::Branch("main".into())),
+                    ..row("top", Status::UpToDate, &[])
+                },
+                Row {
+                    selector: Some(Version::Tag("v1.0.0".into())),
+                    ..row("fixed", Status::UpToDate, &[])
+                },
             ],
             plugins: vec![],
         };
         assert_eq!(
             summary(&report),
             [
-                "4 dependencies outdated:",
+                "5 dependencies outdated:",
                 "  br, moved: run `spm update -g` to re-pin to the moved branch/tag",
                 "  tg: newer tag — change the tag in ai.json, then run `spm install -g`",
                 "  leaf: newer tag — bump it in the upstream ai.json of top, then run `spm update -g`",
+                "  deep: newer tag — bump it in the upstream ai.json of fixed, then point fixed at a \
+                 version that includes it and run `spm install -g`",
                 "incomplete: 1 dependency could not be checked (see the errors above)",
             ]
         );
