@@ -6387,3 +6387,46 @@ fn outdated_honors_protocol_override_and_fallback() {
     assert!(stderr_of(&out).contains(&format!("used https ({HTTPS_URL})")));
     assert_eq!(outdated_row(&json_doc(&out), "greet")["status"], "behind");
 }
+
+#[test]
+fn outdated_named_transitive_newer_tag_gets_the_same_guidance_as_unfiltered() {
+    let sb = Sandbox::new();
+    let leaf_dir = sb.root.join("tag-leaf");
+    let leaf = make_repo(&leaf_dir, &[("SKILL.md", "---\nname: leaf\n---\nLeaf.\n")]);
+    git_in(&leaf_dir, &["tag", "v1.0.0"]);
+    let top = make_repo(
+        &sb.root.join("tag-top"),
+        &[
+            ("SKILL.md", "---\nname: top\n---\nTop.\n"),
+            (
+                "ai.json",
+                &format!(r#"{{"skills":{{"leaf":{{"git":"{leaf}","tag":"v1.0.0"}}}}}}"#),
+            ),
+        ],
+    );
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{"top":{{"git":"{top}","branch":"main"}}}}}}"#
+        ),
+    );
+    sb.ok(&["install"]);
+    git_in(&leaf_dir, &["tag", "v1.1.0"]);
+
+    let doc = json_doc(&sb.spm(&["outdated", "--json"]));
+    let leaf_row = doc["skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["transitive"] == true)
+        .unwrap_or_else(|| panic!("no transitive row: {doc}"));
+    assert_eq!(leaf_row["status"], "newer-tag", "{doc}");
+    let leaf_name = leaf_row["name"].as_str().unwrap().to_string();
+
+    let hint = "bump it in the upstream ai.json of top, then run `spm update`";
+    let all = sb.ok(&["outdated"]);
+    assert!(all.contains(hint), "{all}");
+    let named = sb.ok(&["outdated", &leaf_name]);
+    assert!(named.contains(hint), "{named}");
+}

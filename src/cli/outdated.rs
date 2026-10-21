@@ -80,6 +80,11 @@ struct Row<'a> {
     /// Resolved through another skill's `ai.json`: update it there, not here.
     transitive: bool,
     requested_by: &'a [String],
+    /// Every requester tracks a branch (read from the whole lockfile, so a
+    /// name filter cannot change it): an upstream bump then arrives through
+    /// `spm update`, whereas a pinned requester must be re-pinned.
+    #[serde(skip)]
+    requesters_track_branch: bool,
     error: Option<String>,
 }
 
@@ -130,6 +135,16 @@ pub(super) fn outdated(
         }
     }
     let wanted = |n: &str| name.is_none_or(|want| want == n);
+    let tracks_branch = |l: &LockedSkill| {
+        l.requested_by.iter().all(|req| {
+            lock.skills
+                .get(req)
+                .or_else(|| lock.plugins.get(req))
+                .is_some_and(|q| {
+                    matches!(Version::from_label(&q.reference), Some(Version::Branch(_)))
+                })
+        })
+    };
     let mut remotes = Remotes::default();
     let report = OutdatedReport {
         scope: scope.label(),
@@ -139,7 +154,9 @@ pub(super) fn outdated(
             .filter(|(n, _)| wanted(n))
             .map(|(n, l)| {
                 let transitive = !l.requested_by.is_empty() && !manifest.skills.contains_key(n);
-                check(n, l, false, transitive, &mut remotes)
+                let mut row = check(n, l, false, transitive, &mut remotes);
+                row.requesters_track_branch = tracks_branch(l);
+                row
             })
             .collect(),
         plugins: lock
@@ -199,6 +216,7 @@ fn check<'a>(
         outdated: false,
         transitive,
         requested_by: &l.requested_by,
+        requesters_track_branch: false,
         error: None,
     };
     if let Err(e) = compare(&mut row, selector.as_ref(), &l.reference, remotes) {
@@ -427,13 +445,7 @@ fn summary(report: &OutdatedReport) -> Vec<String> {
             // `install` reuses a requester's locked commit (and its old
             // manifest), so only a branch-tracking requester picks up an
             // upstream bump via `update`; a pinned one must be re-pinned.
-            let tracks_branch = |req: &String| {
-                report
-                    .rows()
-                    .find(|q| q.name == req.as_str())
-                    .is_some_and(|q| matches!(q.selector, Some(Version::Branch(_))))
-            };
-            let apply = if r.requested_by.iter().all(tracks_branch) {
+            let apply = if r.requesters_track_branch {
                 format!("then run `spm update{g}`")
             } else {
                 format!(
@@ -459,7 +471,7 @@ fn summary(report: &OutdatedReport) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{newest_tag, summary, OutdatedReport, Row, Status, Version};
+    use super::{newest_tag, summary, OutdatedReport, Row, Status};
     use std::collections::BTreeMap;
 
     fn refs(tags: &[&str]) -> BTreeMap<String, String> {
@@ -513,6 +525,7 @@ mod tests {
             outdated: matches!(status, Status::Behind | Status::NewerTag | Status::TagMoved),
             transitive: !requested_by.is_empty(),
             requested_by,
+            requesters_track_branch: false,
             error: (status == Status::Error).then(|| "unreachable".to_string()),
         }
     }
@@ -527,17 +540,12 @@ mod tests {
                 row("br", Status::Behind, &[]),
                 row("moved", Status::TagMoved, &[]),
                 row("tg", Status::NewerTag, &[]),
-                row("leaf", Status::NewerTag, &via),
+                Row {
+                    requesters_track_branch: true,
+                    ..row("leaf", Status::NewerTag, &via)
+                },
                 row("deep", Status::NewerTag, &pinned_via),
                 row("gone", Status::Error, &[]),
-                Row {
-                    selector: Some(Version::Branch("main".into())),
-                    ..row("top", Status::UpToDate, &[])
-                },
-                Row {
-                    selector: Some(Version::Tag("v1.0.0".into())),
-                    ..row("fixed", Status::UpToDate, &[])
-                },
             ],
             plugins: vec![],
         };
