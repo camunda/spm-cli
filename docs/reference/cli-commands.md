@@ -14,6 +14,7 @@ spm update [name] [-g]                             # re-resolve branches/tags to
 spm install [-g] [--locked]                        # rebuild from ai.lock (after clone); alias: i; --locked fails if ai.lock is out of sync (CI)
 spm list [-g] [--json]                             # show skills + pinned commits; alias: ls
 spm status [-g] [--json]                           # check skills are materialized in this checkout
+spm outdated [name] [-g] [--json] [--exit-code]       # report newer upstream versions (read-only)
 spm clean [-g]                                     # remove generated vendor config
 spm prune [--yes]                                  # wipe the global fetch cache ($SPM_HOME/store, default ~/.spm/store)
 spm scan [path] [--json]                           # scan skill content for suspicious patterns (default: .)
@@ -23,16 +24,16 @@ Three commands have short aliases that behave identically, including `-g`:
 `spm i` for `spm install`, `spm rm <name>` for `spm remove <name>`, and `spm ls`
 for `spm list`.
 
-`add`, `install`, `update`, `remove` and `target add` also accept `--protocol ssh|https` and
+`add`, `install`, `update`, `remove`, `target add` and `outdated` also accept `--protocol ssh|https` and
 `--protocol-fallback` (see [Repo URLs](#repo-urls-https-ssh)).
 
-`list`, `status` and `scan` accept `--json` to print a machine-readable document
+`list`, `status`, `outdated` and `scan` accept `--json` to print a machine-readable document
 instead of text (see [Machine-readable output](#machine-readable-output-json)).
 
 ## Scope: project (default) vs. global (`-g`)
 
 Scope-aware commands (`init`, `add`, `remove`, `update`, `install`, `list`,
-`status`, `clean`) accept `-g` / `--global`; `spm target add`, `spm prune`, and
+`status`, `outdated`, `clean`) accept `-g` / `--global`; `spm target add`, `spm prune`, and
 `spm scan` don't (`prune` always wipes the shared global fetch cache and `scan`
 always operates on a path). Without `-g`, a scope-aware command operates on the
 **project** in the current directory. With it, it manages a **user-global** set
@@ -197,6 +198,81 @@ it works in scripts and git hooks. See [Worktrees & Fresh Clones](/guide/worktre
 `--json` prints the report as a [JSON document](#machine-readable-output-json),
 still exiting non-zero when something is missing.
 
+### `spm outdated [name]`
+
+Reports which locked skills and plugins have newer upstream versions than
+`ai.lock` pins, **without changing anything**: it only runs `git ls-remote`
+(once per repository, no clone) and never writes `ai.json`/`ai.lock`, fetches
+into the store or touches vendor dirs. Use it to decide what to update, or
+in a scheduled CI job or bot that reports drift.
+
+| selector | check | status |
+| --- | --- | --- |
+| `branch` | the remote branch tip vs the locked commit | `behind` when the tip moved |
+| `tag` | the newest [semver](https://semver.org) tag on the remote (a leading `v` is allowed; floating or non-semver tags such as `v1` or `latest` are ignored; pre-releases only count when the pinned tag is one) | `newer tag` |
+| `tag` | the pinned tag itself now resolves to a different commit | `tag moved`, plus a warning — someone re-pointed the tag |
+| `commit` | none (never queried) | `pinned` |
+
+```text
+name       selector         locked    latest      status
+pdf-tools  tag:v1.2.0       11223344  tag:v1.3.0  newer tag
+pinned     commit:a1b2c3d4  a1b2c3d4  -           pinned
+reviewer   branch:main      a1b2c3d4  9f8e7d6c    behind
+
+2 dependencies outdated:
+  reviewer: run `spm update` to re-pin to the moved branch/tag
+  pdf-tools: newer tag — change the tag in ai.json, then run `spm install`
+```
+
+The summary says how to apply each change. A moved branch (or re-pointed tag)
+is refreshed by `spm update`, which re-resolves the **same** selector (for a
+transitive skill, use a bare `spm update`; `spm update <name>` leaves unchanged
+child pins alone). A newer tag is a **different** selector, so `spm update`
+will not adopt it:
+
+- **Direct dependency:** change the tag in your `ai.json`, then run
+  `spm install`.
+- **Transitive dependency:** the tag is declared in the requesting skill's
+  upstream `ai.json`. Publish the bump there, then follow the requester chain
+  up until the change reaches something that picks it up. A requester that
+  tracks a branch picks it up through a bare `spm update` (`spm install` would
+  reuse every locked commit and its old manifest). A transitive requester
+  pinned to a tag or commit must publish a new version that *its* requester
+  bumps in its own upstream `ai.json`, and so on up. A dependency you declare
+  yourself that is pinned to a tag or commit needs its selector changed in
+  your `ai.json`, then `spm install`. The summary spells out the chain, e.g.
+  for `root` (branch) → `middle` (tag) → `leaf` (tag):
+
+  ```text
+  leaf: newer tag — bump it in the upstream ai.json of middle; publish a new middle version and bump middle in the upstream ai.json of root; then run `spm update`
+  ```
+
+In global scope the suggested commands carry `-g`. If any row errored, the
+summary says the check is incomplete instead of claiming everything is up to
+date.
+
+Plugins are included (marked `(plugin)`), and transitive skills are listed but
+marked `(transitive; via <requester>)`, because their pin is set by the
+requesting skill's own `ai.json`. With a `name`, only that skill or plugin is
+checked.
+
+When several requesters share one deduplicated entry through different
+selectors (say `branch: main` and `tag: v1.0.0` at the same commit), every
+selector recorded in `ai.lock` is checked, not just the primary one. If one of
+them moved or a tag selector has a newer semver tag, the row is outdated and
+the note says which, e.g. `(also tag:v1.0.0: tag moved)` or
+`(also tag:v1.0.0: newer tag v1.1.0)`; a moved tag also prints a warning. A
+secondary tag is declared in a requester's upstream `ai.json`, so a newer one
+is adopted the same way as a transitive newer tag (see above).
+
+Exit codes: `0` by default, even when something is outdated. With
+`--exit-code`, it exits non-zero when anything is outdated (`behind`,
+`newer tag` or `tag moved`), like `git diff --exit-code`, so it can gate a
+pipeline. A remote that cannot be reached (or a branch/tag that no longer
+exists) fails only its own row — the rest are still checked — but the command
+then exits non-zero regardless of `--exit-code`. Accepts `-g`, `--json` (see
+[below](#spm-outdated-json)), `--protocol` and `--protocol-fallback`.
+
 ### `spm clean`
 
 Removes generated vendor config from the project.
@@ -244,8 +320,8 @@ To override the gate for content you trust (or a false positive), set
 
 ## Machine-readable output (`--json`)
 
-`spm list`, `spm status` and `spm scan` accept `--json` (together with `-g` for
-`list` and `status`). With it:
+`spm list`, `spm status`, `spm outdated` and `spm scan` accept `--json` (together
+with `-g` for `list`, `status` and `outdated`). With it:
 
 - stdout holds **exactly one** JSON document and nothing else; errors still go
   to stderr as `error: ...`.
@@ -253,7 +329,8 @@ To override the gate for content you trust (or a false positive), set
   on any breaking change to a shape; new fields may be added without a bump.
 - commit SHAs are always the full 40 hex characters.
 - **exit codes are unchanged.** `status` still exits non-zero when something is
-  missing and `scan` still exits non-zero on a blocking finding — the document
+  missing, `outdated` when a remote errored (or, with `--exit-code`, when
+  something is outdated) and `scan` still exits non-zero on a blocking finding — the document
   is printed first, so you get both the data and the status. A hard error that
   happens before a report exists (an unreadable `ai.json`, a `scan` path that
   does not exist) prints no document.
@@ -316,6 +393,46 @@ To override the gate for content you trust (or a false positive), set
     }
   ],
   "complete": true                          // false ⇔ non-zero exit
+}
+```
+
+### `spm outdated --json`
+
+```jsonc
+{
+  "schemaVersion": 1,
+  "scope": "project",                       // or "global"
+  "skills": [                               // every ai.lock skill, direct and transitive
+    {
+      "name": "pdf-tools",
+      "git": "https://github.com/org/skills",
+      "path": "skills/pdf",                 // null when the repo root is the skill
+      "selector": { "tag": "v1.2.0" },      // or { "branch": … } / { "commit": … }
+      "locked": "<40-hex sha>",             // the commit ai.lock pins
+      "remoteCommit": "<40-hex sha>",       // what the branch / pinned tag points at now;
+                                            // null for commits and errors
+      "latestTag": "v1.3.0",                // newest semver tag, only when newer than the pin
+      "latestTagCommit": "<40-hex sha>",    // the commit latestTag points at
+      "status": "newer-tag",                // up-to-date | behind | newer-tag | tag-moved |
+                                            // pinned | error
+      "outdated": true,                     // behind, newer-tag or tag-moved here or in
+                                            // any alsoSatisfies entry
+      "transitive": false,
+      "requestedBy": [],                    // direct requester(s) of a transitive skill
+      "alsoSatisfies": [                    // other selectors this deduplicated entry
+        {                                   // satisfies (ai.lock `also_satisfies`)
+          "selector": { "branch": "main" },
+          "remoteCommit": "<40-hex sha>",
+          "latestTag": null,                // as above, for a tag selector
+          "latestTagCommit": null,
+          "status": "up-to-date",           // same values as the row's status
+          "error": null
+        }
+      ],
+      "error": null                         // why the remote could not be checked
+    }
+  ],
+  "plugins": []                             // same row shape
 }
 ```
 
