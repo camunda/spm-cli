@@ -245,6 +245,12 @@ marked `(transitive; via <requester>)`, because their pin is set by the
 requesting skill's own `ai.json`. With a `name`, only that skill or plugin is
 checked.
 
+When several requesters share one deduplicated entry through different
+selectors (say `branch: main` and `tag: v1.0.0` at the same commit), every
+selector recorded in `ai.lock` is checked, not just the primary one. If one of
+them moved, the row is outdated and the note says which, e.g.
+`(also tag:v1.0.0: tag moved)`; a moved tag also prints a warning.
+
 Exit codes: `0` by default, even when something is outdated. With
 `--exit-code`, it exits non-zero when anything is outdated (`behind`,
 `newer tag` or `tag moved`), like `git diff --exit-code`, so it can gate a
@@ -395,9 +401,18 @@ with `-g` for `list`, `status` and `outdated`). With it:
       "latestTagCommit": "<40-hex sha>",    // the commit latestTag points at
       "status": "newer-tag",                // up-to-date | behind | newer-tag | tag-moved |
                                             // pinned | error
-      "outdated": true,                     // behind, newer-tag or tag-moved
+      "outdated": true,                     // behind, newer-tag or tag-moved here or in
+                                            // any alsoSatisfies entry
       "transitive": false,
       "requestedBy": [],                    // direct requester(s) of a transitive skill
+      "alsoSatisfies": [                    // other selectors this deduplicated entry
+        {                                   // satisfies (ai.lock `also_satisfies`)
+          "selector": { "branch": "main" },
+          "remoteCommit": "<40-hex sha>",
+          "status": "up-to-date",           // up-to-date | behind | tag-moved | pinned | error
+          "error": null
+        }
+      ],
       "error": null                         // why the remote could not be checked
     }
   ],

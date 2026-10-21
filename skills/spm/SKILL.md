@@ -262,6 +262,8 @@ never queried), `up to date`, or `error` (remote unreachable or ref gone; the
 other rows are still checked). Plugins are included; transitive skills are
 marked `transitive; via <requester>`, and the fix belongs in that requester's
 own `ai.json`, not this one. With a name, only that entry is checked.
+A deduplicated entry shared through different selectors has every selector
+checked; drift in a secondary one shows as `also <selector>: <status>`.
 
 It exits 0 even when things are outdated; `--exit-code` makes it exit non-zero
 when anything is outdated. Any `error` row always makes it exit non-zero.
@@ -318,7 +320,8 @@ stdout is exactly one JSON document with `"schemaVersion": 1`, and errors stay
 on stderr. Exit codes do not change: `status --json` still fails when
 something is missing (check `"complete"` and each target's `missing`),
 `outdated --json` fails when a remote errored (check each row's `status` and
-`error`; `outdated` is true for `behind`, `newer-tag` and `tag-moved`), and
+`error`; `outdated` is true for `behind`, `newer-tag` and `tag-moved`, including
+drift in a deduplicated entry's `alsoSatisfies` selectors), and
 `scan --json` still fails on a blocking finding (check `summary.blocking`). The
 document is printed before the failure, so read stdout even on a non-zero exit.
 Commits are full SHAs. `list` marks transitive skills with `"transitive": true`

@@ -6146,7 +6146,7 @@ fn outdated_reports_behind_newer_tag_and_pinned_without_writing_anything() {
             "selector": { "branch": "main" }, "locked": locked_main,
             "remoteCommit": tip, "latestTag": null, "latestTagCommit": null,
             "status": "behind", "outdated": true, "transitive": false,
-            "requestedBy": [], "error": null
+            "requestedBy": [], "alsoSatisfies": [], "error": null
         }),
         "{doc}"
     );
@@ -6429,4 +6429,91 @@ fn outdated_named_transitive_newer_tag_gets_the_same_guidance_as_unfiltered() {
     assert!(all.contains(hint), "{all}");
     let named = sb.ok(&["outdated", &leaf_name]);
     assert!(named.contains(hint), "{named}");
+}
+
+#[test]
+fn outdated_checks_secondary_selectors_of_deduplicated_dependencies() {
+    let sb = Sandbox::new();
+    let leaf_dir = sb.root.join("dedup-leaf");
+    let leaf = make_repo(&leaf_dir, &[("SKILL.md", "---\nname: leaf\n---\nLeaf.\n")]);
+    git_in(&leaf_dir, &["tag", "v1.0.0"]);
+    let requester = |dir: &str, sel: &str| {
+        make_repo(
+            &sb.root.join(dir),
+            &[
+                ("SKILL.md", &format!("---\nname: {dir}\n---\nR.\n")),
+                (
+                    "ai.json",
+                    &format!(r#"{{"skills":{{"leaf":{{"git":"{leaf}",{sel}}}}}}}"#),
+                ),
+            ],
+        )
+    };
+    // Two roots request the same leaf commit by a branch and by a tag, so the
+    // single deduplicated lock entry records the second in `also_satisfies`.
+    let a = requester("a-top", r#""branch":"main""#);
+    let b = requester("b-top", r#""tag":"v1.0.0""#);
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{
+                "a-top":{{"git":"{a}","branch":"main"}},
+                "b-top":{{"git":"{b}","branch":"main"}}}}}}"#
+        ),
+    );
+    sb.ok(&["install"]);
+
+    let doc = json_doc(&sb.spm(&["outdated", "--json"]));
+    let leaf_row = |doc: &serde_json::Value| {
+        doc["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["transitive"] == true)
+            .cloned()
+            .unwrap_or_else(|| panic!("no transitive row: {doc}"))
+    };
+    let row = leaf_row(&doc);
+    assert_eq!(row["status"], "up-to-date", "{doc}");
+    let secondary = row["alsoSatisfies"].as_array().unwrap();
+    assert_eq!(secondary.len(), 1, "{doc}");
+    assert_eq!(secondary[0]["status"], "up-to-date", "{doc}");
+    // Roots are walked in name order, so `a-top`'s branch is the primary.
+    assert_eq!(
+        row["selector"],
+        serde_json::json!({ "branch": "main" }),
+        "{doc}"
+    );
+    assert_eq!(
+        secondary[0]["selector"],
+        serde_json::json!({ "tag": "v1.0.0" }),
+        "{doc}"
+    );
+    sb.ok(&["outdated", "--exit-code"]);
+
+    // Re-point the tag at a commit off `main`, leaving the branch untouched.
+    git_in(&leaf_dir, &["checkout", "-q", "-b", "side"]);
+    std::fs::write(leaf_dir.join("NOTES.md"), "x\n").unwrap();
+    git_in(&leaf_dir, &["add", "-A"]);
+    git_in(&leaf_dir, &["commit", "-qm", "side"]);
+    git_in(&leaf_dir, &["tag", "-f", "v1.0.0"]);
+    git_in(&leaf_dir, &["checkout", "-q", "main"]);
+
+    let out = sb.spm(&["outdated", "--json"]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    let doc = json_doc(&out);
+    let row = leaf_row(&doc);
+    assert_eq!(row["outdated"], true, "{doc}");
+    // The primary branch did not move, yet the entry is outdated.
+    assert_eq!(row["status"], "up-to-date", "{doc}");
+    assert_eq!(row["alsoSatisfies"][0]["status"], "tag-moved", "{doc}");
+
+    let out = sb.spm(&["outdated", "--exit-code"]);
+    assert!(!out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    let err = stderr_of(&out);
+    assert!(err.contains("tag `v1.0.0`"), "{err}");
+    assert!(text.contains("also tag:v1.0.0: tag moved"), "{text}");
+    assert!(text.contains("run `spm update`"), "{text}");
 }
