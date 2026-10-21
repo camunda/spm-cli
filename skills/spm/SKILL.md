@@ -269,8 +269,10 @@ shows as `also <selector>: <status>`.
 It exits 0 even when things are outdated; `--exit-code` makes it exit non-zero
 when anything is outdated. Any `error` row always makes it exit non-zero.
 `--protocol`/`--protocol-fallback` behave as under [`spm add`](#spm-add). To
-apply what it reports: `behind`/`tag moved` are refreshed by `spm update [name]`
-(it re-resolves the same selector). `newer tag` is **not** applied by
+apply what it reports: `behind`/`tag moved` are refreshed by re-resolving the
+same selector — `spm update <name>` for a direct entry, but a bare `spm update`
+(no name) for a transitive one, because a named update leaves unchanged child
+pins alone. `newer tag` is **not** applied by
 `spm update`, because a newer tag is a different selector:
 
 - **Direct entry:** change the tag in this project's `ai.json`, then run

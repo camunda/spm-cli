@@ -225,8 +225,10 @@ reviewer   branch:main      a1b2c3d4  9f8e7d6c    behind
 ```
 
 The summary says how to apply each change. A moved branch (or re-pointed tag)
-is refreshed by `spm update`, which re-resolves the **same** selector. A newer
-tag is a **different** selector, so `spm update` will not adopt it:
+is refreshed by `spm update`, which re-resolves the **same** selector (for a
+transitive skill, use a bare `spm update`; `spm update <name>` leaves unchanged
+child pins alone). A newer tag is a **different** selector, so `spm update`
+will not adopt it:
 
 - **Direct dependency:** change the tag in your `ai.json`, then run
   `spm install`.
