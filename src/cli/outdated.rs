@@ -80,11 +80,10 @@ struct Row<'a> {
     /// Resolved through another skill's `ai.json`: update it there, not here.
     transitive: bool,
     requested_by: &'a [String],
-    /// Every requester tracks a branch (read from the whole lockfile, so a
-    /// name filter cannot change it): an upstream bump then arrives through
-    /// `spm update`, whereas a pinned requester must be re-pinned.
+    /// How an upstream bump of this transitive skill reaches the project
+    /// (read from the whole lockfile, so a name filter cannot change it).
     #[serde(skip)]
-    requesters_track_branch: bool,
+    upgrade: Upgrade,
     /// The other selectors this deduplicated entry satisfies, each checked.
     also_satisfies: Vec<SelectorCheck>,
     error: Option<String>,
@@ -109,6 +108,51 @@ struct SelectorCheck {
     /// Same values as a row's `status`.
     status: Status,
     error: Option<String>,
+}
+
+/// How an upstream selector change propagates up the requester chain to a
+/// locally declared dependency. A requester pinned to a tag or commit only
+/// sees the change once a new version of it is published *and* its own
+/// selector is bumped by its requester, recursively; a branch-tracking
+/// requester picks it up through `spm update`, and a pinned local dependency
+/// through an `ai.json` edit plus `spm install`.
+#[derive(Default, Debug, PartialEq)]
+struct Upgrade {
+    /// Pinned transitive requesters to republish, each with the requesters
+    /// whose upstream `ai.json` must then bump it, in order up the chain.
+    republish: Vec<(String, Vec<String>)>,
+    /// Pinned, locally declared dependencies whose selector must change in
+    /// this project's `ai.json`.
+    local_edits: Vec<String>,
+    /// Some chain ends at a branch-tracking requester (`spm update`).
+    via_branch: bool,
+}
+
+impl Upgrade {
+    fn plan(requested_by: &[String], lock: &Lockfile, manifest: &Manifest) -> Self {
+        let mut up = Upgrade::default();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut queue: std::collections::VecDeque<&String> = requested_by.iter().collect();
+        while let Some(req) = queue.pop_front() {
+            if !seen.insert(req.clone()) {
+                continue;
+            }
+            let locked = lock.skills.get(req).or_else(|| lock.plugins.get(req));
+            let branch = locked.is_some_and(|q| {
+                matches!(Version::from_label(&q.reference), Some(Version::Branch(_)))
+            });
+            let local = manifest.skills.contains_key(req) || manifest.plugins.contains_key(req);
+            match locked {
+                _ if branch => up.via_branch = true,
+                Some(q) if !local && !q.requested_by.is_empty() => {
+                    up.republish.push((req.clone(), q.requested_by.clone()));
+                    queue.extend(&q.requested_by);
+                }
+                _ => up.local_edits.push(req.clone()),
+            }
+        }
+        up
+    }
 }
 
 impl Row<'_> {
@@ -164,16 +208,6 @@ pub(super) fn outdated(
         }
     }
     let wanted = |n: &str| name.is_none_or(|want| want == n);
-    let tracks_branch = |l: &LockedSkill| {
-        l.requested_by.iter().all(|req| {
-            lock.skills
-                .get(req)
-                .or_else(|| lock.plugins.get(req))
-                .is_some_and(|q| {
-                    matches!(Version::from_label(&q.reference), Some(Version::Branch(_)))
-                })
-        })
-    };
     let mut remotes = Remotes::default();
     let report = OutdatedReport {
         scope: scope.label(),
@@ -184,7 +218,9 @@ pub(super) fn outdated(
             .map(|(n, l)| {
                 let transitive = !l.requested_by.is_empty() && !manifest.skills.contains_key(n);
                 let mut row = check(n, l, false, transitive, &mut remotes);
-                row.requesters_track_branch = tracks_branch(l);
+                if transitive {
+                    row.upgrade = Upgrade::plan(&l.requested_by, &lock, &manifest);
+                }
                 row
             })
             .collect(),
@@ -244,7 +280,7 @@ fn check<'a>(
         outdated: false,
         transitive,
         requested_by: &l.requested_by,
-        requesters_track_branch: false,
+        upgrade: Upgrade::default(),
         also_satisfies: Vec::new(),
         error: None,
     };
@@ -544,22 +580,30 @@ fn summary(report: &OutdatedReport) -> Vec<String> {
             .iter()
             .filter(|r| r.status == Status::NewerTag && r.transitive)
         {
-            // `install` reuses a requester's locked commit (and its old
-            // manifest), so only a branch-tracking requester picks up an
-            // upstream bump via `update`; a pinned one must be re-pinned.
-            let apply = if r.requesters_track_branch {
-                format!("then run `spm update{g}`")
+            // `install` reuses every locked commit (and its old manifest), so
+            // only `update` chases a branch-tracking requester; pinned ones
+            // must be republished and re-pinned all the way up.
+            let up = &r.upgrade;
+            let mut steps = vec![format!(
+                "bump it in the upstream ai.json of {}",
+                r.requested_by.join(", ")
+            )];
+            for (pinned, parents) in &up.republish {
+                steps.push(format!(
+                    "publish a new {pinned} version and bump {pinned} in the upstream ai.json of {}",
+                    parents.join(", ")
+                ));
+            }
+            let run = if up.via_branch { "update" } else { "install" };
+            steps.push(if up.local_edits.is_empty() {
+                format!("then run `spm {run}{g}`")
             } else {
                 format!(
-                    "then point {} at a version that includes it and run `spm install{g}`",
-                    r.requested_by.join(", ")
+                    "then point {} at a version that includes it in ai.json and run `spm {run}{g}`",
+                    up.local_edits.join(", ")
                 )
-            };
-            lines.push(format!(
-                "  {}: newer tag — bump it in the upstream ai.json of {}, {apply}",
-                r.name,
-                r.requested_by.join(", ")
-            ));
+            });
+            lines.push(format!("  {}: newer tag — {}", r.name, steps.join("; ")));
         }
         // A secondary selector comes from some requester's upstream ai.json
         // edge, never from this project's own entry for the name.
@@ -591,7 +635,7 @@ fn summary(report: &OutdatedReport) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{newest_tag, summary, OutdatedReport, Row, Status};
+    use super::{newest_tag, summary, OutdatedReport, Row, Status, Upgrade};
     use std::collections::BTreeMap;
 
     fn refs(tags: &[&str]) -> BTreeMap<String, String> {
@@ -645,7 +689,7 @@ mod tests {
             outdated: matches!(status, Status::Behind | Status::NewerTag | Status::TagMoved),
             transitive: !requested_by.is_empty(),
             requested_by,
-            requesters_track_branch: false,
+            upgrade: Default::default(),
             also_satisfies: Vec::new(),
             error: (status == Status::Error).then(|| "unreachable".to_string()),
         }
@@ -662,10 +706,19 @@ mod tests {
                 row("moved", Status::TagMoved, &[]),
                 row("tg", Status::NewerTag, &[]),
                 Row {
-                    requesters_track_branch: true,
+                    upgrade: Upgrade {
+                        via_branch: true,
+                        ..Default::default()
+                    },
                     ..row("leaf", Status::NewerTag, &via)
                 },
-                row("deep", Status::NewerTag, &pinned_via),
+                Row {
+                    upgrade: Upgrade {
+                        local_edits: vec!["fixed".into()],
+                        ..Default::default()
+                    },
+                    ..row("deep", Status::NewerTag, &pinned_via)
+                },
                 row("gone", Status::Error, &[]),
             ],
             plugins: vec![],
@@ -676,9 +729,9 @@ mod tests {
                 "5 dependencies outdated:",
                 "  br, moved: run `spm update -g` to re-pin to the moved branch/tag",
                 "  tg: newer tag — change the tag in ai.json, then run `spm install -g`",
-                "  leaf: newer tag — bump it in the upstream ai.json of top, then run `spm update -g`",
-                "  deep: newer tag — bump it in the upstream ai.json of fixed, then point fixed at a \
-                 version that includes it and run `spm install -g`",
+                "  leaf: newer tag — bump it in the upstream ai.json of top; then run `spm update -g`",
+                "  deep: newer tag — bump it in the upstream ai.json of fixed; then point fixed at a \
+                 version that includes it in ai.json and run `spm install -g`",
                 "incomplete: 1 dependency could not be checked (see the errors above)",
             ]
         );

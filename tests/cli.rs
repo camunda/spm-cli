@@ -6424,7 +6424,7 @@ fn outdated_named_transitive_newer_tag_gets_the_same_guidance_as_unfiltered() {
     assert_eq!(leaf_row["status"], "newer-tag", "{doc}");
     let leaf_name = leaf_row["name"].as_str().unwrap().to_string();
 
-    let hint = "bump it in the upstream ai.json of top, then run `spm update`";
+    let hint = "bump it in the upstream ai.json of top; then run `spm update`";
     let all = sb.ok(&["outdated"]);
     assert!(all.contains(hint), "{all}");
     let named = sb.ok(&["outdated", &leaf_name]);
@@ -6536,4 +6536,80 @@ fn outdated_checks_secondary_selectors_of_deduplicated_dependencies() {
     assert!(err.contains("tag `v1.0.0`"), "{err}");
     assert!(text.contains("also tag:v1.0.0: tag moved"), "{text}");
     assert!(text.contains("run `spm update`"), "{text}");
+}
+
+#[test]
+fn outdated_guides_a_newer_tag_through_a_pinned_transitive_requester() {
+    // root (branch) -> middle (tag) -> leaf (tag): a newer leaf tag needs a
+    // new middle release bumped in root's upstream ai.json, and since root
+    // tracks a branch, `spm update` (not `install`) picks that up.
+    let sb = Sandbox::new();
+    let leaf_dir = sb.root.join("chain-leaf");
+    let leaf = make_repo(&leaf_dir, &[("SKILL.md", "---\nname: leaf\n---\nLeaf.\n")]);
+    git_in(&leaf_dir, &["tag", "v1.0.0"]);
+    let middle_dir = sb.root.join("chain-middle");
+    let middle = make_repo(
+        &middle_dir,
+        &[
+            ("SKILL.md", "---\nname: middle\n---\nMiddle.\n"),
+            (
+                "ai.json",
+                &format!(r#"{{"skills":{{"leaf":{{"git":"{leaf}","tag":"v1.0.0"}}}}}}"#),
+            ),
+        ],
+    );
+    git_in(&middle_dir, &["tag", "v1.0.0"]);
+    let root = make_repo(
+        &sb.root.join("chain-root"),
+        &[
+            ("SKILL.md", "---\nname: root\n---\nRoot.\n"),
+            (
+                "ai.json",
+                &format!(r#"{{"skills":{{"middle":{{"git":"{middle}","tag":"v1.0.0"}}}}}}"#),
+            ),
+        ],
+    );
+    sb.ok(&["init", "--target", "copilot"]);
+    let manifest = |sel: &str| {
+        format!(
+            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{"root":{{"git":"{root}",{sel}}}}}}}"#
+        )
+    };
+    write_manifest(&sb, &manifest(r#""branch":"main""#));
+    sb.ok(&["install"]);
+    git_in(&leaf_dir, &["tag", "v1.1.0"]);
+
+    let doc = json_doc(&sb.spm(&["outdated", "--json"]));
+    let names: Vec<String> = doc["skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["name"].as_str().unwrap().to_string())
+        .collect();
+    let leaf_row = doc["skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["status"] == "newer-tag")
+        .unwrap_or_else(|| panic!("no newer-tag row: {doc}"));
+    let middle_name = leaf_row["requestedBy"][0].as_str().unwrap().to_string();
+    assert!(names.contains(&middle_name), "{doc}");
+
+    let text = sb.ok(&["outdated"]);
+    let expected = format!(
+        "bump it in the upstream ai.json of {middle_name}; publish a new {middle_name} version \
+         and bump {middle_name} in the upstream ai.json of root; then run `spm update`"
+    );
+    assert!(text.contains(&expected), "{text}");
+
+    // With root pinned to a tag too, root's selector changes locally.
+    git_in(&sb.root.join("chain-root"), &["tag", "v1.0.0"]);
+    write_manifest(&sb, &manifest(r#""tag":"v1.0.0""#));
+    sb.ok(&["install"]);
+    let text = sb.ok(&["outdated"]);
+    let expected = format!(
+        "publish a new {middle_name} version and bump {middle_name} in the upstream ai.json of \
+         root; then point root at a version that includes it in ai.json and run `spm install`"
+    );
+    assert!(text.contains(&expected), "{text}");
 }

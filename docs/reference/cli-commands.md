@@ -233,14 +233,23 @@ will not adopt it:
 - **Direct dependency:** change the tag in your `ai.json`, then run
   `spm install`.
 - **Transitive dependency:** the tag is declared in the requesting skill's
-  upstream `ai.json`. Publish the bump there, then move the requester onto that
-  change. If the requester tracks a branch, run `spm update` (`spm install`
-  would reuse the requester's locked commit and its old manifest). If the
-  requester is pinned to a tag or commit, first change its selector in your
-  `ai.json` to one that includes the bump, then run `spm install`.
+  upstream `ai.json`. Publish the bump there, then follow the requester chain
+  up until the change reaches something that picks it up. A requester that
+  tracks a branch picks it up through a bare `spm update` (`spm install` would
+  reuse every locked commit and its old manifest). A transitive requester
+  pinned to a tag or commit must publish a new version that *its* requester
+  bumps in its own upstream `ai.json`, and so on up. A dependency you declare
+  yourself that is pinned to a tag or commit needs its selector changed in
+  your `ai.json`, then `spm install`. The summary spells out the chain, e.g.
+  for `root` (branch) → `middle` (tag) → `leaf` (tag):
 
-In global scope the suggested commands carry `-g`. If any row errored, the summary says the check is incomplete
-instead of claiming everything is up to date.
+  ```text
+  leaf: newer tag — bump it in the upstream ai.json of middle; publish a new middle version and bump middle in the upstream ai.json of root; then run `spm update`
+  ```
+
+In global scope the suggested commands carry `-g`. If any row errored, the
+summary says the check is incomplete instead of claiming everything is up to
+date.
 
 Plugins are included (marked `(plugin)`), and transitive skills are listed but
 marked `(transitive; via <requester>)`, because their pin is set by the

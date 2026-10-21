@@ -278,11 +278,19 @@ pins alone. `newer tag` is **not** applied by
 - **Direct entry:** change the tag in this project's `ai.json`, then run
   `spm install`.
 - **Transitive entry:** the tag lives in the requester's upstream `ai.json`.
-  Publish the bump there, then move the requester onto that change. If the
-  requester tracks a branch, run `spm update` (`spm install` would reuse the
-  requester's locked commit and its old manifest). If the requester is pinned
-  to a tag or commit, first change its selector in this `ai.json` to one that
-  includes the bump, then run `spm install`.
+  Publish the bump there, then walk up the requester chain until the change
+  reaches something that will pick it up:
+  - A requester that **tracks a branch** (direct or transitive) picks it up
+    once the bump is on that branch: run a bare `spm update` (`spm install`
+    would reuse every locked commit and its old manifest).
+  - A **transitive** requester pinned to a tag or commit must publish a new
+    version, and *its* requester must bump that selector in its own upstream
+    `ai.json`; keep walking up.
+  - A **locally declared** dependency pinned to a tag or commit: change its
+    selector in this `ai.json` to a version that includes the chain of
+    bumps, then run `spm install`.
+
+  The summary line spells out this chain for each transitive newer tag.
 
 Keep `-g` on these commands in global scope.
 
