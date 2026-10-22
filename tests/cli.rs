@@ -2103,6 +2103,28 @@ fn target_remove_keeps_metadata_a_remaining_target_loads_through_a_symlink() {
     assert!(manifest.exists(), "claude's marketplace.json must survive");
 }
 
+/// A link spelled differently from spm's own paths — canonical form, i.e. on
+/// Windows a `\\?\` prefix and long names where the temp dir is spelled with
+/// 8.3 short names — must still be recognised as the same location.
+#[test]
+fn target_remove_keeps_metadata_linked_by_a_differently_spelled_path() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude,copilot"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let meta = sb.claude_market_dir().join(".claude-plugin");
+    let moved = sb
+        .project
+        .join(".agents/skills/spm-managed-skills/claude-meta");
+    std::fs::rename(&meta, &moved).unwrap();
+    symlink(std::fs::canonicalize(&moved).unwrap(), &meta);
+    let manifest = meta.join("marketplace.json");
+    assert!(manifest.exists());
+
+    let out = sb.ok(&["target", "remove", "copilot"]);
+    assert!(out.contains("still used by target `claude`"), "{out}");
+    assert!(manifest.exists(), "claude's marketplace.json must survive");
+}
+
 /// Claude's settings file registers its marketplace: removing another target
 /// must not delete it when it is a symlink into that target's output.
 #[test]
@@ -2156,7 +2178,9 @@ fn target_remove_keeps_output_aliased_by_case_on_case_insensitive_fs() {
 }
 
 /// A relative `SPM_HOME` yields relative Claude global paths; they must still be
-/// compared against other vendors' absolute paths for the same output.
+/// compared against other vendors' absolute paths for the same output. Unix
+/// only: on Windows the home dir can't be redirected into the sandbox.
+#[cfg(unix)]
 #[test]
 fn target_remove_global_with_relative_spm_home_keeps_shared_output() {
     for (removed, kept) in [("claude", "cursor"), ("cursor", "claude")] {
