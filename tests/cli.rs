@@ -1828,6 +1828,204 @@ fn target_add_rejects_unknown_vendor() {
     );
 }
 
+fn manifest_targets(sb: &Sandbox) -> Vec<String> {
+    let v: serde_json::Value = serde_json::from_str(&sb.read("ai.json")).unwrap();
+    v["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t.as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn target_remove_cleans_managed_skills_and_keeps_user_skills() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude,cursor"]);
+    let mine = sb.project.join(".cursor/skills/mine");
+    std::fs::create_dir_all(&mine).unwrap();
+    std::fs::write(mine.join("SKILL.md"), "---\nname: mine\n---\n").unwrap();
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    assert!(sb.project.join(".cursor/skills/greet/SKILL.md").exists());
+
+    let out = sb.ok(&["target", "remove", "cursor"]);
+    assert!(out.contains("removed target(s): cursor"), "{out}");
+    assert_eq!(manifest_targets(&sb), ["claude"]);
+    assert!(
+        !sb.project.join(".cursor/skills/greet").exists(),
+        "spm-managed skill must be cleaned"
+    );
+    assert!(
+        mine.join("SKILL.md").exists(),
+        "hand-authored skill must be left untouched"
+    );
+    // The remaining target is untouched.
+    assert!(sb
+        .claude_market_dir()
+        .join("plugin/skills/greet/SKILL.md")
+        .exists());
+}
+
+#[test]
+fn target_remove_claude_removes_marketplaces_and_spm_keys_only() {
+    let sb = Sandbox::new();
+    let plugin_name = sb.add_plugin();
+    sb.ok(&["init", "--target", "claude"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["claude","copilot"],"skills":{{"greet":{{"git":"{url}","tag":"v0.1.0"}}}},"plugins":{{"ds":{{"git":"{url}","branch":"main","path":"pkg"}}}}}}"#,
+            url = sb.skill_url()
+        ),
+    );
+    std::fs::create_dir_all(sb.project.join(".claude")).unwrap();
+    std::fs::write(
+        sb.project.join(".claude/settings.local.json"),
+        r#"{"permissions":{"allow":["Bash(ls)"]}}"#,
+    )
+    .unwrap();
+    sb.ok(&["install"]);
+    assert!(sb.claude_market_dir().exists());
+    assert!(sb.project.join(".spm/claude-plugins/ds").exists());
+
+    // `rm` alias, matching `spm remove`.
+    sb.ok(&["target", "rm", "claude"]);
+    assert_eq!(manifest_targets(&sb), ["copilot"]);
+    assert!(
+        !sb.claude_market_dir().exists(),
+        "skills marketplace removed"
+    );
+    assert!(
+        !sb.project.join(".spm/claude-plugins").exists(),
+        "plugins marketplace removed"
+    );
+    let settings: serde_json::Value =
+        serde_json::from_str(&sb.read(".claude/settings.local.json")).unwrap();
+    assert_eq!(
+        settings["permissions"]["allow"][0], "Bash(ls)",
+        "user keys kept: {settings}"
+    );
+    let markets = settings.get("extraKnownMarketplaces");
+    assert!(
+        markets.and_then(|m| m.get("spm")).is_none()
+            && markets.and_then(|m| m.get("spm-plugins")).is_none(),
+        "spm marketplaces de-registered: {settings}"
+    );
+    let enabled = settings.get("enabledPlugins");
+    assert!(
+        enabled.and_then(|e| e.get("spm@spm")).is_none()
+            && enabled
+                .and_then(|e| e.get(format!("{plugin_name}@spm-plugins")))
+                .is_none(),
+        "spm plugins de-enabled: {settings}"
+    );
+    // Copilot keeps its skills.
+    assert!(sb
+        .project
+        .join(".agents/skills/spm-managed-skills/greet/SKILL.md")
+        .exists());
+}
+
+/// `codex` and `amp` both materialize into the project's `.agents/skills`, so
+/// removing either while the other stays configured must keep those entries.
+#[test]
+fn target_remove_keeps_skills_dir_shared_with_a_remaining_target() {
+    for (removed, kept) in [("codex", "amp"), ("amp", "codex")] {
+        let sb = Sandbox::new();
+        sb.ok(&["init", "--target", &format!("{removed},{kept}")]);
+        sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+        let greet = sb.project.join(".agents/skills/greet/SKILL.md");
+        assert!(greet.exists());
+
+        let out = sb.ok(&["target", "remove", removed]);
+        assert!(
+            out.contains(&format!("still used by target `{kept}`")),
+            "{out}"
+        );
+        assert_eq!(manifest_targets(&sb), [kept]);
+        assert!(
+            greet.exists(),
+            "removing {removed} must not clean the dir {kept} still uses"
+        );
+    }
+}
+
+#[test]
+fn target_remove_unconfigured_is_a_skip_and_unknown_changes_nothing() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude,cursor"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+
+    let out = sb.ok(&["target", "remove", "gemini"]);
+    assert!(out.contains("`gemini` not configured"), "{out}");
+    assert!(out.contains("no targets removed"), "{out}");
+    assert_eq!(manifest_targets(&sb), ["claude", "cursor"]);
+
+    // A typo aborts the whole call, even alongside a valid configured vendor.
+    let out = sb.spm(&["target", "remove", "cursor,bogus"]);
+    assert!(!out.status.success(), "unknown vendor must be rejected");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("unknown target `bogus`"), "{err}");
+    assert_eq!(manifest_targets(&sb), ["claude", "cursor"]);
+    assert!(sb.project.join(".cursor/skills/greet/SKILL.md").exists());
+}
+
+#[test]
+fn target_remove_refuses_to_remove_the_last_target() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude,cursor"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+
+    let out = sb.spm(&["target", "remove", "claude,cursor"]);
+    assert!(!out.status.success(), "removing every target must fail");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("last target") && err.contains("spm clean"),
+        "{err}"
+    );
+    assert_eq!(manifest_targets(&sb), ["claude", "cursor"]);
+    assert!(sb.project.join(".cursor/skills/greet/SKILL.md").exists());
+    assert!(sb.claude_market_dir().exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn target_add_and_remove_global_retarget_the_global_manifest() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "-g", "--target", "cursor"]);
+    sb.ok(&[
+        "add",
+        "-g",
+        &sb.skill_url(),
+        "--tag",
+        "v0.1.0",
+        "--name",
+        "greet",
+    ]);
+    let mine = sb.home.join(".cursor/skills/mine");
+    std::fs::create_dir_all(&mine).unwrap();
+    std::fs::write(mine.join("SKILL.md"), "---\nname: mine\n---\n").unwrap();
+
+    let out = sb.ok(&["target", "add", "-g", "copilot"]);
+    assert!(out.contains("added target(s): copilot"), "{out}");
+    assert!(sb.copilot_global_skills().join("greet/SKILL.md").exists());
+
+    let out = sb.ok(&["target", "remove", "--global", "cursor"]);
+    assert!(out.contains("removed target(s): cursor"), "{out}");
+    assert!(!sb.home.join(".cursor/skills/greet").exists());
+    assert!(mine.join("SKILL.md").exists(), "user's global skill kept");
+    assert!(sb.copilot_global_skills().join("greet/SKILL.md").exists());
+
+    let global: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(sb.spm_home.join("ai.json")).unwrap())
+            .unwrap();
+    assert_eq!(global["targets"], serde_json::json!(["copilot"]));
+    assert!(
+        !sb.project.join("ai.json").exists(),
+        "global retargeting must not touch the project"
+    );
+}
+
 #[test]
 fn target_add_interactive_picks_unconfigured_vendor_from_list() {
     let sb = Sandbox::new();

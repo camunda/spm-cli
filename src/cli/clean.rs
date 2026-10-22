@@ -10,19 +10,7 @@ pub(super) fn clean(scope: &Scope) -> Result<()> {
     let dir = scope.manifest_dir()?;
     let manifest = Manifest::load(&dir, scope)?;
     let lock = Lockfile::load_or_default(&dir)?;
-    // Plugin-bundled skills are flattened into the same shared skills dirs as
-    // standalone skills (see `sync`'s `previously_managed`), so they must be
-    // included here too — otherwise `clean` would leave their materialized
-    // dirs behind in shared-dir/global vendors.
-    let mut managed: Vec<String> = lock.skills.keys().cloned().collect();
-    managed.extend(
-        lock.plugins
-            .values()
-            .flat_map(|l| l.bundled_skills.iter().cloned()),
-    );
-    managed.sort();
-    managed.dedup();
-    let managed_plugins: Vec<String> = lock.plugins.keys().cloned().collect();
+    let (managed, managed_plugins) = managed_names(&lock);
     for target in &manifest.targets {
         let vendor = vendor::for_target(target)?;
         vendor.clean(scope, &lock.id, &managed)?;
@@ -34,6 +22,25 @@ pub(super) fn clean(scope: &Scope) -> Result<()> {
         manifest.targets.join(", ")
     );
     Ok(())
+}
+
+/// The skill and plugin names spm currently owns, per `ai.lock`: what a
+/// vendor's `clean` / `clean_plugins` must remove.
+pub(super) fn managed_names(lock: &Lockfile) -> (Vec<String>, Vec<String>) {
+    // Plugin-bundled skills are flattened into the same shared skills dirs as
+    // standalone skills (see `sync`'s `previously_managed`), so they must be
+    // included here too — otherwise a clean would leave their materialized
+    // dirs behind in shared-dir/global vendors.
+    let mut managed: Vec<String> = lock.skills.keys().cloned().collect();
+    managed.extend(
+        lock.plugins
+            .values()
+            .flat_map(|l| l.bundled_skills.iter().cloned()),
+    );
+    managed.sort();
+    managed.dedup();
+    let managed_plugins: Vec<String> = lock.plugins.keys().cloned().collect();
+    (managed, managed_plugins)
 }
 
 /// `spm prune`: wipe the whole global store (`$SPM_HOME/store`, default

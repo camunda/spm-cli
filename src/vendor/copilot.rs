@@ -100,6 +100,10 @@ impl Vendor for Copilot {
         Ok(())
     }
 
+    fn skills_dir(&self, scope: &Scope) -> Result<PathBuf> {
+        skills_dir(scope)
+    }
+
     fn status(&self, scope: &Scope, expected: &[String]) -> Result<super::VendorStatus> {
         // Stale detection only makes sense for the spm-owned project dir; the
         // shared global dir holds the user's own skills too.

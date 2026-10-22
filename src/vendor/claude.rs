@@ -117,6 +117,10 @@ impl Vendor for Claude {
         Ok(())
     }
 
+    fn skills_dir(&self, scope: &Scope) -> Result<PathBuf> {
+        managed_dir(scope)
+    }
+
     fn status(&self, scope: &Scope, expected: &[String]) -> Result<super::VendorStatus> {
         let market_dir = managed_dir(scope)?;
         let skills_dir = market_dir.join("plugin").join("skills");

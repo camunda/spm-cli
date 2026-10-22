@@ -124,6 +124,12 @@ pub trait Vendor {
     /// sharing a directory with the user's skills remove only those.
     fn clean(&self, scope: &Scope, project_id: &str, managed: &[String]) -> Result<()>;
 
+    /// The directory this vendor materializes skills into for `scope` — the one
+    /// [`clean`](Vendor::clean) removes from. Two targets returning the same path
+    /// share it (e.g. `codex` and `amp` both use the project's `.agents/skills`),
+    /// so removing one must not clean it while the other is still configured.
+    fn skills_dir(&self, scope: &Scope) -> Result<PathBuf>;
+
     /// Report what this vendor has materialized in the given `scope`, compared
     /// against the declared `expected` skill names (from `ai.lock`).
     fn status(&self, scope: &Scope, expected: &[String]) -> Result<VendorStatus>;

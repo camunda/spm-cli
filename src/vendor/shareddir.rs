@@ -123,14 +123,6 @@ pub fn amp() -> SharedDirVendor {
 }
 
 impl SharedDirVendor {
-    /// Absolute path of the managed skills directory for a scope.
-    fn skills_dir(&self, scope: &Scope) -> Result<PathBuf> {
-        match scope {
-            Scope::Project { root } => Ok(join_all(root, self.project_segs)),
-            Scope::Global => Ok(join_all(&paths::home_dir()?, self.global_segs)),
-        }
-    }
-
     /// `.gitignore` entry for a single spm-managed skill subdir (project scope).
     fn gitignore_entry(&self, skill: &str) -> String {
         format!("{}/{skill}/", self.project_segs.join("/"))
@@ -174,6 +166,13 @@ impl Vendor for SharedDirVendor {
         // added are harmless once the materialized dirs are gone, and rewriting a
         // user-owned file on `clean` risks clobbering it.
         remove_managed(&self.skills_dir(scope)?, managed.iter().map(String::as_str))
+    }
+
+    fn skills_dir(&self, scope: &Scope) -> Result<PathBuf> {
+        match scope {
+            Scope::Project { root } => Ok(join_all(root, self.project_segs)),
+            Scope::Global => Ok(join_all(&paths::home_dir()?, self.global_segs)),
+        }
     }
 
     fn status(&self, scope: &Scope, expected: &[String]) -> Result<super::VendorStatus> {

@@ -1,4 +1,6 @@
+use super::clean::managed_names;
 use super::sync::sync;
+use crate::lockfile::Lockfile;
 use crate::manifest::Manifest;
 use crate::scope::Scope;
 use crate::vendor;
@@ -55,6 +57,81 @@ pub(super) fn target_add(scope: &Scope, vendors: Vec<String>) -> Result<()> {
     // Materialize existing skills into the newly-added vendor(s).
     sync(scope, false, None, false)?;
     println!("added target(s): {}", added.join(", "));
+    Ok(())
+}
+
+/// `spm target remove <vendors...>`: drop target vendors from ai.json and clean
+/// what spm materialized for them. Every vendor is validated up front, so a typo
+/// aborts before anything is touched; a vendor that isn't configured is a skip,
+/// so the command is safe to re-run. Removing every remaining target is refused
+/// (`sync` needs at least one) — `spm clean` is the tool for that.
+pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
+    for v in &vendors {
+        vendor::for_target(v)?;
+    }
+    let dir = scope.manifest_dir()?;
+    let mut manifest = Manifest::load(&dir, scope)?;
+
+    let mut removed: Vec<String> = Vec::new();
+    for v in vendors {
+        if removed.contains(&v) {
+            continue;
+        }
+        if manifest.targets.contains(&v) {
+            removed.push(v);
+        } else {
+            println!("target `{v}` not configured — skipping");
+        }
+    }
+    if removed.is_empty() {
+        println!("no targets removed");
+        return Ok(());
+    }
+
+    let remaining: Vec<String> = manifest
+        .targets
+        .iter()
+        .filter(|t| !removed.contains(t))
+        .cloned()
+        .collect();
+    if remaining.is_empty() {
+        let clean = if scope.is_global() {
+            "spm clean --global"
+        } else {
+            "spm clean"
+        };
+        bail!(
+            "cannot remove the last target ({}): ai.json needs at least one; \
+             use `{clean}` to remove all generated vendor config instead",
+            removed.join(", ")
+        );
+    }
+
+    let lock = Lockfile::load_or_default(&dir)?;
+    let (managed, managed_plugins) = managed_names(&lock);
+    // Skills dirs still written by a remaining target (e.g. `.agents/skills`,
+    // shared by `codex` and `amp`): cleaning them would delete skills that
+    // target still loads.
+    let mut kept_dirs = Vec::new();
+    for t in &remaining {
+        kept_dirs.push((t.as_str(), vendor::for_target(t)?.skills_dir(scope)?));
+    }
+    for t in &removed {
+        let v = vendor::for_target(t)?;
+        let skills_dir = v.skills_dir(scope)?;
+        match kept_dirs.iter().find(|(_, d)| *d == skills_dir) {
+            Some((owner, _)) => println!(
+                "keeping {}: still used by target `{owner}`",
+                skills_dir.display()
+            ),
+            None => v.clean(scope, &lock.id, &managed)?,
+        }
+        v.clean_plugins(scope, &lock.id, &managed_plugins)?;
+    }
+
+    manifest.targets = remaining;
+    manifest.save(&dir)?;
+    println!("removed target(s): {}", removed.join(", "));
     Ok(())
 }
 

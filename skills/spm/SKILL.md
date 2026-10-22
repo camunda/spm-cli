@@ -16,7 +16,7 @@ gitignored and never committed. Run `spm --help` or
 
 | File or directory | Who writes it | Commit it? |
 | --- | --- | --- |
-| `ai.json` | You (or `spm init`, `spm add`, `spm remove`, `spm target add`) | Yes |
+| `ai.json` | You (or `spm init`, `spm add`, `spm remove`, `spm target add`, `spm target remove`) | Yes |
 | `ai.lock` | spm, on every successful sync | Yes |
 | Materialized skills (for example `.spm/claude/`, `.agents/skills/spm-managed-skills/`) | spm | No, gitignored |
 | Global store (`$SPM_HOME/store`, default `~/.spm/store`) | spm | No, a fetch cache shared by all projects |
@@ -25,11 +25,11 @@ gitignored and never committed. Run `spm --help` or
   then run `spm install`.
 - Do not commit materialized skills. spm adds them to `.gitignore` for you.
 - By default commands work on the project in the current directory. `init`,
-  `add`, `remove`, `update`, `install`, `list`, `status`, `outdated` and `clean` accept `-g`
-  or `--global` to switch to the user-global scope (see
-  [Global scope](#global-scope)). `target add` is always project-only, `scan`
-  works on the path it is given, and `prune` always empties the global cache;
-  none of those three accepts `-g`.
+  `add`, `remove`, `update`, `install`, `list`, `status`, `outdated`, `clean`,
+  `target add` and `target remove` accept `-g` or `--global` to switch to the
+  user-global scope (see [Global scope](#global-scope)). `scan` works on the
+  path it is given and `prune` always empties the global cache; neither accepts
+  `-g`.
 - Requires the system `git` on `PATH`. spm never handles credentials itself.
 
 ## Which command to run
@@ -48,6 +48,7 @@ gitignored and never committed. Run `spm --help` or
 | Check what is materialized in this checkout | `spm status --json` |
 | Drop a skill | `spm remove <name>` |
 | Also use another AI tool | `spm target add <vendor>` |
+| Stop using an AI tool | `spm target remove <vendor>` |
 | Review a skill before installing it | `spm scan <path> --json` |
 | Undo all generated tool config for this project | `spm clean` |
 | Free disk space in the global cache | `spm prune` |
@@ -196,16 +197,29 @@ which behave as under [`spm add`](#spm-add).
 ### `spm target add`
 
 ```bash
-spm target add [vendor[,vendor...]] [--protocol ssh|https] [--protocol-fallback]
+spm target add [vendor[,vendor...]] [-g] [--protocol ssh|https] [--protocol-fallback]
 ```
 
 Adds target tools to `ai.json` and materializes existing skills for them. With
 no vendor it asks interactively, reading a numbered choice from stdin, so
 always pass vendors explicitly when running non-interactively. Adding a target
-that is already configured is a skip, not an error. This command has no `-g`
-flag and always works on the current project. It re-materializes every declared
-skill, so it accepts `--protocol`/`--protocol-fallback`, which behave as under
-[`spm add`](#spm-add).
+that is already configured is a skip, not an error. With `-g` it adds to the
+global manifest. It re-materializes every declared skill, so it accepts
+`--protocol`/`--protocol-fallback`, which behave as under [`spm add`](#spm-add).
+
+### `spm target remove`
+
+```bash
+spm target remove <vendor>[,<vendor>...] [-g]
+```
+
+Alias: `spm target rm`. Removes target tools from `ai.json` and deletes what spm
+materialized for them; the user's own skills in a shared dir are left alone. An
+unknown vendor is an error and changes nothing; a vendor that is not configured
+is a skip. A skills dir still used by a remaining target (`codex` and `amp`
+share `.agents/skills`) is kept. It refuses to remove the last target: use
+`spm clean` instead. With `-g` it works on the global manifest. It does not
+fetch or sync, and leaves `.gitignore` unchanged.
 
 ### `spm list`
 
@@ -406,12 +420,10 @@ user-global tool directories, so the skills are available in every project.
 Use it only when the user asks for a skill "everywhere" or "globally".
 On a first-time setup run `spm init -g` (safe to repeat) before `spm add -g`,
 which fails with `no ai.json found` otherwise. Pass the user's agent to the global
-init with `--target <vendor>` (it defaults to `claude`): no CLI command retargets a
-global manifest afterwards, because `target add` operates only on a project manifest
-and a repeated `init` is a no-op, so a non-Claude user who takes the default would
-materialize the skill for the wrong agent. It is still recoverable by hand — edit the
-`targets` array in `$SPM_HOME/ai.json` and run `spm install -g` — but passing
-`--target` up front avoids it. Global Claude skills are invoked as
+init with `--target <vendor>`: it defaults to `claude` and a repeated `init` is a
+no-op, so a non-Claude user who takes the default would materialize the skill for
+the wrong agent. To fix that afterwards, run `spm target add -g <vendor>` and then
+`spm target remove -g claude`. Global Claude skills are invoked as
 `/spm-global:<name>`, project ones as `/spm:<name>`.
 
 ## Content scan

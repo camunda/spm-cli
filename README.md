@@ -308,7 +308,8 @@ spm init [--target amp|claude|cline|codex|copilot|cursor|gemini|windsurf ...] [-
 spm add <git> [--tag|--branch|--commit <v>] \      # add + install a skill (no selector = default branch; github.com/owner/repo@ref also works)
         [--path <subdir>] [--name <local-name>] [--all] [-g]  # --all: add every skill under --path
         [--plugin]                                 # --plugin: add a full plugin (see "Full plugins")
-spm target add [vendor ...]                        # add target vendor(s); no arg = pick interactively
+spm target add [vendor ...] [-g]                   # add target vendor(s); no arg = pick interactively
+spm target remove <vendor ...> [-g]               # drop target vendor(s) + clean their output; alias: rm
 spm remove <name> [--plugin] [-g]                  # drop a skill (or a plugin with --plugin); alias: rm
 spm update [name] [-g]                              # re-resolve branches/tags to latest
 spm install [-g] [--locked]                        # rebuild from ai.lock (after clone); alias: i; --locked fails if ai.lock is out of sync (CI)
@@ -336,9 +337,8 @@ to use which, and how to fix common failures. Install it with `spm` itself:
 # In a project (needs an `ai.json` — run `spm init` first if the project has none):
 spm add https://github.com/camunda/spm-cli --branch main --path skills/spm
 # ...or for every project. Pass your agent's vendor to the global init — it defaults
-# to `claude`, and no CLI command retargets a global manifest afterwards (`target add`
-# is project-only and a repeated `init` is a no-op), though you can still fix it by
-# editing the `targets` array in `$SPM_HOME/ai.json` and running `spm install -g`:
+# to `claude` (a repeated `init` is a no-op); to fix it afterwards, run
+# `spm target add -g <vendor>` and `spm target remove -g claude`:
 spm init -g --target copilot && spm add -g https://github.com/camunda/spm-cli --branch main --path skills/spm
 ```
 

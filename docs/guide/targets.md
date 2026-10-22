@@ -10,7 +10,14 @@ Add or remove targets at any time:
 ```bash
 spm target add            # pick interactively
 spm target add copilot    # or name one or more explicitly
+spm target remove cursor  # drop a target and clean what spm materialized for it
 ```
+
+`spm target remove` removes only spm-managed output (your own skills in a shared
+dir stay), skips a dir another configured target still uses (`codex` and `amp`
+share the project's `.agents/skills`), and refuses to remove the last target —
+use `spm clean` for that. Both accept `-g` to retarget the
+[global manifest](/guide/global-skills).
 
 ## Claude Code
 

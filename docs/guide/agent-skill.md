@@ -25,12 +25,11 @@ spm add https://github.com/camunda/spm-cli --branch main --path skills/spm
 Use `--tag <version>` instead of `--branch main` to pin a release that contains
 the skill. To make it available in every project, use the global scope. `spm add -g`
 needs the global manifest to exist, so run `spm init -g` first (it is safe to repeat).
-Pass your agent's vendor with `--target`: global init defaults to `claude`, and
-because `target add` only works on a project manifest and a repeated `init` is a
-no-op, no CLI command retargets the global manifest afterwards — a Copilot (or
-other) user who takes the default would install the skill for the wrong agent. It
-stays fixable by hand (edit the `targets` array in `$SPM_HOME/ai.json` and run
-`spm install -g`), but passing `--target` up front avoids it:
+Pass your agent's vendor with `--target`: global init defaults to `claude` and a
+repeated `init` is a no-op, so a Copilot (or other) user who takes the default
+would install the skill for the wrong agent. It stays fixable with
+`spm target add -g copilot && spm target remove -g claude`, but passing
+`--target` up front avoids it:
 
 ```bash
 spm init -g --target copilot
