@@ -2111,6 +2111,27 @@ fn target_remove_keeps_metadata_a_remaining_target_loads_through_a_symlink() {
     assert!(manifest.exists(), "claude's marketplace.json must survive");
 }
 
+/// Claude's settings file registers its marketplace: removing another target
+/// must not delete it when it is a symlink into that target's output.
+#[cfg(unix)]
+#[test]
+fn target_remove_keeps_settings_a_remaining_target_loads_through_a_symlink() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude,copilot"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let settings = sb.project.join(".claude/settings.local.json");
+    let moved = sb
+        .project
+        .join(".agents/skills/spm-managed-skills/claude-settings.json");
+    std::fs::rename(&settings, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &settings).unwrap();
+
+    let out = sb.ok(&["target", "remove", "copilot"]);
+    assert!(out.contains("still used by target `claude`"), "{out}");
+    let kept = sb.read(".claude/settings.local.json");
+    assert!(kept.contains("spm@spm"), "claude registration kept: {kept}");
+}
+
 /// On a case-insensitive filesystem `.AGENTS` and `.agents` are one dir: a
 /// remaining target's output must be recognised however it is spelled.
 #[cfg(unix)]

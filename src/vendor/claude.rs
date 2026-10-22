@@ -108,8 +108,8 @@ impl Vendor for Claude {
 
     fn skill_paths(&self, scope: &Scope, _managed: &[String]) -> Result<Vec<PathBuf>> {
         // Claude loads the whole marketplace — its `.claude-plugin/` metadata as
-        // well as the skills — so all of it is needed.
-        Ok(vec![managed_dir(scope)?])
+        // well as the skills — registered through its settings file.
+        Ok(vec![managed_dir(scope)?, settings_path(scope)?])
     }
 
     fn deregister(&self, scope: &Scope) -> Result<()> {
@@ -249,7 +249,7 @@ impl Vendor for Claude {
     }
 
     fn plugin_paths(&self, scope: &Scope, _managed: &[String]) -> Result<Vec<PathBuf>> {
-        Ok(vec![plugins_managed_dir(scope)?])
+        Ok(vec![plugins_managed_dir(scope)?, settings_path(scope)?])
     }
 
     fn deregister_plugins(&self, scope: &Scope) -> Result<()> {
