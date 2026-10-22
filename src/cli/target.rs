@@ -110,25 +110,30 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
 
     let lock = Lockfile::load_or_default(&dir)?;
     let (managed, managed_plugins) = managed_names(&lock);
-    // Skills dirs still written by a remaining target (e.g. `.agents/skills`,
-    // shared by `codex` and `amp`, or a vendor dir symlinked onto another's):
-    // cleaning them would delete skills that target still loads.
-    let mut kept_dirs = Vec::new();
+    // Paths a remaining target still loads skills from, resolved through
+    // symlinks. A removed vendor must not delete any of them or an ancestor —
+    // e.g. `codex` and `amp` share `.agents/skills/<name>/`, and a vendor dir may
+    // be symlinked onto (or into) another target's output.
+    let mut needed = Vec::new();
     for t in &remaining {
-        let d = resolved_dir(&vendor::for_target(t)?.skills_dir(scope)?)?;
-        kept_dirs.push((t.as_str(), d));
+        for p in vendor::for_target(t)?.skill_paths(scope, &managed)? {
+            needed.push((t.as_str(), resolved_path(&p)?));
+        }
     }
     for t in &removed {
         let v = vendor::for_target(t)?;
-        let skills_dir = v.skills_dir(scope)?;
-        let resolved = resolved_dir(&skills_dir)?;
-        match kept_dirs.iter().find(|(_, d)| *d == resolved) {
-            Some((owner, _)) => println!(
-                "keeping {}: still used by target `{owner}`",
-                skills_dir.display()
-            ),
-            None => v.clean(scope, &lock.id, &managed)?,
+        let mut deletable = Vec::new();
+        for p in v.clean_paths(scope, &managed)? {
+            let resolved = resolved_path(&p)?;
+            match needed.iter().find(|(_, n)| n.starts_with(&resolved)) {
+                Some((owner, _)) => {
+                    println!("keeping {}: still used by target `{owner}`", p.display())
+                }
+                None => deletable.push(p),
+            }
         }
+        vendor::remove_paths(&deletable)?;
+        v.deregister(scope)?;
         v.clean_plugins(scope, &lock.id, &managed_plugins)?;
     }
 
@@ -138,15 +143,15 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-/// The directory `dir` actually resolves to, so two spellings of one dir (e.g.
-/// via a symlink) compare equal. A missing dir has nothing to clean and is kept
-/// as spelled; any other resolution error is propagated rather than treated as
-/// "not shared".
-fn resolved_dir(dir: &Path) -> Result<PathBuf> {
-    match std::fs::canonicalize(dir) {
-        Ok(p) => Ok(p),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(dir.to_path_buf()),
-        Err(e) => Err(anyhow!(e).context(format!("resolving {}", dir.display()))),
+/// The path `p` actually resolves to, so two spellings of one location (e.g.
+/// via a symlink) compare equal. A missing path holds nothing to delete or
+/// protect and is kept as spelled; any other resolution error is propagated
+/// rather than treated as "not shared".
+fn resolved_path(p: &Path) -> Result<PathBuf> {
+    match std::fs::canonicalize(p) {
+        Ok(r) => Ok(r),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(p.to_path_buf()),
+        Err(e) => Err(anyhow!(e).context(format!("resolving {}", p.display()))),
     }
 }
 

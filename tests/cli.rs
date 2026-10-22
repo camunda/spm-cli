@@ -1969,6 +1969,43 @@ fn target_remove_keeps_skills_dir_aliased_by_symlink_to_a_remaining_target() {
     assert!(greet.exists(), "codex's skills must survive via the alias");
 }
 
+/// Nested aliasing: `.cursor/skills` symlinked into Claude's marketplace payload
+/// dir. Neither removal may delete skills the other target still loads, and
+/// removing Claude must still deregister it from settings.
+#[cfg(unix)]
+#[test]
+fn target_remove_keeps_output_nested_in_another_targets_dir() {
+    for (removed, kept) in [("cursor", "claude"), ("claude", "cursor")] {
+        let sb = Sandbox::new();
+        std::fs::create_dir_all(sb.project.join(".cursor")).unwrap();
+        std::os::unix::fs::symlink(
+            "../.spm/claude/plugin/skills",
+            sb.project.join(".cursor/skills"),
+        )
+        .unwrap();
+        sb.ok(&["init", "--target", "claude,cursor"]);
+        sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+        let greet = sb.claude_market_dir().join("plugin/skills/greet/SKILL.md");
+        assert!(greet.exists());
+
+        let out = sb.ok(&["target", "remove", removed]);
+        assert!(
+            out.contains(&format!("still used by target `{kept}`")),
+            "{out}"
+        );
+        assert!(
+            greet.exists(),
+            "removing {removed} must keep the skill {kept} still loads"
+        );
+        let settings = sb.read(".claude/settings.local.json");
+        assert_eq!(
+            settings.contains("spm@spm"),
+            removed == "cursor",
+            "claude is deregistered only when removed: {settings}"
+        );
+    }
+}
+
 #[test]
 fn target_remove_unconfigured_is_a_skip_and_unknown_changes_nothing() {
     let sb = Sandbox::new();

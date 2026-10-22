@@ -13,7 +13,7 @@ pub(super) fn clean(scope: &Scope) -> Result<()> {
     let (managed, managed_plugins) = managed_names(&lock);
     for target in &manifest.targets {
         let vendor = vendor::for_target(target)?;
-        vendor.clean(scope, &lock.id, &managed)?;
+        vendor.clean(scope, &managed)?;
         vendor.clean_plugins(scope, &lock.id, &managed_plugins)?;
     }
     println!(

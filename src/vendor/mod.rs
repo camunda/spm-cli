@@ -4,7 +4,7 @@ mod dirskills;
 mod shareddir;
 
 use crate::scope::Scope;
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -119,16 +119,30 @@ pub trait Vendor {
         previously_managed: &[String],
     ) -> Result<()>;
 
-    /// Remove everything this vendor generated for this `scope`. `managed` lists
-    /// the skill names spm currently owns (from the lockfile); global vendors
-    /// sharing a directory with the user's skills remove only those.
-    fn clean(&self, scope: &Scope, project_id: &str, managed: &[String]) -> Result<()>;
+    /// Remove everything this vendor generated for this `scope`: deletes each of
+    /// [`clean_paths`](Vendor::clean_paths), then [`deregister`](Vendor::deregister)s.
+    /// `managed` lists the skill names spm currently owns (from the lockfile).
+    fn clean(&self, scope: &Scope, managed: &[String]) -> Result<()> {
+        remove_paths(&self.clean_paths(scope, managed)?)?;
+        self.deregister(scope)
+    }
 
-    /// The directory this vendor materializes skills into for `scope` — the one
-    /// [`clean`](Vendor::clean) removes from. Two targets returning the same path
-    /// share it (e.g. `codex` and `amp` both use the project's `.agents/skills`),
-    /// so removing one must not clean it while the other is still configured.
-    fn skills_dir(&self, scope: &Scope) -> Result<PathBuf>;
+    /// The paths [`clean`](Vendor::clean) deletes for `scope`. Vendors sharing a
+    /// dir with the user's own skills list only the `managed` entries in it.
+    fn clean_paths(&self, scope: &Scope, managed: &[String]) -> Result<Vec<PathBuf>>;
+
+    /// The path this vendor loads each `managed` skill from in `scope`. Another
+    /// target's [`clean_paths`](Vendor::clean_paths) must not delete these (or an
+    /// ancestor) while this vendor is still configured — e.g. `codex` and `amp`
+    /// share the project's `.agents/skills/<name>/`.
+    fn skill_paths(&self, scope: &Scope, managed: &[String]) -> Result<Vec<PathBuf>>;
+
+    /// Drop the config pointing this vendor at spm's output (e.g. Claude's
+    /// settings entries) without deleting the output itself. Default: nothing to
+    /// drop.
+    fn deregister(&self, _scope: &Scope) -> Result<()> {
+        Ok(())
+    }
 
     /// Report what this vendor has materialized in the given `scope`, compared
     /// against the declared `expected` skill names (from `ai.lock`).
@@ -171,6 +185,17 @@ pub trait Vendor {
     fn clean_plugins(&self, _scope: &Scope, _project_id: &str, _managed: &[String]) -> Result<()> {
         Ok(())
     }
+}
+
+/// Delete each directory in `paths`, ignoring absent ones. A symlink is removed
+/// itself, never followed.
+pub fn remove_paths(paths: &[PathBuf]) -> Result<()> {
+    for p in paths {
+        if p.is_dir() {
+            std::fs::remove_dir_all(p).with_context(|| format!("removing {}", p.display()))?;
+        }
+    }
+    Ok(())
 }
 
 /// Every target vendor spm knows how to materialize. Single source of truth for

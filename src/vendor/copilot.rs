@@ -80,28 +80,21 @@ impl Vendor for Copilot {
         }
     }
 
-    fn clean(&self, scope: &Scope, _project_id: &str, managed: &[String]) -> Result<()> {
-        let dir = skills_dir(scope)?;
+    fn clean_paths(&self, scope: &Scope, managed: &[String]) -> Result<Vec<PathBuf>> {
         match scope {
-            Scope::Project { .. } => {
-                if dir.exists() {
-                    std::fs::remove_dir_all(&dir)
-                        .with_context(|| format!("removing {}", dir.display()))?;
-                }
-                // `.gitignore` is intentionally left untouched: the entry spm
-                // added is harmless once the materialized dir is gone, and
-                // rewriting a user-owned file on `clean` risks clobbering it.
-            }
-            Scope::Global => {
-                // Shared dir: remove only the skills spm owns, never the whole dir.
-                remove_managed(&dir, managed.iter().map(String::as_str))?;
-            }
+            // The project dir is wholly spm-owned. `.gitignore` is intentionally
+            // left untouched: the entry spm added is harmless once the
+            // materialized dir is gone, and rewriting a user-owned file on
+            // `clean` risks clobbering it.
+            Scope::Project { .. } => Ok(vec![skills_dir(scope)?]),
+            // Shared dir: only the skills spm owns, never the whole dir.
+            Scope::Global => self.skill_paths(scope, managed),
         }
-        Ok(())
     }
 
-    fn skills_dir(&self, scope: &Scope) -> Result<PathBuf> {
-        skills_dir(scope)
+    fn skill_paths(&self, scope: &Scope, managed: &[String]) -> Result<Vec<PathBuf>> {
+        let dir = skills_dir(scope)?;
+        Ok(managed.iter().map(|n| dir.join(n)).collect())
     }
 
     fn status(&self, scope: &Scope, expected: &[String]) -> Result<super::VendorStatus> {
