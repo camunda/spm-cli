@@ -2053,6 +2053,42 @@ fn target_remove_keeps_output_nested_in_another_targets_plugin() {
     }
 }
 
+/// Chained aliasing: `.cursor/skills` -> Claude's payload dir, which itself is a
+/// symlink elsewhere. Removing Claude must keep the intermediate link Cursor
+/// reaches its skills through, not just the final files.
+#[cfg(unix)]
+#[test]
+fn target_remove_keeps_intermediate_symlink_a_remaining_target_traverses() {
+    for (removed, kept) in [("claude", "cursor"), ("cursor", "claude")] {
+        let sb = Sandbox::new();
+        std::fs::create_dir_all(sb.project.join(".cursor")).unwrap();
+        std::os::unix::fs::symlink(
+            "../.spm/claude/plugin/skills",
+            sb.project.join(".cursor/skills"),
+        )
+        .unwrap();
+        sb.ok(&["init", "--target", "claude,cursor"]);
+        sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+        let payload = sb.claude_market_dir().join("plugin/skills");
+        let shared = sb.project.join("shared-skills");
+        std::fs::rename(&payload, &shared).unwrap();
+        std::os::unix::fs::symlink(&shared, &payload).unwrap();
+        let via_cursor = sb.project.join(".cursor/skills/greet/SKILL.md");
+        assert!(via_cursor.exists());
+
+        let out = sb.ok(&["target", "remove", removed]);
+        assert!(
+            out.contains(&format!("still used by target `{kept}`")),
+            "{out}"
+        );
+        assert!(
+            via_cursor.exists(),
+            "removing {removed} must keep every link {kept} loads through"
+        );
+        assert!(shared.join("greet/SKILL.md").exists());
+    }
+}
+
 #[test]
 fn target_remove_unconfigured_is_a_skip_and_unknown_changes_nothing() {
     let sb = Sandbox::new();

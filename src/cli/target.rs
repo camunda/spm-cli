@@ -110,18 +110,21 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
 
     let lock = Lockfile::load_or_default(&dir)?;
     let (managed, managed_plugins) = managed_names(&lock);
-    // Paths a remaining target still loads skills or plugins from, resolved
-    // through symlinks. A removed vendor must not delete any of them, an
-    // ancestor, or anything inside one — e.g. `codex` and `amp` share
-    // `.agents/skills/<name>/`, and a vendor dir may be symlinked onto (or into)
-    // another target's output.
+    // Physical locations a remaining target still loads skills or plugins
+    // through: every symlink traversed on the way plus the final dir. A removed
+    // vendor must not delete any of them, an ancestor, or anything inside one —
+    // e.g. `codex` and `amp` share `.agents/skills/<name>/`, and a vendor dir may
+    // be symlinked onto (or into) another target's output.
     let mut needed = Vec::new();
     for t in &remaining {
         let v = vendor::for_target(t)?;
         let mut paths = v.skill_paths(scope, &managed)?;
         paths.extend(v.plugin_paths(scope, &managed_plugins)?);
         for p in paths {
-            needed.push((t.as_str(), resolved_path(&p)?));
+            let mut chain = Vec::new();
+            let fin = resolve(&p, &mut chain)?;
+            needed.extend(chain.into_iter().map(|c| (t.as_str(), c)));
+            needed.push((t.as_str(), fin));
         }
     }
     for t in &removed {
@@ -130,10 +133,10 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
         candidates.extend(v.plugin_clean_paths(scope, &managed_plugins)?);
         let mut deletable = Vec::new();
         for p in candidates {
-            let resolved = resolved_path(&p)?;
+            let target = deletion_target(&p)?;
             let owner = needed
                 .iter()
-                .find(|(_, n)| n.starts_with(&resolved) || resolved.starts_with(n));
+                .find(|(_, n)| n.starts_with(&target) || target.starts_with(n));
             match owner {
                 Some((owner, _)) => {
                     println!("keeping {}: still used by target `{owner}`", p.display())
@@ -152,16 +155,68 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-/// The path `p` actually resolves to, so two spellings of one location (e.g.
-/// via a symlink) compare equal. A missing path holds nothing to delete or
-/// protect and is kept as spelled; any other resolution error is propagated
-/// rather than treated as "not shared".
-fn resolved_path(p: &Path) -> Result<PathBuf> {
-    match std::fs::canonicalize(p) {
-        Ok(r) => Ok(r),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(p.to_path_buf()),
-        Err(e) => Err(anyhow!(e).context(format!("resolving {}", p.display()))),
+/// The physical location `remove_dir_all(p)` deletes: `p`'s parent resolved
+/// through symlinks, joined with its last component — which is not followed, as
+/// removing a symlink removes only the link.
+fn deletion_target(p: &Path) -> Result<PathBuf> {
+    match (p.parent(), p.file_name()) {
+        (Some(parent), Some(name)) => Ok(resolve(parent, &mut Vec::new())?.join(name)),
+        _ => resolve(p, &mut Vec::new()),
     }
+}
+
+/// Resolve absolute path `p` through symlinks component by component, returning
+/// the physical location and pushing the location of every symlink traversed
+/// onto `chain`. Missing components are kept as spelled (they hold nothing to
+/// delete or protect); other errors, including a symlink loop, are propagated
+/// rather than treated as "not shared".
+fn resolve(p: &Path, chain: &mut Vec<PathBuf>) -> Result<PathBuf> {
+    resolve_hops(p, chain, &mut 0)
+}
+
+fn resolve_hops(p: &Path, chain: &mut Vec<PathBuf>, hops: &mut u32) -> Result<PathBuf> {
+    use std::path::Component;
+    const MAX_HOPS: u32 = 40;
+    let mut cur = PathBuf::new();
+    let mut missing = false;
+    for comp in p.components() {
+        match comp {
+            Component::Prefix(_) | Component::RootDir => cur.push(comp),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                cur.pop();
+            }
+            Component::Normal(name) => {
+                let next = cur.join(name);
+                if missing {
+                    cur = next;
+                    continue;
+                }
+                match std::fs::symlink_metadata(&next) {
+                    Ok(m) if m.file_type().is_symlink() => {
+                        *hops += 1;
+                        if *hops > MAX_HOPS {
+                            bail!("too many levels of symbolic links at {}", next.display());
+                        }
+                        let link = std::fs::read_link(&next).map_err(|e| {
+                            anyhow!(e).context(format!("reading {}", next.display()))
+                        })?;
+                        chain.push(next);
+                        cur = resolve_hops(&cur.join(link), chain, hops)?;
+                    }
+                    Ok(_) => cur = next,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        missing = true;
+                        cur = next;
+                    }
+                    Err(e) => {
+                        return Err(anyhow!(e).context(format!("resolving {}", next.display())))
+                    }
+                }
+            }
+        }
+    }
+    Ok(cur)
 }
 
 /// Interactive numbered picker over the vendors not yet configured. Reads a
@@ -207,4 +262,44 @@ fn prompt_targets(available: &[&str]) -> Result<Vec<String>> {
         }
     }
     Ok(chosen)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("spm-target-{name}-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        resolve(&dir, &mut Vec::new()).unwrap()
+    }
+
+    #[test]
+    fn resolve_records_every_link_and_keeps_missing_tail() {
+        let tmp = scratch("chain");
+        std::fs::create_dir_all(tmp.join("real")).unwrap();
+        std::os::unix::fs::symlink("real", tmp.join("b")).unwrap();
+        std::os::unix::fs::symlink(tmp.join("b"), tmp.join("a")).unwrap();
+        let mut chain = Vec::new();
+        let got = resolve(&tmp.join("a/missing/x"), &mut chain).unwrap();
+        assert_eq!(got, tmp.join("real/missing/x"));
+        assert_eq!(chain, [tmp.join("a"), tmp.join("b")]);
+        assert_eq!(deletion_target(&tmp.join("a")).unwrap(), tmp.join("a"));
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn resolve_rejects_symlink_loops() {
+        let tmp = scratch("loop");
+        std::os::unix::fs::symlink("y", tmp.join("x")).unwrap();
+        std::os::unix::fs::symlink("x", tmp.join("y")).unwrap();
+        let err = resolve(&tmp.join("x/z"), &mut Vec::new()).unwrap_err();
+        assert!(err.to_string().contains("too many levels"), "{err}");
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
 }
