@@ -131,10 +131,12 @@ pub trait Vendor {
     /// dir with the user's own skills list only the `managed` entries in it.
     fn clean_paths(&self, scope: &Scope, managed: &[String]) -> Result<Vec<PathBuf>>;
 
-    /// The path this vendor loads each `managed` skill from in `scope`. Another
-    /// target's [`clean_paths`](Vendor::clean_paths) must not delete these (or an
-    /// ancestor) while this vendor is still configured — e.g. `codex` and `amp`
-    /// share the project's `.agents/skills/<name>/`.
+    /// The paths this vendor loads the `managed` skills (and any metadata they
+    /// need, e.g. a marketplace manifest) from in `scope`. Another target's
+    /// [`clean_paths`](Vendor::clean_paths) must not delete these, an ancestor,
+    /// anything inside them, or anything they reach through a symlink while this
+    /// vendor is still configured — e.g. `codex` and `amp` share the project's
+    /// `.agents/skills/<name>/`.
     fn skill_paths(&self, scope: &Scope, managed: &[String]) -> Result<Vec<PathBuf>>;
 
     /// Drop the config pointing this vendor at spm's output (e.g. Claude's
@@ -194,8 +196,8 @@ pub trait Vendor {
         Ok(Vec::new())
     }
 
-    /// The path this vendor loads each `managed` full plugin from, which no other
-    /// target may delete (or delete inside) while this vendor is configured.
+    /// The paths this vendor loads the `managed` full plugins (and their
+    /// metadata) from, protected like [`skill_paths`](Vendor::skill_paths).
     /// Default: none.
     fn plugin_paths(&self, _scope: &Scope, _managed: &[String]) -> Result<Vec<PathBuf>> {
         Ok(Vec::new())

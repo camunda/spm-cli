@@ -4,7 +4,7 @@ use crate::lockfile::Lockfile;
 use crate::manifest::Manifest;
 use crate::scope::Scope;
 use crate::vendor;
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use std::path::{Path, PathBuf};
 
 /// `spm target add [vendors...]`: append target vendors to an existing ai.json
@@ -110,23 +110,29 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
 
     let lock = Lockfile::load_or_default(&dir)?;
     let (managed, managed_plugins) = managed_names(&lock);
-    // Physical locations a remaining target still loads skills or plugins
-    // from (`content`), plus every location its path traverses on the way
-    // (symlinks, and dirs passed through before a `..`). A removed vendor must
-    // not delete a traversed location or its ancestors, nor content, its
-    // ancestors or anything inside it — e.g. `codex` and `amp` share
+    // Physical locations a remaining target still loads skills, plugins or
+    // their metadata from (`content`), plus every location reaching them
+    // depends on (`traversed`: symlinks, and dirs passed through before a
+    // `..`), including symlinks nested anywhere inside the content. A removed
+    // vendor must not delete a traversed location or its ancestors, nor content,
+    // its ancestors or anything inside it — e.g. `codex` and `amp` share
     // `.agents/skills/<name>/`, and a vendor dir may be symlinked onto (or into)
-    // another target's output.
-    let mut needed: Vec<(&str, PathBuf, bool)> = Vec::new();
+    // another target's output. Locations are compared by filesystem identity so
+    // spelling aliases (e.g. case on a case-insensitive filesystem) still match.
+    let mut needed: Vec<(&str, Vec<NodeId>, bool)> = Vec::new();
     for t in &remaining {
         let v = vendor::for_target(t)?;
         let mut paths = v.skill_paths(scope, &managed)?;
         paths.extend(v.plugin_paths(scope, &managed_plugins)?);
+        let (mut traversed, mut content) = (Vec::new(), Vec::new());
+        let mut visited = std::collections::HashSet::new();
         for p in paths {
-            let mut traversed = Vec::new();
-            let content = resolve(&p, &mut traversed)?;
-            needed.extend(traversed.into_iter().map(|c| (t.as_str(), c, false)));
-            needed.push((t.as_str(), content, true));
+            reach(&p, &mut traversed, &mut content, &mut visited)?;
+        }
+        for (paths, is_content) in [(traversed, false), (content, true)] {
+            for p in paths {
+                needed.push((t.as_str(), identity(&p)?, is_content));
+            }
         }
     }
     for t in &removed {
@@ -135,7 +141,7 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
         candidates.extend(v.plugin_clean_paths(scope, &managed_plugins)?);
         let mut deletable = Vec::new();
         for p in candidates {
-            let target = deletion_target(&p)?;
+            let target = identity(&deletion_target(&p)?)?;
             let owner = needed.iter().find(|(_, n, content)| {
                 n.starts_with(&target) || (*content && target.starts_with(n))
             });
@@ -155,6 +161,104 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
     manifest.save(&dir)?;
     println!("removed target(s): {}", removed.join(", "));
     Ok(())
+}
+
+/// Record what loading from `p` depends on: resolve it (pushing traversed
+/// locations), push the physical location as content, then walk it for nested
+/// symlinks — each of which is a further dependency to resolve and reach.
+fn reach(
+    p: &Path,
+    traversed: &mut Vec<PathBuf>,
+    content: &mut Vec<PathBuf>,
+    visited: &mut std::collections::HashSet<PathBuf>,
+) -> Result<()> {
+    let fin = resolve(p, traversed)?;
+    if !visited.insert(fin.clone()) {
+        return Ok(());
+    }
+    content.push(fin.clone());
+    let mut dirs = vec![fin];
+    while let Some(dir) = dirs.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                continue
+            }
+            Err(e) => return Err(anyhow!(e).context(format!("reading {}", dir.display()))),
+        };
+        for entry in entries {
+            let entry = entry.with_context(|| format!("reading {}", dir.display()))?;
+            let ft = entry.file_type()?;
+            if ft.is_symlink() {
+                traversed.push(entry.path());
+                reach(&entry.path(), traversed, content, visited)?;
+            } else if ft.is_dir() {
+                dirs.push(entry.path());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One component of a path's filesystem identity (see [`identity`]).
+#[derive(Debug, PartialEq, Eq)]
+enum NodeId {
+    /// An existing entry, by device and inode (not following a final symlink).
+    #[cfg(unix)]
+    Inode(u64, u64),
+    /// A component without an inode to compare: missing, or on a platform
+    /// where it is compared by its case-folded name.
+    Name(String),
+}
+
+/// The identity of physical path `p` as one [`NodeId`] per component from the
+/// root, so `a` is `b` or an ancestor of it iff `identity(b)` starts with
+/// `identity(a)` — regardless of how either is spelled (e.g. `.AGENTS` vs
+/// `.agents` on a case-insensitive filesystem).
+fn identity(p: &Path) -> Result<Vec<NodeId>> {
+    let mut ids = Vec::new();
+    let mut cur = PathBuf::new();
+    let mut missing = false;
+    for comp in p.components() {
+        cur.push(comp);
+        if !missing {
+            match inode(&cur)? {
+                Some(id) => {
+                    ids.push(id);
+                    continue;
+                }
+                None => missing = true,
+            }
+        }
+        let name = comp.as_os_str().to_string_lossy();
+        ids.push(NodeId::Name(if cfg!(windows) {
+            name.to_lowercase()
+        } else {
+            name.into_owned()
+        }));
+    }
+    Ok(ids)
+}
+
+/// `p`'s inode identity, or `None` if it is missing (or the platform has none).
+#[cfg(unix)]
+fn inode(p: &Path) -> Result<Option<NodeId>> {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::symlink_metadata(p) {
+        Ok(m) => Ok(Some(NodeId::Inode(m.dev(), m.ino()))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(anyhow!(e).context(format!("inspecting {}", p.display()))),
+    }
+}
+
+#[cfg(not(unix))]
+fn inode(_p: &Path) -> Result<Option<NodeId>> {
+    Ok(None)
 }
 
 /// The physical location `remove_dir_all(p)` deletes: `p`'s parent resolved

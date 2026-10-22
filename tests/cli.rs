@@ -2089,6 +2089,61 @@ fn target_remove_keeps_intermediate_symlink_a_remaining_target_traverses() {
     }
 }
 
+/// Claude needs its marketplace metadata, not just the skill payloads: removing
+/// another target must not delete metadata Claude reaches through a symlink.
+#[cfg(unix)]
+#[test]
+fn target_remove_keeps_metadata_a_remaining_target_loads_through_a_symlink() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude,copilot"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let meta = sb.claude_market_dir().join(".claude-plugin");
+    let moved = sb
+        .project
+        .join(".agents/skills/spm-managed-skills/claude-meta");
+    std::fs::rename(&meta, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &meta).unwrap();
+    let manifest = meta.join("marketplace.json");
+    assert!(manifest.exists());
+
+    let out = sb.ok(&["target", "remove", "copilot"]);
+    assert!(out.contains("still used by target `claude`"), "{out}");
+    assert!(manifest.exists(), "claude's marketplace.json must survive");
+}
+
+/// On a case-insensitive filesystem `.AGENTS` and `.agents` are one dir: a
+/// remaining target's output must be recognised however it is spelled.
+#[cfg(unix)]
+#[test]
+fn target_remove_keeps_output_aliased_by_case_on_case_insensitive_fs() {
+    let probe = Sandbox::new();
+    std::fs::create_dir_all(probe.project.join("case-probe")).unwrap();
+    if !probe.project.join("CASE-PROBE").exists() {
+        eprintln!("skipping: filesystem is case-sensitive");
+        return;
+    }
+    for (removed, kept) in [("cursor", "codex"), ("codex", "cursor")] {
+        let sb = Sandbox::new();
+        std::fs::create_dir_all(sb.project.join(".AGENTS/skills")).unwrap();
+        std::fs::create_dir_all(sb.project.join(".cursor")).unwrap();
+        std::os::unix::fs::symlink("../.AGENTS/skills", sb.project.join(".cursor/skills")).unwrap();
+        sb.ok(&["init", "--target", "cursor,codex"]);
+        sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+        let skill = sb.project.join(".agents/skills/greet/SKILL.md");
+        assert!(skill.exists());
+
+        let out = sb.ok(&["target", "remove", removed]);
+        assert!(
+            out.contains(&format!("still used by target `{kept}`")),
+            "{out}"
+        );
+        assert!(
+            skill.exists(),
+            "removing {removed} must keep {kept}'s skill"
+        );
+    }
+}
+
 /// A relative `SPM_HOME` yields relative Claude global paths; they must still be
 /// compared against other vendors' absolute paths for the same output.
 #[cfg(unix)]

@@ -106,9 +106,10 @@ impl Vendor for Claude {
         Ok(vec![managed_dir(scope)?])
     }
 
-    fn skill_paths(&self, scope: &Scope, managed: &[String]) -> Result<Vec<PathBuf>> {
-        let dir = managed_dir(scope)?.join("plugin").join("skills");
-        Ok(managed.iter().map(|n| dir.join(n)).collect())
+    fn skill_paths(&self, scope: &Scope, _managed: &[String]) -> Result<Vec<PathBuf>> {
+        // Claude loads the whole marketplace — its `.claude-plugin/` metadata as
+        // well as the skills — so all of it is needed.
+        Ok(vec![managed_dir(scope)?])
     }
 
     fn deregister(&self, scope: &Scope) -> Result<()> {
@@ -247,9 +248,8 @@ impl Vendor for Claude {
         Ok(vec![plugins_managed_dir(scope)?])
     }
 
-    fn plugin_paths(&self, scope: &Scope, managed: &[String]) -> Result<Vec<PathBuf>> {
-        let dir = plugins_managed_dir(scope)?;
-        Ok(managed.iter().map(|n| dir.join(n)).collect())
+    fn plugin_paths(&self, scope: &Scope, _managed: &[String]) -> Result<Vec<PathBuf>> {
+        Ok(vec![plugins_managed_dir(scope)?])
     }
 
     fn deregister_plugins(&self, scope: &Scope) -> Result<()> {
