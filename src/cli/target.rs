@@ -110,22 +110,31 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
 
     let lock = Lockfile::load_or_default(&dir)?;
     let (managed, managed_plugins) = managed_names(&lock);
-    // Paths a remaining target still loads skills from, resolved through
-    // symlinks. A removed vendor must not delete any of them or an ancestor —
-    // e.g. `codex` and `amp` share `.agents/skills/<name>/`, and a vendor dir may
-    // be symlinked onto (or into) another target's output.
+    // Paths a remaining target still loads skills or plugins from, resolved
+    // through symlinks. A removed vendor must not delete any of them, an
+    // ancestor, or anything inside one — e.g. `codex` and `amp` share
+    // `.agents/skills/<name>/`, and a vendor dir may be symlinked onto (or into)
+    // another target's output.
     let mut needed = Vec::new();
     for t in &remaining {
-        for p in vendor::for_target(t)?.skill_paths(scope, &managed)? {
+        let v = vendor::for_target(t)?;
+        let mut paths = v.skill_paths(scope, &managed)?;
+        paths.extend(v.plugin_paths(scope, &managed_plugins)?);
+        for p in paths {
             needed.push((t.as_str(), resolved_path(&p)?));
         }
     }
     for t in &removed {
         let v = vendor::for_target(t)?;
+        let mut candidates = v.clean_paths(scope, &managed)?;
+        candidates.extend(v.plugin_clean_paths(scope, &managed_plugins)?);
         let mut deletable = Vec::new();
-        for p in v.clean_paths(scope, &managed)? {
+        for p in candidates {
             let resolved = resolved_path(&p)?;
-            match needed.iter().find(|(_, n)| n.starts_with(&resolved)) {
+            let owner = needed
+                .iter()
+                .find(|(_, n)| n.starts_with(&resolved) || resolved.starts_with(n));
+            match owner {
                 Some((owner, _)) => {
                     println!("keeping {}: still used by target `{owner}`", p.display())
                 }
@@ -134,7 +143,7 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
         }
         vendor::remove_paths(&deletable)?;
         v.deregister(scope)?;
-        v.clean_plugins(scope, &lock.id, &managed_plugins)?;
+        v.deregister_plugins(scope)?;
     }
 
     manifest.targets = remaining;

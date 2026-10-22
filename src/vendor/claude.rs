@@ -243,12 +243,17 @@ impl Vendor for Claude {
         Ok(Some(st))
     }
 
-    fn clean_plugins(&self, scope: &Scope, _project_id: &str, _managed: &[String]) -> Result<()> {
+    fn plugin_clean_paths(&self, scope: &Scope, _managed: &[String]) -> Result<Vec<PathBuf>> {
+        Ok(vec![plugins_managed_dir(scope)?])
+    }
+
+    fn plugin_paths(&self, scope: &Scope, managed: &[String]) -> Result<Vec<PathBuf>> {
+        let dir = plugins_managed_dir(scope)?;
+        Ok(managed.iter().map(|n| dir.join(n)).collect())
+    }
+
+    fn deregister_plugins(&self, scope: &Scope) -> Result<()> {
         let market = plugins_marketplace(scope);
-        let market_dir = plugins_managed_dir(scope)?;
-        if market_dir.exists() {
-            std::fs::remove_dir_all(&market_dir)?;
-        }
         let settings = settings_path(scope)?;
         if settings.exists() {
             let mut root = jsonutil::read_object(&settings)?;

@@ -2006,6 +2006,53 @@ fn target_remove_keeps_output_nested_in_another_targets_dir() {
     }
 }
 
+/// Plugins too: `.cursor/skills` symlinked into Claude's installed plugin copy.
+/// Neither removal may delete the bundled skill the other target loads, and
+/// removing Claude must still deregister its plugins marketplace.
+#[cfg(unix)]
+#[test]
+fn target_remove_keeps_output_nested_in_another_targets_plugin() {
+    for (removed, kept) in [("claude", "cursor"), ("cursor", "claude")] {
+        let sb = Sandbox::new();
+        sb.add_plugin();
+        std::fs::create_dir_all(sb.project.join(".cursor")).unwrap();
+        std::os::unix::fs::symlink(
+            "../.spm/claude-plugins/ds/skills",
+            sb.project.join(".cursor/skills"),
+        )
+        .unwrap();
+        sb.ok(&["init", "--target", "claude"]);
+        write_manifest(
+            &sb,
+            &format!(
+                r#"{{"targets":["claude","cursor"],"plugins":{{"ds":{{"git":"{}","branch":"main","path":"pkg"}}}}}}"#,
+                sb.skill_url()
+            ),
+        );
+        sb.ok(&["install"]);
+        let composer = sb
+            .project
+            .join(".spm/claude-plugins/ds/skills/composer/SKILL.md");
+        assert!(composer.exists());
+
+        let out = sb.ok(&["target", "remove", removed]);
+        assert!(
+            out.contains(&format!("still used by target `{kept}`")),
+            "{out}"
+        );
+        assert!(
+            composer.exists(),
+            "removing {removed} must keep the bundled skill {kept} still loads"
+        );
+        let settings = sb.read(".claude/settings.local.json");
+        assert_eq!(
+            settings.contains("spm-plugins"),
+            removed == "cursor",
+            "claude plugins deregistered only when claude is removed: {settings}"
+        );
+    }
+}
+
 #[test]
 fn target_remove_unconfigured_is_a_skip_and_unknown_changes_nothing() {
     let sb = Sandbox::new();

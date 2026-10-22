@@ -14,7 +14,7 @@ pub(super) fn clean(scope: &Scope) -> Result<()> {
     for target in &manifest.targets {
         let vendor = vendor::for_target(target)?;
         vendor.clean(scope, &managed)?;
-        vendor.clean_plugins(scope, &lock.id, &managed_plugins)?;
+        vendor.clean_plugins(scope, &managed_plugins)?;
     }
     println!(
         "cleaned generated {} config for target(s): {}",

@@ -180,9 +180,30 @@ pub trait Vendor {
     }
 
     /// Remove everything this vendor registered for full plugins in this
-    /// `scope`. Counterpart to [`materialize_plugins`](Vendor::materialize_plugins);
-    /// the default is a no-op for targets that never registered any.
-    fn clean_plugins(&self, _scope: &Scope, _project_id: &str, _managed: &[String]) -> Result<()> {
+    /// `scope`: deletes each of [`plugin_clean_paths`](Vendor::plugin_clean_paths),
+    /// then [`deregister_plugins`](Vendor::deregister_plugins). Counterpart to
+    /// [`materialize_plugins`](Vendor::materialize_plugins).
+    fn clean_plugins(&self, scope: &Scope, managed: &[String]) -> Result<()> {
+        remove_paths(&self.plugin_clean_paths(scope, managed)?)?;
+        self.deregister_plugins(scope)
+    }
+
+    /// The paths [`clean_plugins`](Vendor::clean_plugins) deletes. Default: none,
+    /// for targets that never register full plugins.
+    fn plugin_clean_paths(&self, _scope: &Scope, _managed: &[String]) -> Result<Vec<PathBuf>> {
+        Ok(Vec::new())
+    }
+
+    /// The path this vendor loads each `managed` full plugin from, which no other
+    /// target may delete (or delete inside) while this vendor is configured.
+    /// Default: none.
+    fn plugin_paths(&self, _scope: &Scope, _managed: &[String]) -> Result<Vec<PathBuf>> {
+        Ok(Vec::new())
+    }
+
+    /// Drop the config registering this vendor's full plugins without deleting
+    /// them. Default: nothing to drop.
+    fn deregister_plugins(&self, _scope: &Scope) -> Result<()> {
         Ok(())
     }
 }
