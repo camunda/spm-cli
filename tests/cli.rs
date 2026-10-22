@@ -2089,6 +2089,87 @@ fn target_remove_keeps_intermediate_symlink_a_remaining_target_traverses() {
     }
 }
 
+/// A relative `SPM_HOME` yields relative Claude global paths; they must still be
+/// compared against other vendors' absolute paths for the same output.
+#[cfg(unix)]
+#[test]
+fn target_remove_global_with_relative_spm_home_keeps_shared_output() {
+    for (removed, kept) in [("claude", "cursor"), ("cursor", "claude")] {
+        let sb = Sandbox::new();
+        let run = |args: &[&str]| {
+            let out = Command::new(env!("CARGO_BIN_EXE_spm"))
+                .args(args)
+                .current_dir(&sb.project)
+                .env("SPM_HOME", "rel-home")
+                .env("HOME", &sb.home)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "spm {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        let payload = sb.project.join("rel-home/claude-global/plugin/skills");
+        std::fs::create_dir_all(sb.home.join(".cursor")).unwrap();
+        std::os::unix::fs::symlink(&payload, sb.home.join(".cursor/skills")).unwrap();
+        run(&["init", "-g", "--target", "claude,cursor"]);
+        run(&[
+            "add",
+            "-g",
+            &sb.skill_url(),
+            "--tag",
+            "v0.1.0",
+            "--name",
+            "greet",
+        ]);
+        let greet = payload.join("greet/SKILL.md");
+        assert!(greet.exists());
+
+        let out = run(&["target", "remove", "-g", removed]);
+        assert!(
+            out.contains(&format!("still used by target `{kept}`")),
+            "{out}"
+        );
+        assert!(
+            greet.exists(),
+            "removing {removed} must keep the skill {kept} still loads"
+        );
+    }
+}
+
+/// A dir a remaining target's alias passes through before a `..` must survive,
+/// even though the skills themselves live elsewhere.
+#[cfg(unix)]
+#[test]
+fn target_remove_keeps_dir_traversed_before_dotdot_by_a_remaining_target() {
+    let sb = Sandbox::new();
+    std::fs::create_dir_all(sb.project.join(".spm/shared-skills")).unwrap();
+    std::fs::create_dir_all(sb.project.join(".cursor")).unwrap();
+    std::os::unix::fs::symlink(
+        "../.spm/claude/../shared-skills",
+        sb.project.join(".cursor/skills"),
+    )
+    .unwrap();
+    sb.ok(&["init", "--target", "claude,cursor"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let via_cursor = sb.project.join(".cursor/skills/greet/SKILL.md");
+    assert!(via_cursor.exists());
+
+    let out = sb.ok(&["target", "remove", "claude"]);
+    assert!(out.contains("still used by target `cursor`"), "{out}");
+    assert!(
+        via_cursor.exists(),
+        "cursor's alias must still resolve after removing claude"
+    );
+    let settings = sb.read(".claude/settings.local.json");
+    assert!(
+        !settings.contains("spm@spm"),
+        "claude deregistered: {settings}"
+    );
+}
+
 #[test]
 fn target_remove_unconfigured_is_a_skip_and_unknown_changes_nothing() {
     let sb = Sandbox::new();

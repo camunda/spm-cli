@@ -111,20 +111,22 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
     let lock = Lockfile::load_or_default(&dir)?;
     let (managed, managed_plugins) = managed_names(&lock);
     // Physical locations a remaining target still loads skills or plugins
-    // through: every symlink traversed on the way plus the final dir. A removed
-    // vendor must not delete any of them, an ancestor, or anything inside one —
-    // e.g. `codex` and `amp` share `.agents/skills/<name>/`, and a vendor dir may
-    // be symlinked onto (or into) another target's output.
-    let mut needed = Vec::new();
+    // from (`content`), plus every location its path traverses on the way
+    // (symlinks, and dirs passed through before a `..`). A removed vendor must
+    // not delete a traversed location or its ancestors, nor content, its
+    // ancestors or anything inside it — e.g. `codex` and `amp` share
+    // `.agents/skills/<name>/`, and a vendor dir may be symlinked onto (or into)
+    // another target's output.
+    let mut needed: Vec<(&str, PathBuf, bool)> = Vec::new();
     for t in &remaining {
         let v = vendor::for_target(t)?;
         let mut paths = v.skill_paths(scope, &managed)?;
         paths.extend(v.plugin_paths(scope, &managed_plugins)?);
         for p in paths {
-            let mut chain = Vec::new();
-            let fin = resolve(&p, &mut chain)?;
-            needed.extend(chain.into_iter().map(|c| (t.as_str(), c)));
-            needed.push((t.as_str(), fin));
+            let mut traversed = Vec::new();
+            let content = resolve(&p, &mut traversed)?;
+            needed.extend(traversed.into_iter().map(|c| (t.as_str(), c, false)));
+            needed.push((t.as_str(), content, true));
         }
     }
     for t in &removed {
@@ -134,11 +136,11 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
         let mut deletable = Vec::new();
         for p in candidates {
             let target = deletion_target(&p)?;
-            let owner = needed
-                .iter()
-                .find(|(_, n)| n.starts_with(&target) || target.starts_with(n));
+            let owner = needed.iter().find(|(_, n, content)| {
+                n.starts_with(&target) || (*content && target.starts_with(n))
+            });
             match owner {
-                Some((owner, _)) => {
+                Some((owner, ..)) => {
                     println!("keeping {}: still used by target `{owner}`", p.display())
                 }
                 None => deletable.push(p),
@@ -165,13 +167,20 @@ fn deletion_target(p: &Path) -> Result<PathBuf> {
     }
 }
 
-/// Resolve absolute path `p` through symlinks component by component, returning
-/// the physical location and pushing the location of every symlink traversed
-/// onto `chain`. Missing components are kept as spelled (they hold nothing to
-/// delete or protect); other errors, including a symlink loop, are propagated
-/// rather than treated as "not shared".
-fn resolve(p: &Path, chain: &mut Vec<PathBuf>) -> Result<PathBuf> {
-    resolve_hops(p, chain, &mut 0)
+/// Resolve `p` (anchored to the working directory if relative, e.g. under a
+/// relative `SPM_HOME`) through symlinks component by component, returning the
+/// physical location and pushing onto `traversed` every location the path
+/// depends on along the way: each symlink, and each dir passed through before a
+/// `..`. Missing components are kept as spelled (they hold nothing to delete or
+/// protect); other errors, including a symlink loop, are propagated rather than
+/// treated as "not shared".
+fn resolve(p: &Path, traversed: &mut Vec<PathBuf>) -> Result<PathBuf> {
+    let abs = if p.is_relative() {
+        std::env::current_dir()?.join(p)
+    } else {
+        p.to_path_buf()
+    };
+    resolve_hops(&abs, traversed, &mut 0)
 }
 
 fn resolve_hops(p: &Path, chain: &mut Vec<PathBuf>, hops: &mut u32) -> Result<PathBuf> {
@@ -184,6 +193,9 @@ fn resolve_hops(p: &Path, chain: &mut Vec<PathBuf>, hops: &mut u32) -> Result<Pa
             Component::Prefix(_) | Component::RootDir => cur.push(comp),
             Component::CurDir => {}
             Component::ParentDir => {
+                if !missing && cur.parent().is_some() {
+                    chain.push(cur.clone());
+                }
                 cur.pop();
             }
             Component::Normal(name) => {
