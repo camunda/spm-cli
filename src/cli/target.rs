@@ -5,6 +5,7 @@ use crate::manifest::Manifest;
 use crate::scope::Scope;
 use crate::vendor;
 use anyhow::{anyhow, bail, Result};
+use std::path::{Path, PathBuf};
 
 /// `spm target add [vendors...]`: append target vendors to an existing ai.json
 /// and materialize skills for them. Explicit `vendors` are validated and added
@@ -110,16 +111,18 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
     let lock = Lockfile::load_or_default(&dir)?;
     let (managed, managed_plugins) = managed_names(&lock);
     // Skills dirs still written by a remaining target (e.g. `.agents/skills`,
-    // shared by `codex` and `amp`): cleaning them would delete skills that
-    // target still loads.
+    // shared by `codex` and `amp`, or a vendor dir symlinked onto another's):
+    // cleaning them would delete skills that target still loads.
     let mut kept_dirs = Vec::new();
     for t in &remaining {
-        kept_dirs.push((t.as_str(), vendor::for_target(t)?.skills_dir(scope)?));
+        let d = resolved_dir(&vendor::for_target(t)?.skills_dir(scope)?)?;
+        kept_dirs.push((t.as_str(), d));
     }
     for t in &removed {
         let v = vendor::for_target(t)?;
         let skills_dir = v.skills_dir(scope)?;
-        match kept_dirs.iter().find(|(_, d)| *d == skills_dir) {
+        let resolved = resolved_dir(&skills_dir)?;
+        match kept_dirs.iter().find(|(_, d)| *d == resolved) {
             Some((owner, _)) => println!(
                 "keeping {}: still used by target `{owner}`",
                 skills_dir.display()
@@ -133,6 +136,18 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
     manifest.save(&dir)?;
     println!("removed target(s): {}", removed.join(", "));
     Ok(())
+}
+
+/// The directory `dir` actually resolves to, so two spellings of one dir (e.g.
+/// via a symlink) compare equal. A missing dir has nothing to clean and is kept
+/// as spelled; any other resolution error is propagated rather than treated as
+/// "not shared".
+fn resolved_dir(dir: &Path) -> Result<PathBuf> {
+    match std::fs::canonicalize(dir) {
+        Ok(p) => Ok(p),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(dir.to_path_buf()),
+        Err(e) => Err(anyhow!(e).context(format!("resolving {}", dir.display()))),
+    }
 }
 
 /// Interactive numbered picker over the vendors not yet configured. Reads a

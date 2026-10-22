@@ -1950,6 +1950,25 @@ fn target_remove_keeps_skills_dir_shared_with_a_remaining_target() {
     }
 }
 
+/// Shared-dir ownership compares resolved dirs, not path spellings: a vendor dir
+/// symlinked onto another target's dir is still shared.
+#[cfg(unix)]
+#[test]
+fn target_remove_keeps_skills_dir_aliased_by_symlink_to_a_remaining_target() {
+    let sb = Sandbox::new();
+    std::fs::create_dir_all(sb.project.join(".agents/skills")).unwrap();
+    std::fs::create_dir_all(sb.project.join(".cursor")).unwrap();
+    std::os::unix::fs::symlink("../.agents/skills", sb.project.join(".cursor/skills")).unwrap();
+    sb.ok(&["init", "--target", "cursor,codex"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let greet = sb.project.join(".agents/skills/greet/SKILL.md");
+    assert!(greet.exists());
+
+    let out = sb.ok(&["target", "remove", "cursor"]);
+    assert!(out.contains("still used by target `codex`"), "{out}");
+    assert!(greet.exists(), "codex's skills must survive via the alias");
+}
+
 #[test]
 fn target_remove_unconfigured_is_a_skip_and_unknown_changes_nothing() {
     let sb = Sandbox::new();
