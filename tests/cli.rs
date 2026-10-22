@@ -1952,13 +1952,12 @@ fn target_remove_keeps_skills_dir_shared_with_a_remaining_target() {
 
 /// Shared-dir ownership compares resolved dirs, not path spellings: a vendor dir
 /// symlinked onto another target's dir is still shared.
-#[cfg(unix)]
 #[test]
 fn target_remove_keeps_skills_dir_aliased_by_symlink_to_a_remaining_target() {
     let sb = Sandbox::new();
     std::fs::create_dir_all(sb.project.join(".agents/skills")).unwrap();
     std::fs::create_dir_all(sb.project.join(".cursor")).unwrap();
-    std::os::unix::fs::symlink("../.agents/skills", sb.project.join(".cursor/skills")).unwrap();
+    symlink("../.agents/skills", sb.project.join(".cursor/skills"));
     sb.ok(&["init", "--target", "cursor,codex"]);
     sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
     let greet = sb.project.join(".agents/skills/greet/SKILL.md");
@@ -1972,17 +1971,15 @@ fn target_remove_keeps_skills_dir_aliased_by_symlink_to_a_remaining_target() {
 /// Nested aliasing: `.cursor/skills` symlinked into Claude's marketplace payload
 /// dir. Neither removal may delete skills the other target still loads, and
 /// removing Claude must still deregister it from settings.
-#[cfg(unix)]
 #[test]
 fn target_remove_keeps_output_nested_in_another_targets_dir() {
     for (removed, kept) in [("cursor", "claude"), ("claude", "cursor")] {
         let sb = Sandbox::new();
         std::fs::create_dir_all(sb.project.join(".cursor")).unwrap();
-        std::os::unix::fs::symlink(
+        symlink(
             "../.spm/claude/plugin/skills",
             sb.project.join(".cursor/skills"),
-        )
-        .unwrap();
+        );
         sb.ok(&["init", "--target", "claude,cursor"]);
         sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
         let greet = sb.claude_market_dir().join("plugin/skills/greet/SKILL.md");
@@ -2009,18 +2006,16 @@ fn target_remove_keeps_output_nested_in_another_targets_dir() {
 /// Plugins too: `.cursor/skills` symlinked into Claude's installed plugin copy.
 /// Neither removal may delete the bundled skill the other target loads, and
 /// removing Claude must still deregister its plugins marketplace.
-#[cfg(unix)]
 #[test]
 fn target_remove_keeps_output_nested_in_another_targets_plugin() {
     for (removed, kept) in [("claude", "cursor"), ("cursor", "claude")] {
         let sb = Sandbox::new();
         sb.add_plugin();
         std::fs::create_dir_all(sb.project.join(".cursor")).unwrap();
-        std::os::unix::fs::symlink(
+        symlink(
             "../.spm/claude-plugins/ds/skills",
             sb.project.join(".cursor/skills"),
-        )
-        .unwrap();
+        );
         sb.ok(&["init", "--target", "claude"]);
         write_manifest(
             &sb,
@@ -2056,23 +2051,21 @@ fn target_remove_keeps_output_nested_in_another_targets_plugin() {
 /// Chained aliasing: `.cursor/skills` -> Claude's payload dir, which itself is a
 /// symlink elsewhere. Removing Claude must keep the intermediate link Cursor
 /// reaches its skills through, not just the final files.
-#[cfg(unix)]
 #[test]
 fn target_remove_keeps_intermediate_symlink_a_remaining_target_traverses() {
     for (removed, kept) in [("claude", "cursor"), ("cursor", "claude")] {
         let sb = Sandbox::new();
         std::fs::create_dir_all(sb.project.join(".cursor")).unwrap();
-        std::os::unix::fs::symlink(
+        symlink(
             "../.spm/claude/plugin/skills",
             sb.project.join(".cursor/skills"),
-        )
-        .unwrap();
+        );
         sb.ok(&["init", "--target", "claude,cursor"]);
         sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
         let payload = sb.claude_market_dir().join("plugin/skills");
         let shared = sb.project.join("shared-skills");
         std::fs::rename(&payload, &shared).unwrap();
-        std::os::unix::fs::symlink(&shared, &payload).unwrap();
+        symlink(&shared, &payload);
         let via_cursor = sb.project.join(".cursor/skills/greet/SKILL.md");
         assert!(via_cursor.exists());
 
@@ -2091,7 +2084,6 @@ fn target_remove_keeps_intermediate_symlink_a_remaining_target_traverses() {
 
 /// Claude needs its marketplace metadata, not just the skill payloads: removing
 /// another target must not delete metadata Claude reaches through a symlink.
-#[cfg(unix)]
 #[test]
 fn target_remove_keeps_metadata_a_remaining_target_loads_through_a_symlink() {
     let sb = Sandbox::new();
@@ -2102,7 +2094,7 @@ fn target_remove_keeps_metadata_a_remaining_target_loads_through_a_symlink() {
         .project
         .join(".agents/skills/spm-managed-skills/claude-meta");
     std::fs::rename(&meta, &moved).unwrap();
-    std::os::unix::fs::symlink(&moved, &meta).unwrap();
+    symlink(&moved, &meta);
     let manifest = meta.join("marketplace.json");
     assert!(manifest.exists());
 
@@ -2113,7 +2105,6 @@ fn target_remove_keeps_metadata_a_remaining_target_loads_through_a_symlink() {
 
 /// Claude's settings file registers its marketplace: removing another target
 /// must not delete it when it is a symlink into that target's output.
-#[cfg(unix)]
 #[test]
 fn target_remove_keeps_settings_a_remaining_target_loads_through_a_symlink() {
     let sb = Sandbox::new();
@@ -2124,7 +2115,7 @@ fn target_remove_keeps_settings_a_remaining_target_loads_through_a_symlink() {
         .project
         .join(".agents/skills/spm-managed-skills/claude-settings.json");
     std::fs::rename(&settings, &moved).unwrap();
-    std::os::unix::fs::symlink(&moved, &settings).unwrap();
+    symlink(&moved, &settings);
 
     let out = sb.ok(&["target", "remove", "copilot"]);
     assert!(out.contains("still used by target `claude`"), "{out}");
@@ -2134,7 +2125,6 @@ fn target_remove_keeps_settings_a_remaining_target_loads_through_a_symlink() {
 
 /// On a case-insensitive filesystem `.AGENTS` and `.agents` are one dir: a
 /// remaining target's output must be recognised however it is spelled.
-#[cfg(unix)]
 #[test]
 fn target_remove_keeps_output_aliased_by_case_on_case_insensitive_fs() {
     let probe = Sandbox::new();
@@ -2147,7 +2137,7 @@ fn target_remove_keeps_output_aliased_by_case_on_case_insensitive_fs() {
         let sb = Sandbox::new();
         std::fs::create_dir_all(sb.project.join(".AGENTS/skills")).unwrap();
         std::fs::create_dir_all(sb.project.join(".cursor")).unwrap();
-        std::os::unix::fs::symlink("../.AGENTS/skills", sb.project.join(".cursor/skills")).unwrap();
+        symlink("../.AGENTS/skills", sb.project.join(".cursor/skills"));
         sb.ok(&["init", "--target", "cursor,codex"]);
         sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
         let skill = sb.project.join(".agents/skills/greet/SKILL.md");
@@ -2167,7 +2157,6 @@ fn target_remove_keeps_output_aliased_by_case_on_case_insensitive_fs() {
 
 /// A relative `SPM_HOME` yields relative Claude global paths; they must still be
 /// compared against other vendors' absolute paths for the same output.
-#[cfg(unix)]
 #[test]
 fn target_remove_global_with_relative_spm_home_keeps_shared_output() {
     for (removed, kept) in [("claude", "cursor"), ("cursor", "claude")] {
@@ -2178,6 +2167,7 @@ fn target_remove_global_with_relative_spm_home_keeps_shared_output() {
                 .current_dir(&sb.project)
                 .env("SPM_HOME", "rel-home")
                 .env("HOME", &sb.home)
+                .env("USERPROFILE", &sb.home)
                 .output()
                 .unwrap();
             assert!(
@@ -2189,7 +2179,7 @@ fn target_remove_global_with_relative_spm_home_keeps_shared_output() {
         };
         let payload = sb.project.join("rel-home/claude-global/plugin/skills");
         std::fs::create_dir_all(sb.home.join(".cursor")).unwrap();
-        std::os::unix::fs::symlink(&payload, sb.home.join(".cursor/skills")).unwrap();
+        symlink(&payload, sb.home.join(".cursor/skills"));
         run(&["init", "-g", "--target", "claude,cursor"]);
         run(&[
             "add",
@@ -2217,17 +2207,15 @@ fn target_remove_global_with_relative_spm_home_keeps_shared_output() {
 
 /// A dir a remaining target's alias passes through before a `..` must survive,
 /// even though the skills themselves live elsewhere.
-#[cfg(unix)]
 #[test]
 fn target_remove_keeps_dir_traversed_before_dotdot_by_a_remaining_target() {
     let sb = Sandbox::new();
     std::fs::create_dir_all(sb.project.join(".spm/shared-skills")).unwrap();
     std::fs::create_dir_all(sb.project.join(".cursor")).unwrap();
-    std::os::unix::fs::symlink(
+    symlink(
         "../.spm/claude/../shared-skills",
         sb.project.join(".cursor/skills"),
-    )
-    .unwrap();
+    );
     sb.ok(&["init", "--target", "claude,cursor"]);
     sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
     let via_cursor = sb.project.join(".cursor/skills/greet/SKILL.md");
@@ -3095,6 +3083,26 @@ fn clean_purges_plugin_bundled_skills_from_shared_global_dir() {
 
 /// Helper: write an `ai.json` into the project dir.
 #[cfg(test)]
+/// Create symlink `link` -> `target` (relative to `link`'s dir unless absolute;
+/// `/`-separated). On Windows a target that isn't an existing file gets a dir
+/// link, and creating one needs the symlink privilege (Developer Mode
+/// or an elevated shell, as on CI runners).
+fn symlink(target: impl AsRef<Path>, link: impl AsRef<Path>) {
+    let (target, link) = (target.as_ref(), link.as_ref());
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap();
+    #[cfg(windows)]
+    {
+        let target: PathBuf = target.components().collect();
+        let res = if !link.parent().unwrap().join(&target).is_file() {
+            std::os::windows::fs::symlink_dir(&target, link)
+        } else {
+            std::os::windows::fs::symlink_file(&target, link)
+        };
+        res.unwrap_or_else(|e| panic!("symlink {} -> {}: {e}", link.display(), target.display()));
+    }
+}
+
 fn write_manifest(sb: &Sandbox, json: &str) {
     std::fs::write(sb.project.join("ai.json"), json).unwrap();
 }
