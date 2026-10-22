@@ -211,8 +211,8 @@ enum NodeId {
     /// An existing entry, by device and inode (not following a final symlink).
     #[cfg(unix)]
     Inode(u64, u64),
-    /// A component without an inode to compare: missing, or on a platform
-    /// where it is compared by its case-folded name.
+    /// A component compared by name: a missing one, or on Windows any one,
+    /// case-folded after canonicalizing its existing prefix.
     Name(String),
 }
 
@@ -220,45 +220,65 @@ enum NodeId {
 /// root, so `a` is `b` or an ancestor of it iff `identity(b)` starts with
 /// `identity(a)` — regardless of how either is spelled (e.g. `.AGENTS` vs
 /// `.agents` on a case-insensitive filesystem).
+#[cfg(unix)]
 fn identity(p: &Path) -> Result<Vec<NodeId>> {
+    use std::os::unix::fs::MetadataExt;
     let mut ids = Vec::new();
     let mut cur = PathBuf::new();
     let mut missing = false;
     for comp in p.components() {
         cur.push(comp);
         if !missing {
-            match inode(&cur)? {
-                Some(id) => {
-                    ids.push(id);
+            match std::fs::symlink_metadata(&cur) {
+                Ok(m) => {
+                    ids.push(NodeId::Inode(m.dev(), m.ino()));
                     continue;
                 }
-                None => missing = true,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => missing = true,
+                Err(e) => return Err(anyhow!(e).context(format!("inspecting {}", cur.display()))),
             }
         }
-        let name = comp.as_os_str().to_string_lossy();
-        ids.push(NodeId::Name(if cfg!(windows) {
-            name.to_lowercase()
-        } else {
-            name.into_owned()
-        }));
+        ids.push(NodeId::Name(
+            comp.as_os_str().to_string_lossy().into_owned(),
+        ));
     }
     Ok(ids)
 }
 
-/// `p`'s inode identity, or `None` if it is missing (or the platform has none).
-#[cfg(unix)]
-fn inode(p: &Path) -> Result<Option<NodeId>> {
-    use std::os::unix::fs::MetadataExt;
-    match std::fs::symlink_metadata(p) {
-        Ok(m) => Ok(Some(NodeId::Inode(m.dev(), m.ino()))),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(anyhow!(e).context(format!("inspecting {}", p.display()))),
-    }
-}
-
+/// Windows has no stable inode API, so the longest existing prefix is
+/// canonicalized instead — normalizing `\\?\` vs plain prefixes (which
+/// `read_link` mixes), 8.3 short names and case — without following a final
+/// symlink; the rest is compared case-folded, as NTFS is case-insensitive.
 #[cfg(not(unix))]
-fn inode(_p: &Path) -> Result<Option<NodeId>> {
-    Ok(None)
+fn identity(p: &Path) -> Result<Vec<NodeId>> {
+    let comps: Vec<_> = p.components().collect();
+    let mut base = PathBuf::new();
+    let mut existing = 0;
+    for n in (1..=comps.len()).rev() {
+        let prefix: PathBuf = comps[..n].iter().collect();
+        let meta = match std::fs::symlink_metadata(&prefix) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(anyhow!(e).context(format!("inspecting {}", prefix.display()))),
+        };
+        let canonical = |q: &Path| {
+            std::fs::canonicalize(q).with_context(|| format!("canonicalizing {}", q.display()))
+        };
+        base = match (
+            meta.file_type().is_symlink(),
+            prefix.parent(),
+            prefix.file_name(),
+        ) {
+            (true, Some(parent), Some(name)) => canonical(parent)?.join(name),
+            _ => canonical(&prefix)?,
+        };
+        existing = n;
+        break;
+    }
+    let names = base.components().chain(comps[existing..].iter().copied());
+    Ok(names
+        .map(|c| NodeId::Name(c.as_os_str().to_string_lossy().to_lowercase()))
+        .collect())
 }
 
 /// The physical location `remove_dir_all(p)` deletes: `p`'s parent resolved
