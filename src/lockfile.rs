@@ -79,7 +79,59 @@ pub struct LockedSkill {
     /// re-checked without a remote lookup (and lets `install --locked` accept
     /// them). Rebuilt on every sync; sorted and deduplicated.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub also_satisfies: Vec<String>,
+    pub also_satisfies: Vec<Satisfied>,
+}
+
+/// One `also_satisfies` entry: a selector (`reference` label) verified to
+/// resolve to the entry's commit, plus — for a `version` range — the tag it
+/// resolved to, so `outdated` can tell when the range would move or that tag
+/// was re-pointed. Written as the bare label when no tag is recorded, keeping
+/// the historical shape of non-range evidence.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(from = "SatisfiedRepr", into = "SatisfiedRepr")]
+pub struct Satisfied {
+    pub reference: String,
+    pub resolved_tag: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum SatisfiedRepr {
+    Label(String),
+    Tagged {
+        reference: String,
+        resolved_tag: String,
+    },
+}
+
+impl From<SatisfiedRepr> for Satisfied {
+    fn from(r: SatisfiedRepr) -> Self {
+        match r {
+            SatisfiedRepr::Label(reference) => Self {
+                reference,
+                resolved_tag: None,
+            },
+            SatisfiedRepr::Tagged {
+                reference,
+                resolved_tag,
+            } => Self {
+                reference,
+                resolved_tag: Some(resolved_tag),
+            },
+        }
+    }
+}
+
+impl From<Satisfied> for SatisfiedRepr {
+    fn from(s: Satisfied) -> Self {
+        match s.resolved_tag {
+            None => Self::Label(s.reference),
+            Some(resolved_tag) => Self::Tagged {
+                reference: s.reference,
+                resolved_tag,
+            },
+        }
+    }
 }
 
 impl LockedSkill {
@@ -190,11 +242,15 @@ fn validate_locked_map(map: &BTreeMap<String, LockedSkill>, kind: &str) -> Resul
             crate::manifest::validate_skill_name(r)
                 .with_context(|| format!("{kind} `{name}`: requested_by name"))?;
         }
-        validate_resolved_tag(l).with_context(|| format!("{kind} `{name}`"))?;
-        for r in &l.also_satisfies {
+        validate_resolved_tag(&l.reference, l.resolved_tag.as_deref())
+            .with_context(|| format!("{kind} `{name}`"))?;
+        for s in &l.also_satisfies {
+            let r = &s.reference;
             if crate::manifest::Version::from_label(r).is_none() {
                 bail!("{kind} `{name}`: also_satisfies entry `{r}` is not a version selector");
             }
+            validate_resolved_tag(r, s.resolved_tag.as_deref())
+                .with_context(|| format!("{kind} `{name}`: also_satisfies entry `{r}`"))?;
         }
     }
     Ok(())
@@ -204,23 +260,20 @@ fn validate_locked_map(map: &BTreeMap<String, LockedSkill>, kind: &str) -> Resul
 /// and that tag must satisfy the requirement; any other selector must not carry
 /// one. A hand-edited `ai.lock` therefore cannot make `list`/`outdated` claim a
 /// tag the range could never have picked.
-fn validate_resolved_tag(l: &LockedSkill) -> Result<()> {
+fn validate_resolved_tag(reference: &str, resolved_tag: Option<&str>) -> Result<()> {
     use crate::manifest::{parse_version_req, semver_of_tag, Version};
-    match (Version::from_label(&l.reference), &l.resolved_tag) {
+    match (Version::from_label(reference), resolved_tag) {
         (Some(Version::Range(req)), Some(tag)) => {
             let req = parse_version_req(&req)?;
             match semver_of_tag(tag) {
                 Some(v) if req.matches(&v) => Ok(()),
-                Some(_) => bail!("resolved_tag `{tag}` does not satisfy `{}`", l.reference),
+                Some(_) => bail!("resolved_tag `{tag}` does not satisfy `{reference}`"),
                 None => bail!("resolved_tag `{tag}` is not a semver tag"),
             }
         }
-        (Some(Version::Range(_)), None) => {
-            bail!("`{}` has no resolved_tag", l.reference)
-        }
+        (Some(Version::Range(_)), None) => bail!("`{reference}` has no resolved_tag"),
         (_, Some(tag)) => bail!(
-            "resolved_tag `{tag}` is only valid for a `version:` reference, not `{}`",
-            l.reference
+            "resolved_tag `{tag}` is only valid for a `version:` reference, not `{reference}`"
         ),
         (_, None) => Ok(()),
     }
@@ -604,6 +657,54 @@ mod tests {
         ] {
             let err = with_reference(reference, tag).validate().unwrap_err();
             assert!(format!("{err:#}").contains(needle), "{reference}: {err:#}");
+        }
+    }
+
+    /// Untagged evidence keeps its historical bare-label shape (so existing
+    /// locks round-trip byte-for-byte); a range records its resolved tag.
+    #[test]
+    fn also_satisfies_round_trips_labels_and_tagged_ranges() {
+        let json = r#"["branch:main",{"reference":"version:^1","resolved_tag":"v1.0.0"}]"#;
+        let parsed: Vec<Satisfied> = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            parsed,
+            [
+                Satisfied {
+                    reference: "branch:main".into(),
+                    resolved_tag: None,
+                },
+                Satisfied {
+                    reference: "version:^1".into(),
+                    resolved_tag: Some("v1.0.0".into()),
+                },
+            ]
+        );
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), json);
+    }
+
+    /// A secondary range is held to the same resolved-tag rule as a primary.
+    #[test]
+    fn validate_checks_also_satisfies_resolved_tags() {
+        let with_evidence = |reference: &str, tag: Option<&str>| {
+            let mut lock = with_reference("branch:main", None);
+            lock.skills.get_mut("pdf").unwrap().also_satisfies = vec![Satisfied {
+                reference: reference.into(),
+                resolved_tag: tag.map(str::to_string),
+            }];
+            lock
+        };
+        with_evidence("version:^1", Some("v1.0.0"))
+            .validate()
+            .unwrap();
+        for (reference, tag, needle) in [
+            ("version:^1", None, "has no resolved_tag"),
+            ("version:^1", Some("v2.0.0"), "does not satisfy"),
+            ("tag:v1.0.0", Some("v1.0.0"), "only valid for a `version:`"),
+        ] {
+            let err = with_evidence(reference, tag).validate().unwrap_err();
+            let err = format!("{err:#}");
+            assert!(err.contains("also_satisfies entry"), "{err}");
+            assert!(err.contains(needle), "{reference}: {err}");
         }
     }
 

@@ -461,6 +461,7 @@ with `-g` for `list`, `status` and `outdated`). With it:
       "alsoSatisfies": [                    // other selectors this deduplicated entry
         {                                   // satisfies (ai.lock `also_satisfies`)
           "selector": { "branch": "main" },
+          "resolvedTag": null,              // as above, for a version selector
           "remoteCommit": "<40-hex sha>",
           "latestInRange": null,            // as above, for a version selector
           "latestTag": null,                // as above, for a tag selector

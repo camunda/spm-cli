@@ -34,7 +34,7 @@
 //! across runs (letting the sync reuse fast-path key on it), collision-resistant
 //! across unrelated dependencies, and free of path separators.
 
-use crate::lockfile::{store_key, LockedSkill};
+use crate::lockfile::{store_key, LockedSkill, Satisfied};
 use crate::manifest::{validate_skill_name, DependencyManifest, Manifest, SkillSpec};
 use crate::resolver;
 use crate::store;
@@ -110,7 +110,7 @@ pub struct Output {
     /// `also_satisfies` evidence recorded for *direct* roots (by name): the
     /// other selectors nested edges requested for a root's identity that
     /// resolved to the root's commit. Transitive entries carry theirs in place.
-    pub direct_also_satisfies: BTreeMap<String, Vec<String>>,
+    pub direct_also_satisfies: BTreeMap<String, Vec<Satisfied>>,
     /// `--locked` only: `(synthesized name, description)` for each transitive
     /// edge that would have needed a fresh resolution because `ai.lock` has no
     /// matching pin for it. That edge's subtree is not walked.
@@ -598,12 +598,11 @@ fn visit(
                     Some(idx) => ctx.prev.get(&w.out.transitive[idx].0),
                     None => direct.get(&existing.chain[0]),
                 };
-                let evidenced = !ctx.refresh
-                    && pinned.is_some_and(|p| {
-                        p.commit == existing.commit && p.also_satisfies.contains(&requested)
-                    });
-                let child_commit = if evidenced {
-                    existing.commit.clone()
+                let evidence = pinned
+                    .filter(|p| !ctx.refresh && p.commit == existing.commit)
+                    .and_then(|p| p.also_satisfies.iter().find(|s| s.reference == requested));
+                let (child_commit, resolved_tag) = if let Some(e) = evidence {
+                    (existing.commit.clone(), e.resolved_tag.clone())
                 } else {
                     let Some(child) = resolve_child(spec, &synth, ctx).with_context(|| {
                         format!("resolving nested skill `{declared}` of `{name}`")
@@ -614,7 +613,7 @@ fn visit(
                             .push((synth.clone(), lock_miss(&synth, declared, name, spec, ctx)?));
                         continue;
                     };
-                    child.commit
+                    (child.commit, child.resolved_tag)
                 };
                 if existing.commit != child_commit {
                     let mut cur_chain: Vec<String> =
@@ -634,6 +633,10 @@ fn visit(
                         },
                     ));
                 }
+                let requested = Satisfied {
+                    reference: requested,
+                    resolved_tag,
+                };
                 match existing.out_idx {
                     Some(idx) => w.out.transitive[idx].1.also_satisfies.push(requested),
                     None => w

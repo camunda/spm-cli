@@ -56,7 +56,9 @@ the same commit (say `branch:main` and `tag:v1`), the graph keeps one entry, and
 its `also_satisfies` list records the other selector(s). That is the pin
 evidence that lets later installs — including `spm install --locked` — check
 those edges without a remote lookup. It is rebuilt on every install and omitted
-when empty.
+when empty. Each item is the selector label, except a `version` range, which
+also records the tag it resolved to so `spm outdated` can check it:
+`{ "reference": "version:^1", "resolved_tag": "v1.0.0" }`.
 
 ## Commit it
 

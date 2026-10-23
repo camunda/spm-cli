@@ -9125,3 +9125,95 @@ fn outdated_detects_a_newer_in_range_tag_on_the_locked_commit() {
     assert_eq!(lock["skills"]["greet"]["resolved_tag"], "v1.9.0", "{lock}");
     assert_eq!(lock["skills"]["greet"]["commit"], v141.as_str(), "{lock}");
 }
+
+/// A direct `leaf` tracked by `branch: main`, which a nested `ai.json` also
+/// requests by `version: ^1`: the graph dedups both onto one entry, recording
+/// the range (and the tag it resolved to) in `also_satisfies`. Returns the
+/// leaf repo dir and the commit `main` and `v1.0.0` share.
+fn dedup_range_fixture(sb: &Sandbox) -> (PathBuf, String) {
+    let leaf_dir = sb.root.join("dedup-leaf");
+    let leaf = make_repo(&leaf_dir, &[("SKILL.md", "---\nname: leaf\n---\nLeaf.\n")]);
+    git_in(&leaf_dir, &["tag", "-a", "v1.0.0", "-m", "v1.0.0"]);
+    let top = make_repo(
+        &sb.root.join("dedup-top"),
+        &[
+            ("SKILL.md", "---\nname: top\n---\nTop.\n"),
+            (
+                "ai.json",
+                &format!(r#"{{"skills":{{"leaf":{{"git":"{leaf}","version":"^1"}}}}}}"#),
+            ),
+        ],
+    );
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        sb,
+        &format!(
+            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{
+                "leaf":{{"git":"{leaf}","branch":"main"}},
+                "top":{{"git":"{top}","branch":"main"}}}}}}"#
+        ),
+    );
+    sb.ok(&["install"]);
+    let lock = lock_doc(sb);
+    assert_eq!(
+        lock["skills"]["leaf"]["also_satisfies"],
+        serde_json::json!([{ "reference": "version:^1", "resolved_tag": "v1.0.0" }]),
+        "{lock}"
+    );
+    sb.ok(&["install", "--locked"]);
+    let head = skill_head(&leaf_dir);
+    (leaf_dir, head)
+}
+
+#[test]
+fn outdated_checks_a_deduplicated_range_against_its_resolved_tag() {
+    let sb = Sandbox::new();
+    let (leaf_dir, head) = dedup_range_fixture(&sb);
+    // A newer in-range release on the very commit `main` (and the lock) holds.
+    git_in(&leaf_dir, &["tag", "v1.1.0", &head]);
+
+    let out = sb.spm(&["outdated", "--json", "--exit-code"]);
+    assert!(!out.status.success(), "a range update is pending");
+    let doc = json_doc(&out);
+    let row = outdated_row(&doc, "leaf");
+    assert_eq!(row["status"], "up-to-date", "{doc}");
+    let sec = &row["alsoSatisfies"][0];
+    assert_eq!(
+        sec["selector"],
+        serde_json::json!({"version": "^1"}),
+        "{doc}"
+    );
+    assert_eq!(sec["resolvedTag"], "v1.0.0", "{doc}");
+    assert_eq!(sec["latestInRange"], "v1.1.0", "{doc}");
+    assert_eq!(sec["status"], "behind", "{doc}");
+    assert_eq!(row["outdated"], true, "{doc}");
+
+    let err = stderr_of(&sb.spm(&["outdated"]));
+    assert!(
+        err.contains("`version:^1` (also satisfied by `leaf`) has a newer tag v1.1.0"),
+        "{err}"
+    );
+}
+
+#[test]
+fn outdated_warns_when_a_deduplicated_range_tag_was_repointed() {
+    let sb = Sandbox::new();
+    let (leaf_dir, _) = dedup_range_fixture(&sb);
+    // Re-point v1.0.0 to a commit off `main`, so the branch stays put.
+    git_in(&leaf_dir, &["checkout", "-qb", "side"]);
+    std::fs::write(leaf_dir.join("NOTES.md"), "x\n").unwrap();
+    git_in(&leaf_dir, &["add", "-A"]);
+    git_in(&leaf_dir, &["commit", "-qm", "side"]);
+    git_in(&leaf_dir, &["tag", "-f", "-a", "v1.0.0", "-m", "moved"]);
+    git_in(&leaf_dir, &["checkout", "-q", "main"]);
+
+    let doc = json_doc(&sb.spm(&["outdated", "--json"]));
+    let row = outdated_row(&doc, "leaf");
+    assert_eq!(row["status"], "up-to-date", "{doc}");
+    assert_eq!(row["alsoSatisfies"][0]["status"], "tag-moved", "{doc}");
+    let err = stderr_of(&sb.spm(&["outdated"]));
+    assert!(
+        err.contains("tag `v1.0.0` (locked for `version: ^1`, also satisfied by `leaf`)"),
+        "{err}"
+    );
+}

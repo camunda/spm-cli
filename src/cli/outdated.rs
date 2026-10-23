@@ -107,6 +107,8 @@ struct Row<'a> {
 struct SelectorCheck {
     /// `null` if `ai.lock` holds an unrecognized reference.
     selector: Option<Version>,
+    /// For a `version` range: the tag it is locked to; `null` otherwise.
+    resolved_tag: Option<String>,
     /// Full SHA the selector resolves to on the remote now; `null` for
     /// commits and errors.
     remote_commit: Option<String>,
@@ -317,7 +319,15 @@ fn check<'a>(
     row.also_satisfies = l
         .also_satisfies
         .iter()
-        .map(|label| evaluate(label, &l.git, &l.commit, None, remotes))
+        .map(|s| {
+            evaluate(
+                &s.reference,
+                &l.git,
+                &l.commit,
+                s.resolved_tag.as_deref(),
+                remotes,
+            )
+        })
         .collect();
     row.outdated =
         row.status.is_outdated() || row.also_satisfies.iter().any(|s| s.status.is_outdated());
@@ -328,7 +338,7 @@ fn check<'a>(
 /// Compare one selector (the primary `reference` or an `also_satisfies`
 /// entry) with the locked commit. Primary and secondary selectors share this
 /// so neither can miss a check the other gets. `resolved_tag` is the tag a
-/// `version` range is locked to (known only for the primary selector).
+/// `version` range is locked to.
 fn evaluate(
     label: &str,
     git: &str,
@@ -339,6 +349,7 @@ fn evaluate(
     let selector = Version::from_label(label);
     let mut out = SelectorCheck {
         selector: None,
+        resolved_tag: resolved_tag.map(str::to_string),
         remote_commit: None,
         latest_in_range: None,
         latest_tag: None,
@@ -613,6 +624,27 @@ fn render_text(report: &OutdatedReport, declared: usize) {
                     short(now),
                     short(r.locked)
                 ),
+                (Some(Version::Range(req)), Status::TagMoved, _) => {
+                    if let Some(t) = &sec.resolved_tag {
+                        eprintln!(
+                            "warning: tag `{t}` (locked for `version: {req}`, also satisfied by \
+                             `{}`) no longer points at {} — someone re-pointed the tag; review \
+                             it before `spm update`",
+                            r.name,
+                            short(r.locked)
+                        )
+                    }
+                }
+                (Some(Version::Range(_)), Status::Behind, _) => {
+                    if let Some(t) = &sec.latest_in_range {
+                        eprintln!(
+                            "warning: `{sel}` (also satisfied by `{}`) has a newer tag {t} in \
+                             range; ai.lock pins {}",
+                            r.name,
+                            short(r.locked)
+                        )
+                    }
+                }
                 (_, Status::Behind, Some(now)) => eprintln!(
                     "warning: `{sel}` (also satisfied by `{}`) moved to {} but ai.lock pins {}",
                     r.name,
