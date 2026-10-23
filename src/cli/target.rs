@@ -141,6 +141,8 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
         .iter()
         .map(|t| vendor::for_target(t))
         .collect::<Result<Vec<_>>>()?;
+    // Held until the deletions below are done (see `StateLock`).
+    let _state_lock = crate::links::StateLock::acquire(false)?;
     super::sync::guard_working_copies(
         scope,
         &dir,

@@ -21,6 +21,8 @@ use std::path::{Path, PathBuf};
 const FILE: &str = "links.json";
 /// `$SPM_HOME` subdirectory holding one links file per project.
 const PROJECT_DIR: &str = "links";
+/// `$SPM_HOME` file locked by [`StateLock`].
+const LOCK_FILE: &str = "links.lock";
 
 /// The parsed links file.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -157,6 +159,13 @@ impl Links {
 
     /// Persist the links file, deleting it once it holds nothing.
     pub fn save(&self, scope: &Scope) -> Result<()> {
+        self.document(scope)?.save_to(&Self::path(scope)?)
+    }
+
+    /// The document [`Links::save`] writes for `scope`. Call it while planning
+    /// too, so whatever would make saving fail (a non-UTF-8 project root) is
+    /// rejected before any target output changes.
+    pub fn document(&self, scope: &Scope) -> Result<Self> {
         let mut doc = self.clone();
         doc.project = match scope {
             Scope::Project { root } if !(self.links.is_empty() && self.managed.is_empty()) => {
@@ -171,7 +180,7 @@ impl Links {
             }
             _ => None,
         };
-        doc.save_to(&Self::path(scope)?)
+        Ok(doc)
     }
 
     fn save_to(&self, p: &Path) -> Result<()> {
@@ -248,10 +257,54 @@ impl Links {
     }
 }
 
-/// The links file name for a project: its directory name (for humans browsing
-/// `$SPM_HOME/links`) plus a stable hash of its canonical root's native bytes
-/// (for uniqueness). FNV-1a is used because, unlike std's `DefaultHasher`, its output
-/// is fixed across Rust releases, so an upgrade never orphans a project's links.
+/// A machine-wide lock over link state, held by a command from its overlap
+/// checks until its last write. Commands that may activate a link (`spm link`,
+/// `spm unlink`) take it exclusively; every other command that writes or
+/// deletes target output takes it shared. So a link can't be published into a
+/// project's output between that project's command checking for links and
+/// rebuilding the output — while several syncs still run side by side.
+pub struct StateLock {
+    _file: std::fs::File,
+}
+
+impl StateLock {
+    pub fn acquire(exclusive: bool) -> Result<Self> {
+        let home = paths::spm_home()?;
+        std::fs::create_dir_all(&home).with_context(|| format!("creating {}", home.display()))?;
+        let p = home.join(LOCK_FILE);
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&p)
+            .with_context(|| format!("opening {}", p.display()))?;
+        let attempt = if exclusive {
+            file.try_lock()
+        } else {
+            file.try_lock_shared()
+        };
+        match attempt {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                eprintln!(
+                    "waiting for another spm command to finish (lock: {})...",
+                    p.display()
+                );
+                if exclusive {
+                    file.lock()
+                } else {
+                    file.lock_shared()
+                }
+                .with_context(|| format!("locking {}", p.display()))?;
+            }
+            Err(std::fs::TryLockError::Error(e)) => {
+                return Err(e).with_context(|| format!("locking {}", p.display()))
+            }
+        }
+        Ok(Self { _file: file })
+    }
+}
+
 /// Atomically replace the destination with the staged file: links files are
 /// read by every spm command on the machine (see [`Links::all_recorded`]), so
 /// a concurrent reader must see either the old or the new file, never a
@@ -268,6 +321,10 @@ fn canonical_root(root: &Path) -> Result<PathBuf> {
         .with_context(|| format!("resolving project root {}", root.display()))
 }
 
+/// The links file name for a project: its directory name (for humans browsing
+/// `$SPM_HOME/links`) plus a stable hash of its canonical root's native bytes
+/// (for uniqueness). FNV-1a is used because, unlike std's `DefaultHasher`, its output
+/// is fixed across Rust releases, so an upgrade never orphans a project's links.
 fn project_file_name(canon_root: &Path) -> String {
     let label: String = canon_root
         .file_name()

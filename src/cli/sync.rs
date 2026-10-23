@@ -1,4 +1,4 @@
-use crate::links::{Linked, Links};
+use crate::links::{Linked, Links, StateLock};
 use crate::lockfile::{LockedSkill, Lockfile};
 use crate::manifest::{Manifest, SkillSpec};
 use crate::scope::Scope;
@@ -142,6 +142,7 @@ struct Plan {
     /// The `spm link` overrides to persist after applying (with `managed`
     /// refreshed), or `None` when the links file is already up to date.
     links: Option<Links>,
+    _state_lock: StateLock,
 }
 
 /// Resolve `manifest` -> lock, populate the store, and run every check (source
@@ -578,6 +579,9 @@ fn plan(
         .map(|p| p.name.clone())
         .chain(previously_managed_plugins.iter().cloned())
         .collect();
+    // Held until `apply` has finished writing: no link may be published into
+    // this output between the check below and the writes.
+    let state_lock = StateLock::acquire(mode == LockMode::Links)?;
     guard_working_copies(
         scope,
         &dir,
@@ -622,6 +626,9 @@ fn plan(
     // Only rewrite the links file when it changes (a `link`/`unlink`, or a
     // linked plugin's bundled skills moving), never on a plain sync.
     let links = (Links::load(scope).ok().as_ref() != Some(&links)).then_some(links);
+    if let Some(links) = &links {
+        links.document(scope)?;
+    }
     Ok(Plan {
         dir,
         targets: manifest.targets.clone(),
@@ -634,6 +641,7 @@ fn plan(
         previously_managed_plugins,
         locked,
         links,
+        _state_lock: state_lock,
     })
 }
 
@@ -846,7 +854,8 @@ fn reject_link_overlaps(
     plugins: &[String],
 ) -> Result<()> {
     use crate::pathid::{deletion_target, identity, resolve, NodeId};
-    if guarded.is_empty() {
+    // Nothing to protect: no working copy, and no links file to lose.
+    if guarded.is_empty() && !state_files.iter().any(|f| f.symlink_metadata().is_ok()) {
         return Ok(());
     }
     // (owner, path as spelled, physical identity, written through?)

@@ -10739,7 +10739,8 @@ fn a_link_whose_parent_became_a_file_never_blocks_recovery() {
 
 /// The links file must survive the targets' cleanup: when it lies inside their
 /// output — its directory or the file itself symlinked there, or its route
-/// passing through a symlink there — every command
+/// passing through a symlink there — every command (even once the linked
+/// source is gone)
 /// that would rebuild or delete that output refuses before any writes, rather
 /// than silently dropping the links.
 #[test]
@@ -10795,6 +10796,15 @@ fn commands_never_wipe_a_links_file_inside_target_output() {
             assert!(sb
                 .read(".agents/skills/spm-managed-skills/greet/SKILL.md")
                 .contains("LOCAL"));
+        }
+        // With the linked source gone there's no working copy left to protect,
+        // but the links file still is: re-creating the source must bring the
+        // override back.
+        std::fs::remove_dir_all(sb.root.join("dev")).unwrap();
+        for args in [&["clean"][..], &["target", "remove", "copilot"]] {
+            let err = fails(&sb, args);
+            assert!(err.contains("the links file"), "{layout} {args:?}: {err}");
+            assert_eq!(read_path(&links_file), before, "{layout} {args:?}");
         }
     }
 }
@@ -10879,4 +10889,149 @@ fn links_from_other_scopes_are_guarded_too() {
         run(&["unlink", "greet"]);
         sb.ok(&["install"]);
     }
+}
+
+/// A running `spm <args>` that has reported it's waiting on the machine-wide
+/// links lock, and has therefore not yet checked or written anything.
+struct BlockedOnStateLock {
+    child: std::process::Child,
+    stderr: std::io::BufReader<std::process::ChildStderr>,
+}
+
+impl BlockedOnStateLock {
+    /// Spawn `spm <args>` and return once it says it's waiting for the lock
+    /// (a deterministic barrier: no sleeps). Fails if it exits without waiting.
+    fn spawn(sb: &Sandbox, args: &[&str]) -> Self {
+        use std::io::BufRead;
+        let mut child = sb
+            .command(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stderr = std::io::BufReader::new(child.stderr.take().unwrap());
+        let mut seen = String::new();
+        let waiting = loop {
+            let mut line = String::new();
+            match stderr.read_line(&mut line) {
+                Ok(0) | Err(_) => break false,
+                Ok(_) if line.contains("waiting for another spm command to finish") => break true,
+                Ok(_) => seen.push_str(&line),
+            }
+        };
+        if !waiting {
+            let status = child.wait().unwrap();
+            panic!("{args:?} never waited for the links lock ({status}): {seen}");
+        }
+        Self { child, stderr }
+    }
+
+    /// Wait for the (now unblocked) command and assert it succeeded.
+    fn finish(mut self) {
+        use std::io::Read;
+        let mut rest = String::new();
+        self.stderr.read_to_string(&mut rest).unwrap();
+        assert!(self.child.wait().unwrap().success(), "{rest}");
+    }
+}
+
+/// Checking an output for linked working copies and then rebuilding or
+/// deleting it is atomic with respect to `link`/`unlink` in any other
+/// project or scope: they serialize on `$SPM_HOME/links.lock` (exclusive for
+/// `link`/`unlink`, shared for everything else), so no link can be published
+/// into an output between another command's check and its writes.
+#[test]
+fn link_state_changes_serialize_with_commands_that_rewrite_outputs() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot,claude"]);
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--name",
+        "greet",
+    ]);
+    local_skill_checkout(&sb, "dev", "LOCAL");
+    let lock_path = sb.spm_home.join("links.lock");
+    let open_lock = || {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .unwrap()
+    };
+    let managed = ".agents/skills/spm-managed-skills/greet/SKILL.md";
+    let links_files = || {
+        std::fs::read_dir(sb.spm_home.join("links"))
+            .map(|d| d.count())
+            .unwrap_or(0)
+    };
+
+    // A reader (any other command) in flight: `link` waits for it, before
+    // recording or materializing anything. Other readers don't wait.
+    let held = open_lock();
+    held.lock_shared().unwrap();
+    let link = BlockedOnStateLock::spawn(&sb, &["link", "greet", "../dev"]);
+    assert_eq!(links_files(), 0);
+    assert!(!sb.read(managed).contains("LOCAL"));
+    sb.ok(&["install"]);
+    drop(held);
+    link.finish();
+    assert!(sb.read(managed).contains("LOCAL"));
+
+    // A `link`/`unlink` in flight: every command that rebuilds or deletes an
+    // output waits for it before checking for working copies.
+    for args in [
+        &["install"][..],
+        &["update"],
+        &["clean"],
+        &["target", "remove", "claude"],
+        &["unlink", "greet"],
+    ] {
+        let before = sb.read(managed);
+        let held = open_lock();
+        held.lock().unwrap();
+        let blocked = BlockedOnStateLock::spawn(&sb, args);
+        assert_eq!(sb.read(managed), before, "{args:?}");
+        drop(held);
+        blocked.finish();
+        match args[0] {
+            "clean" => drop(sb.ok(&["install"])),
+            "target" => drop(sb.ok(&["target", "add", "claude"])),
+            _ => {}
+        }
+    }
+    assert!(!sb.read(managed).contains("LOCAL"));
+}
+
+/// A project whose path isn't valid UTF-8 can't record links (the links file
+/// stores the project root as JSON text). `link` must refuse before touching
+/// any target output, not after the vendors already materialized the working
+/// copy. Linux only: macOS (APFS) and Windows reject such names outright.
+#[cfg(target_os = "linux")]
+#[test]
+fn link_in_a_non_utf8_project_refuses_before_writing_any_output() {
+    use std::os::unix::ffi::OsStrExt;
+    let mut sb = Sandbox::new();
+    sb.project = sb.root.join(std::ffi::OsStr::from_bytes(b"proj\xffect"));
+    std::fs::create_dir_all(&sb.project).unwrap();
+    sb.ok(&["init", "--target", "copilot"]);
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--name",
+        "greet",
+    ]);
+    local_skill_checkout(&sb, "dev", "LOCAL");
+    let managed = ".agents/skills/spm-managed-skills/greet/SKILL.md";
+    let before = sb.read(managed);
+
+    let err = fails(&sb, &["link", "greet", "../dev"]);
+    assert!(err.contains("not valid UTF-8"), "{err}");
+    assert_eq!(sb.read(managed), before);
+    assert!(!sb.spm_home.join("links").exists());
 }

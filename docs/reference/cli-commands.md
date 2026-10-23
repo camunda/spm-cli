@@ -230,6 +230,10 @@ spm install                               # re-run after further edits
   a global link (or another project's) pointing into this project's output
   makes this project's syncs, `clean` and `target remove` refuse until it is
   unlinked where it was linked.
+  These checks hold even when the linked directory has since been deleted, and
+  they can't race: `link`/`unlink` serialize with every command that rewrites
+  target output via a machine-wide lock (`$SPM_HOME/links.lock`); a command that
+  has to wait says so on stderr.
 - Under a [source policy](/guide/source-policy) a link is a local source, so it
   needs `file://*` even when the dependency it overrides is an allowed remote.
 - A linked plugin's working tree may bundle different skills than its locked
