@@ -2,10 +2,12 @@ name: release
 
 # Cross-compiles static binaries for every target, attaches them to the GitHub
 # Release, and publishes them to npm as `@camunda8/spm` (+ per-platform packages)
-# when a v* tag is pushed. See RELEASE.md for the full release procedure.
+# when a vX.Y.Z tag is pushed. See RELEASE.md for the full release procedure.
 on:
   push:
-    tags: ["v*"]
+    # Release tags only: the moving major tag of the GitHub Action (`v0`, see
+    # RELEASE.md) must not start a release. action/test/release.test.mjs guards it.
+    tags: ["v*.*.*"]
   workflow_dispatch:
     inputs:
       dry_run:
@@ -105,6 +107,43 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: ${{ env.ASSET }}
+
+  # Publishes SHA256SUMS over the attached binaries: the setup action
+  # (action.yml) refuses to install a binary that has no matching checksum.
+  # Computed from the same build artifacts the npm job packages, then verified
+  # against the assets actually downloadable from the release.
+  checksums:
+    name: checksums
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # attach SHA256SUMS to the GitHub Release
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+      - name: Download binary artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+      - name: Compute SHA256SUMS
+        run: node action/stage-release.mjs --bin-dir artifacts --out release-assets
+      - name: Attach to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/SHA256SUMS
+      - name: Verify published assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir published \
+            --pattern 'spm-*' --pattern SHA256SUMS
+          cd published
+          sha256sum --check --strict SHA256SUMS
 
   # Publishes the root `@camunda8/spm` launcher package plus the five
   # per-platform binary packages to npm using npm Trusted Publishing (OIDC) — no

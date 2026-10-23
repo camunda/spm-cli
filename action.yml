@@ -1,0 +1,34 @@
+name: "Setup spm"
+description: "Install spm (the skill package manager) from a GitHub Release, verify its SHA-256 checksum, and add it to PATH."
+author: "Camunda"
+branding:
+  icon: "package"
+  color: "orange"
+
+inputs:
+  version:
+    description: >-
+      spm version to install (`X.Y.Z` or `vX.Y.Z`). Defaults to the version of
+      this action, so `camunda/spm-cli@v0.11.0` installs 0.11.0 and the moving
+      `@v0` tag installs the newest 0.x release.
+    required: false
+    default: ""
+  release-url:
+    description: >-
+      Base URL the release assets are downloaded from, as
+      `<release-url>/v<version>/<asset>`. Override it to install from a mirror
+      (an HTTP(S) proxy of GitHub Releases, or a `file://` directory on a
+      self-hosted runner). The binary is always verified against the
+      `SHA256SUMS` served next to it.
+    required: false
+    default: "https://github.com/camunda/spm-cli/releases/download"
+
+outputs:
+  version:
+    description: "The installed spm version (without a leading `v`)."
+  path:
+    description: "Absolute path of the installed spm binary."
+
+runs:
+  using: "node24"
+  main: "action/setup.mjs"

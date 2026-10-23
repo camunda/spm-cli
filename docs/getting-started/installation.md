@@ -68,6 +68,16 @@ make install PREFIX=~/.local  # or a custom prefix
 # or: cargo install --path .
 ```
 
+## In GitHub Actions
+
+```yaml
+- uses: camunda/spm-cli@v0   # verified against the release's SHA256SUMS, then on PATH
+- run: spm install --locked
+```
+
+See [CI & Automated Updates](/guide/ci) for pinning a version and for automated
+update pull requests.
+
 ## Next steps
 
 - [Quick Start](/getting-started/quick-start) — add your first skill in a few commands.

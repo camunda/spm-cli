@@ -421,6 +421,34 @@ spm scan ./my-skill    # scan a specific path
 To override the gate for content you trust (or a false positive), set
 `SPM_ALLOW_SUSPICIOUS=1` — findings are then printed as warnings but never block.
 
+## CI & automated updates (GitHub Actions)
+
+Install spm in a workflow (checksum-verified, Linux/macOS/Windows) and open one
+pull request per outdated skill on a schedule — each with the version change and
+the `spm scan` findings of the new code:
+
+```yaml
+# .github/workflows/spm-update.yml
+on:
+  schedule: [{ cron: "0 6 * * 1" }]
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: camunda/spm-cli@v0          # installs spm
+      - uses: camunda/spm-cli/update@v0   # one PR per outdated skill/plugin
+```
+
+Blocking scan findings label the PR `spm-scan-blocked`; closing a PR skips that
+version. See [CI & Automated Updates](https://camunda.github.io/spm-cli/guide/ci)
+for the inputs, tokens (PRs opened with `github.token` don't trigger CI) and a
+Renovate alternative.
+
 ## Global skills (`-g` / `--global`)
 
 By default every command operates on the **project** in the current directory.

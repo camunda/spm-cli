@@ -31,7 +31,8 @@ name: Publish
 on:
   push:
     tags:
-      - 'v*'
+      # Release tags only, never the action's moving `v0` (see RELEASE.md).
+      - 'v*.*.*'
   workflow_dispatch:
     inputs:
       dry_run:
