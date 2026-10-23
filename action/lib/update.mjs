@@ -189,12 +189,12 @@ async function updateOne(row, ctx) {
       if (!spec) throw new Error(`${kind} \`${name}\` is not declared in ai.json`);
       // Values are attached with `=` and positionals follow `--`, so a name
       // (or URL, tag, path) starting with `-` is never parsed as a flag.
-      args = ["add", `--tag=${plan.tag}`, `--name=${name}`, "--force"];
+      args = ["add", `--tag=${plan.tag}`, `--name=${name}`, "--force", "--lock-only"];
       if (spec.path) args.push(`--path=${spec.path}`);
       if (kind === "plugin") args.push("--plugin");
       args.push("--", spec.git);
     } else {
-      args = ["update", "--", name];
+      args = ["update", "--lock-only", "--", name];
     }
     const sync = exec("spm", args, { cwd: wd, env: spmEnv });
     log.info(sync.stdout.trim());
