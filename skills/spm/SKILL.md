@@ -488,39 +488,26 @@ configured, any source is accepted.
 
 Failure states to know about:
 
-- A single `spm add` writes the new entry into `ai.json` *after* two pre-save
-  lookups but *before* it resolves and fetches. The pre-save lookups happen
-  first and never touch `ai.json`: expanding a `github.com/...@<ref>` shorthand
-  (a `git ls-remote` to classify the ref as a tag or branch) and, when no
-  `--tag`/`--branch`/`--commit` is given, resolving the remote's default branch.
-  So a failure *there* — a malformed shorthand, an `@<ref>` that is neither a
-  tag nor a branch, an auth/network error during either lookup, or an empty
-  repo/detached HEAD with no default branch — leaves `ai.json` untouched. Once
-  those pass, the entry is saved and only then does `sync` resolve, fetch, scan
-  and materialize; a failure at *that* stage (a bad explicit selector, an auth
-  error during the fetch, a blocked scan) leaves the entry in `ai.json` with no
-  pin (for a new name). Either fix the cause and run `spm install`, or drop it
-  with `spm remove <name>`. This ordering is specific to a single `spm add`:
-  `spm add --all` resolves and fetches the container (and checks each sub-skill
-  against the existing *skills*) *before* it writes `ai.json`, so a bad ref, auth
-  failure, invalid container or a collision with an existing skill leaves no new
-  entries. Other collisions are only detected *after* the write, when `sync`
-  reloads the manifest: a sub-skill whose name matches an existing *plugin* (or a
-  skill bundled by one of your plugins) is saved into `ai.json` first and only
-  then rejected, and — like a scan block — leaves the batch entries behind.
-  Inspect the manifest before running `spm remove` after any add failure
-  rather than assuming the state either way.
+- Commands that edit `ai.json` and then sync — `spm add` (with or without
+  `--all`/`--force`), `spm remove` and `spm target add` — are transactional for
+  `ai.json`: if the sync step fails (a bad ref or commit, an unreachable source
+  or auth error during the fetch, a blocked content scan, a name collision only
+  detected on reload), spm writes the previous `ai.json` back byte for byte and
+  says so on stderr (`rolled back: .../ai.json was restored to its previous state`).
+  Failures before the save (a malformed shorthand, an unknown `@<ref>`, a
+  default-branch lookup error, a duplicate name) never touch it. Either way,
+  fix the cause and re-run the *same* command — it will not be rejected as
+  `already exists`. In the rare case the restore itself fails, the error says
+  so and `ai.json` still holds the change; fix or revert it by hand.
 - `ai.lock` is only written when a sync fully succeeds, so a failure *before*
   materialization (resolution, fetch, scan, collision check) leaves `ai.lock` and
   every materialized skill on the old pin. Materialization itself is not atomic,
   though: `sync` rewrites each configured target in turn before saving `ai.lock`,
   so a copy/configuration failure partway through can leave some targets updated
-  (or partially rewritten) while `ai.lock` still holds the old pin. If `spm add
-  --force` replaces an existing entry and then fails, `ai.json` holds the new
-  (failing) selector; `spm list` and `spm status` keep reporting the old pin as
-  installed — and `status` only compares names, so it will not flag a
-  half-updated target — until an `spm install` succeeds. Re-run `spm install`
-  after fixing the cause to restore every target to a consistent state.
+  (or partially rewritten) while `ai.json` and `ai.lock` still hold the old
+  state; `spm status` only compares names, so it will not flag a half-updated
+  target. Re-run `spm install` after fixing the cause to restore every target to
+  a consistent state.
 - To change the version selector of an existing entry from the CLI, re-run
   `spm add` for it with `--force` and the new selector (and the same
   `--name` and `--path`).

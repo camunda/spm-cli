@@ -1,5 +1,5 @@
 use super::clean::managed_names;
-use super::sync::sync;
+use super::sync::save_and_sync;
 use crate::lockfile::Lockfile;
 use crate::manifest::Manifest;
 use crate::scope::Scope;
@@ -54,9 +54,8 @@ pub(super) fn target_add(scope: &Scope, vendors: Vec<String>) -> Result<()> {
         return Ok(());
     }
 
-    manifest.save(&dir)?;
     // Materialize existing skills into the newly-added vendor(s).
-    sync(scope, false, None, false)?;
+    save_and_sync(scope, &manifest)?;
     println!("added target(s): {}", added.join(", "));
     Ok(())
 }

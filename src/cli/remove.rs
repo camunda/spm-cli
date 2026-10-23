@@ -1,4 +1,4 @@
-use super::sync::sync;
+use super::sync::save_and_sync;
 use crate::manifest::Manifest;
 use crate::scope::Scope;
 use anyhow::{bail, Result};
@@ -17,8 +17,7 @@ pub(super) fn remove(scope: &Scope, name: &str, plugin: bool) -> Result<()> {
             Manifest::path_in(&dir).display()
         );
     }
-    manifest.save(&dir)?;
-    sync(scope, false, None, false)?;
+    save_and_sync(scope, &manifest)?;
     println!("removed {kind} {name}");
     Ok(())
 }

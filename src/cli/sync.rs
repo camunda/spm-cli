@@ -3,7 +3,7 @@ use crate::manifest::{Manifest, SkillSpec};
 use crate::scope::Scope;
 use crate::vendor::{MaterializedPlugin, MaterializedSkill};
 use crate::{resolver, store, transitive};
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Core pipeline shared by add/remove/update/install:
@@ -424,6 +424,40 @@ pub(super) fn sync(
     Ok(lock.skills.len() + lock.plugins.len())
 }
 
+/// Persist an edited `manifest` as `ai.json` and [`sync`] it — transactionally.
+///
+/// Every command that edits `ai.json` and then syncs (`add`, `add --all`,
+/// `remove`, `target add`) must go through here: if the sync fails (unreachable
+/// source, unknown ref, content-scan block, ...) the exact previous `ai.json`
+/// bytes are written back, so a failed command leaves the manifest untouched and
+/// retrying it is not rejected as a duplicate. The original bytes (not a
+/// re-serialization) are restored, preserving hand formatting and CRLF line
+/// endings. `ai.lock` needs no rollback: `sync` only writes it after every
+/// fallible step has succeeded.
+pub(super) fn save_and_sync(scope: &Scope, manifest: &Manifest) -> Result<usize> {
+    let dir = scope.manifest_dir()?;
+    let path = Manifest::path_in(&dir);
+    let original = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+    manifest.save(&dir)?;
+    sync(scope, false, None, false).map_err(|err| rollback(&path, &original, err))
+}
+
+/// Write `original` back to `path` after `err`, and report the outcome of the
+/// rollback alongside the original error.
+fn rollback(path: &std::path::Path, original: &[u8], err: anyhow::Error) -> anyhow::Error {
+    match std::fs::write(path, original) {
+        Ok(()) => anyhow!(
+            "{err:#}\nrolled back: {} was restored to its previous state",
+            path.display()
+        ),
+        Err(restore) => anyhow!(
+            "{err:#}\nerror: could not restore {} to its previous state ({restore}); \
+             it still contains this command's change — fix or revert it by hand",
+            path.display()
+        ),
+    }
+}
+
 /// The pin in `prev` if it can be reused for `spec` without re-resolving, else
 /// why not (missing, refreshing, or the request changed).
 fn reusable_pin(
@@ -516,4 +550,48 @@ fn reject_case_folding_collisions<'a>(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rollback;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "spm-rollback-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn rollback_restores_the_exact_original_bytes() {
+        let dir = scratch("ok");
+        let path = dir.join("ai.json");
+        let original = b"{\r\n  \"targets\": []\r\n}\r\n";
+        std::fs::write(&path, b"{\"changed\": true}\n").unwrap();
+        let msg = format!("{:#}", rollback(&path, original, anyhow::anyhow!("boom")));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert!(msg.starts_with("boom\n"), "{msg}");
+        assert!(msg.contains("was restored to its previous state"), "{msg}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn rollback_reports_a_failed_restore_with_the_original_error() {
+        let dir = scratch("fail");
+        // A path whose parent does not exist cannot be written on any platform.
+        let path = dir.join("missing").join("ai.json");
+        let msg = format!("{:#}", rollback(&path, b"{}", anyhow::anyhow!("boom")));
+        assert!(msg.starts_with("boom\n"), "{msg}");
+        assert!(msg.contains("could not restore"), "{msg}");
+        assert!(msg.contains("fix or revert it by hand"), "{msg}");
+        assert!(!msg.contains("was restored"), "{msg}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

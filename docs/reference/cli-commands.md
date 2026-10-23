@@ -102,6 +102,12 @@ default: a hand-edited `ai.json` entry must still set exactly one selector.
 spm add https://github.com/org/repo --tag v1.0.0 --path skills --all
 ```
 
+`spm add` never leaves a half-recorded entry behind: if resolving, fetching,
+scanning or materializing fails (an unreachable source, a bad ref, a blocked
+content scan), spm restores `ai.json` byte for byte and leaves `ai.lock`
+untouched, so you can fix the cause and re-run the same command. `spm remove`
+and `spm target add` behave the same way.
+
 #### Adding a full plugin (`--plugin`)
 
 Beyond individual skills, spm can install a **Claude Code plugin** — one that
