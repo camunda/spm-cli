@@ -747,7 +747,14 @@ pub(super) fn guard_working_copies(
         let dir = match manifest_dir.join(display).canonicalize() {
             Ok(d) if d.is_dir() => d,
             Ok(_) => continue,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                continue
+            }
             Err(e) => {
                 return Err(e).with_context(|| {
                     format!(
@@ -817,6 +824,11 @@ fn reject_link_overlaps(
         let id = identity(&resolve(p, &mut Vec::new())?)?;
         outputs.push((owner, p.clone(), id, true));
     }
+    // The links file is also deleted once it holds nothing, which removes the
+    // entry at its path (not what a final symlink there points at).
+    let links_file = Links::path(scope)?;
+    let id = identity(&deletion_target(&links_file)?)?;
+    outputs.push(("spm", links_file, id, false));
     for (name, dir, display, active) in guarded {
         let src = identity(dir)?;
         // Every location the content depends on: the recorded path's own hops,

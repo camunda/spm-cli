@@ -10577,3 +10577,82 @@ fn guard_fails_closed_when_a_linked_dir_cannot_be_inspected() {
     assert!(installed.exists(), "clean deleted output despite failing");
     sb.ok(&["clean"]);
 }
+
+/// Dropping the last link deletes the links file at its path, so that path's
+/// own location is guarded too — not only where a symlink there points.
+#[test]
+fn unlink_never_deletes_a_links_file_entry_inside_the_working_copy() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--name",
+        "greet",
+    ]);
+    let dev = local_skill_checkout(&sb, "dev", "LOCAL");
+    sb.ok(&["link", "greet", "../dev"]);
+
+    let state = sb.root.join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    let spm_dir = sb.project.join(".spm");
+    std::fs::rename(spm_dir.join("links.json"), state.join("links.json")).unwrap();
+    std::fs::remove_dir_all(&spm_dir).unwrap();
+    let meta = dev.join("meta");
+    std::fs::create_dir_all(&meta).unwrap();
+    symlink(state.join("links.json"), meta.join("links.json"));
+    symlink(meta.clone(), &spm_dir);
+
+    let err = fails(&sb, &["unlink", "greet"]);
+    assert!(err.contains("overlaps"), "{err}");
+    assert!(
+        std::fs::symlink_metadata(meta.join("links.json"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the working copy's entry was removed"
+    );
+    assert!(read_path(&state.join("links.json")).contains("greet"));
+}
+
+/// A recorded working copy whose parent became a file is gone, like a missing
+/// one: it never blocks unlinking or relinking.
+#[test]
+fn a_link_whose_parent_became_a_file_never_blocks_recovery() {
+    for recover in [
+        &["unlink", "greet"][..],
+        &["unlink", "--all"][..],
+        &["link", "greet", "../other"][..],
+    ] {
+        let sb = Sandbox::new();
+        sb.ok(&["init", "--target", "copilot"]);
+        sb.ok(&[
+            "add",
+            &sb.skill_url(),
+            "--branch",
+            "main",
+            "--name",
+            "greet",
+        ]);
+        let skill = sb.root.join("dev/skill");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "---\nname: greet\n---\nWIP\n").unwrap();
+        sb.ok(&["link", "greet", "../dev/skill"]);
+        std::fs::remove_dir_all(sb.root.join("dev")).unwrap();
+        std::fs::write(sb.root.join("dev"), "now a file").unwrap();
+        local_skill_checkout(&sb, "other", "OTHER");
+
+        sb.ok(recover);
+        let installed = sb
+            .project
+            .join(".agents/skills/spm-managed-skills/greet/SKILL.md");
+        let want = if recover[0] == "link" {
+            "OTHER"
+        } else {
+            "Greet warmly."
+        };
+        assert!(read_path(&installed).contains(want), "{recover:?}");
+    }
+}
