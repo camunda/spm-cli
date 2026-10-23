@@ -10106,7 +10106,8 @@ fn link_rejects_dirs_reached_by_files_spm_writes_through() {
         let before = std::fs::read(&inside).unwrap();
         let err = fails(&sb, &["link", "greet", "../dev"]);
         assert!(err.contains("overlaps"), "{rel}: {err}");
-        assert!(err.contains(rel), "{rel}: {err}");
+        let shown = rel.replace('/', std::path::MAIN_SEPARATOR_STR);
+        assert!(err.contains(&shown), "{rel}: {err}");
         assert_eq!(std::fs::read(&inside).unwrap(), before, "{rel} written");
         remove_symlink(&real);
         if existed {
