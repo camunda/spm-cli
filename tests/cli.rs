@@ -5968,8 +5968,8 @@ fn list_json_reports_full_commits_selectors_and_plugins() {
         doc["skills"],
         serde_json::json!([{
             "name": "greet", "git": sb.skill_url(), "path": null,
-            "selector": { "branch": "main" }, "commit": head, "installed": true,
-            "transitive": false, "requestedBy": []
+            "selector": { "branch": "main" }, "resolvedTag": null, "commit": head,
+            "installed": true, "transitive": false, "requestedBy": []
         }]),
         "{doc}"
     );
@@ -5977,8 +5977,8 @@ fn list_json_reports_full_commits_selectors_and_plugins() {
         doc["plugins"],
         serde_json::json!([{
             "name": "ds", "git": sb.skill_url(), "path": "pkg",
-            "selector": { "branch": "main" }, "commit": head, "installed": true,
-            "bundledSkills": ["composer"]
+            "selector": { "branch": "main" }, "resolvedTag": null, "commit": head,
+            "installed": true, "bundledSkills": ["composer"]
         }]),
         "{doc}"
     );
@@ -6951,7 +6951,8 @@ fn outdated_reports_behind_newer_tag_and_pinned_without_writing_anything() {
         serde_json::json!({
             "name": "br", "git": sb.skill_url(), "path": null,
             "selector": { "branch": "main" }, "locked": locked_main,
-            "remoteCommit": tip, "latestTag": null, "latestTagCommit": null,
+            "resolvedTag": null, "remoteCommit": tip, "latestInRange": null,
+            "latestTag": null, "latestTagCommit": null,
             "status": "behind", "outdated": true, "transitive": false,
             "requestedBy": [], "alsoSatisfies": [], "error": null
         }),
@@ -8705,4 +8706,385 @@ fn policy_refuses_checkout_when_a_filter_cant_be_disabled() {
         .project
         .join(".agents/skills/spm-managed-skills/greet")
         .exists());
+}
+
+// ---- `version` semver range selector -------------------------------------
+
+/// Commit a new revision in the fixture skill repo and tag it. Annotated tags
+/// (`annotated`) exercise the `^{}` peel; lightweight ones the plain ref.
+/// Returns the commit SHA the tag points at.
+fn release(sb: &Sandbox, tag: &str, annotated: bool) -> String {
+    std::fs::write(sb.skill_repo.join("VERSION"), format!("{tag}\n")).unwrap();
+    sb.git(&["add", "-A"]);
+    sb.git(&["commit", "-qm", tag]);
+    if annotated {
+        sb.git(&["tag", "-a", tag, "-m", tag]);
+    } else {
+        sb.git(&["tag", tag]);
+    }
+    skill_head(&sb.skill_repo)
+}
+
+/// Tag a ladder of releases: `v`-prefixed and bare, annotated and lightweight,
+/// a prerelease, a non-semver tag and a next major. Returns
+/// `(v1.2.0, 1.3.0, v1.4.1, v1.5.0-rc.1)` commits.
+fn range_fixture(sb: &Sandbox) -> (String, String, String, String) {
+    release(sb, "v1.0.0", true);
+    let v120 = release(sb, "v1.2.0", false);
+    let b130 = release(sb, "1.3.0", false);
+    let v141 = release(sb, "v1.4.1", true);
+    let rc = release(sb, "v1.5.0-rc.1", true);
+    release(sb, "latest", false);
+    release(sb, "v2.0.0", true);
+    (v120, b130, v141, rc)
+}
+
+fn lock_doc(sb: &Sandbox) -> serde_json::Value {
+    serde_json::from_str(&sb.read("ai.lock")).unwrap()
+}
+
+#[test]
+fn add_version_range_locks_the_highest_matching_tag() {
+    let sb = Sandbox::new();
+    let (_, _, v141, _) = range_fixture(&sb);
+    sb.ok(&["init", "--target", "claude"]);
+    let out = sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--version",
+        "^1.2",
+        "--name",
+        "greet",
+    ]);
+    assert!(out.contains("version:^1.2 → v1.4.1"), "{out}");
+
+    let manifest: serde_json::Value = serde_json::from_str(&sb.read("ai.json")).unwrap();
+    let spec = &manifest["skills"]["greet"];
+    assert_eq!(spec["version"], "^1.2", "{manifest}");
+    for other in ["tag", "branch", "commit"] {
+        assert!(spec.get(other).is_none(), "{manifest}");
+    }
+
+    // Ignores the non-semver `latest`, the prerelease and the next major;
+    // the annotated tag is peeled to its commit.
+    let lock = lock_doc(&sb);
+    let locked = &lock["skills"]["greet"];
+    assert_eq!(locked["reference"], "version:^1.2", "{lock}");
+    assert_eq!(locked["resolved_tag"], "v1.4.1", "{lock}");
+    assert_eq!(locked["commit"], v141.as_str(), "{lock}");
+
+    let list = sb.ok(&["list"]);
+    assert!(list.contains("version:^1.2 → v1.4.1"), "{list}");
+    let doc = json_doc(&sb.spm(&["list", "--json"]));
+    let row = doc["skills"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "greet")
+        .unwrap();
+    assert_eq!(row["resolvedTag"], "v1.4.1", "{doc}");
+}
+
+#[test]
+fn version_range_matches_bare_tags_and_opt_in_prereleases() {
+    let sb = Sandbox::new();
+    let (_, b130, _, rc) = range_fixture(&sb);
+    sb.ok(&["init", "--target", "claude"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["claude"],"skills":{{
+                "bare":{{"git":"{u}","version":"~1.3"}},
+                "pre":{{"git":"{u}","version":"~1.5.0-rc.1"}},
+                "nopre":{{"git":"{u}","version":">=1.4.1, <2"}}}}}}"#,
+            u = sb.skill_url()
+        ),
+    );
+    sb.ok(&["install"]);
+    let lock = lock_doc(&sb);
+    assert_eq!(lock["skills"]["bare"]["resolved_tag"], "1.3.0", "{lock}");
+    assert_eq!(lock["skills"]["bare"]["commit"], b130.as_str(), "{lock}");
+    assert_eq!(
+        lock["skills"]["pre"]["resolved_tag"], "v1.5.0-rc.1",
+        "{lock}"
+    );
+    assert_eq!(lock["skills"]["pre"]["commit"], rc.as_str(), "{lock}");
+    // A prerelease never satisfies a requirement that did not opt in.
+    assert_eq!(lock["skills"]["nopre"]["resolved_tag"], "v1.4.1", "{lock}");
+}
+
+#[test]
+fn exact_tag_stays_exact_even_when_newer_versions_exist() {
+    let sb = Sandbox::new();
+    let (v120, _, _, _) = range_fixture(&sb);
+    sb.ok(&["init", "--target", "claude"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v1.2.0", "--name", "greet"]);
+    let lock = lock_doc(&sb);
+    assert_eq!(lock["skills"]["greet"]["reference"], "tag:v1.2.0", "{lock}");
+    assert_eq!(lock["skills"]["greet"]["commit"], v120.as_str(), "{lock}");
+    assert!(
+        lock["skills"]["greet"].get("resolved_tag").is_none(),
+        "{lock}"
+    );
+}
+
+#[test]
+fn install_keeps_the_range_pin_and_update_moves_within_it() {
+    let sb = Sandbox::new();
+    let (_, _, v141, _) = range_fixture(&sb);
+    sb.ok(&["init", "--target", "claude"]);
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--version",
+        "^1.2",
+        "--name",
+        "greet",
+    ]);
+    let v160 = release(&sb, "v1.6.0", true);
+    let v210 = release(&sb, "v2.1.0", true);
+
+    // A new in-range tag does not move an existing pin on install.
+    sb.ok(&["install"]);
+    sb.ok(&["install", "--locked"]);
+    assert_eq!(lock_doc(&sb)["skills"]["greet"]["commit"], v141.as_str());
+
+    let doc = json_doc(&sb.spm(&["outdated", "--json"]));
+    let row = outdated_row(&doc, "greet");
+    assert_eq!(row["status"], "behind", "{doc}");
+    assert_eq!(row["selector"], serde_json::json!({"version": "^1.2"}));
+    assert_eq!(row["resolvedTag"], "v1.4.1", "{doc}");
+    assert_eq!(row["latestInRange"], "v1.6.0", "{doc}");
+    assert_eq!(row["remoteCommit"], v160.as_str(), "{doc}");
+    assert_eq!(row["latestTag"], "v2.1.0", "{doc}");
+    assert_eq!(row["latestTagCommit"], v210.as_str(), "{doc}");
+    let text = sb.ok(&["outdated"]);
+    assert!(text.contains("version:^1.2 → v1.4.1"), "{text}");
+    assert!(text.contains("tag:v1.6.0"), "{text}");
+    assert!(
+        text.contains("newer tag outside the range: v2.1.0"),
+        "{text}"
+    );
+    assert!(
+        text.contains("greet: newer tag within the version range — run `spm update`"),
+        "{text}"
+    );
+
+    // `update` re-resolves to the newest in-range tag, never the next major.
+    sb.ok(&["update", "greet"]);
+    let lock = lock_doc(&sb);
+    assert_eq!(lock["skills"]["greet"]["resolved_tag"], "v1.6.0", "{lock}");
+    assert_eq!(lock["skills"]["greet"]["commit"], v160.as_str(), "{lock}");
+
+    let doc = json_doc(&sb.spm(&["outdated", "--json"]));
+    let row = outdated_row(&doc, "greet");
+    assert_eq!(row["status"], "newer-tag", "{doc}");
+    assert_eq!(row["latestInRange"], "v1.6.0", "{doc}");
+    assert_eq!(row["latestTag"], "v2.1.0", "{doc}");
+    let text = sb.ok(&["outdated"]);
+    assert!(
+        text.contains("greet: newer tag outside the version range — widen `version`"),
+        "{text}"
+    );
+
+    // Widening the requirement is drift: the next install re-resolves.
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["claude"],"skills":{{"greet":{{"git":"{}","version":">=1.2"}}}}}}"#,
+            sb.skill_url()
+        ),
+    );
+    sb.ok(&["install"]);
+    let lock = lock_doc(&sb);
+    assert_eq!(
+        lock["skills"]["greet"]["reference"], "version:>=1.2",
+        "{lock}"
+    );
+    assert_eq!(lock["skills"]["greet"]["resolved_tag"], "v2.1.0", "{lock}");
+    let doc = json_doc(&sb.spm(&["outdated", "--json"]));
+    assert_eq!(outdated_row(&doc, "greet")["status"], "up-to-date", "{doc}");
+}
+
+#[test]
+fn outdated_warns_when_the_resolved_range_tag_was_repointed() {
+    let sb = Sandbox::new();
+    range_fixture(&sb);
+    sb.ok(&["init", "--target", "claude"]);
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--version",
+        "~1.4",
+        "--name",
+        "greet",
+    ]);
+    advance_main(&sb);
+    sb.git(&["tag", "-f", "-a", "v1.4.1", "-m", "moved"]);
+
+    let doc = json_doc(&sb.spm(&["outdated", "--json"]));
+    assert_eq!(outdated_row(&doc, "greet")["status"], "tag-moved", "{doc}");
+    let err = stderr_of(&sb.spm(&["outdated"]));
+    assert!(
+        err.contains("tag `v1.4.1` (locked for `version: ~1.4`) of `greet`"),
+        "{err}"
+    );
+}
+
+#[test]
+fn version_range_errors_are_actionable() {
+    let sb = Sandbox::new();
+    range_fixture(&sb);
+    sb.ok(&["init", "--target", "claude"]);
+    let url = sb.skill_url();
+
+    let out = sb.spm(&["add", &url, "--version", "^9", "--name", "greet"]);
+    assert!(!out.status.success());
+    let err = stderr_of(&out);
+    assert!(err.contains("no tag") && err.contains("^9"), "{err}");
+    assert!(err.contains("v2.0.0") && err.contains("v1.4.1"), "{err}");
+    assert!(
+        !err.contains("latest"),
+        "non-semver tags are not listed: {err}"
+    );
+
+    let out = sb.spm(&["add", &url, "--version", "^v1.2", "--name", "greet"]);
+    assert!(!out.status.success());
+    let err = stderr_of(&out);
+    assert!(err.contains("invalid version requirement"), "{err}");
+    assert!(err.contains("`v`"), "{err}");
+
+    let out = sb.spm(&["add", &url, "--version", "^1.2", "--tag", "v1.2.0"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr_of(&out).contains("cannot be used with"),
+        "{}",
+        stderr_of(&out)
+    );
+
+    assert!(!sb.project.join("ai.lock").exists() || !sb.read("ai.lock").contains("greet"));
+}
+
+#[test]
+fn manifest_rejects_version_with_another_selector_or_a_bad_requirement() {
+    let sb = Sandbox::new();
+    for (spec, needle) in [
+        (r#"{"git":"u","version":"^1","tag":"v1.0.0"}"#, "oneOf"),
+        (r#"{"git":"u","version":""}"#, "does not match schema"),
+        (
+            r#"{"git":"u","version":"banana"}"#,
+            "invalid version requirement",
+        ),
+    ] {
+        write_manifest(
+            &sb,
+            &format!(r#"{{"targets":["claude"],"skills":{{"x":{spec}}}}}"#),
+        );
+        let out = sb.spm(&["install"]);
+        assert!(!out.status.success(), "{spec} must be rejected");
+        let err = stderr_of(&out);
+        assert!(err.contains(needle), "{spec}: {err}");
+    }
+}
+
+#[test]
+fn plugin_accepts_a_version_range() {
+    let sb = Sandbox::new();
+    sb.add_plugin();
+    let v1 = release(&sb, "v1.1.0", true);
+    release(&sb, "v2.0.0", true);
+    sb.ok(&["init", "--target", "claude"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["claude"],"plugins":{{"ds":{{"git":"{}","version":"1","path":"pkg"}}}}}}"#,
+            sb.skill_url()
+        ),
+    );
+    sb.ok(&["install"]);
+    let lock = lock_doc(&sb);
+    assert_eq!(lock["plugins"]["ds"]["reference"], "version:1", "{lock}");
+    assert_eq!(lock["plugins"]["ds"]["resolved_tag"], "v1.1.0", "{lock}");
+    assert_eq!(lock["plugins"]["ds"]["commit"], v1.as_str(), "{lock}");
+    let list = sb.ok(&["list"]);
+    assert!(list.contains("version:1 → v1.1.0"), "{list}");
+}
+
+#[test]
+fn transitive_dependency_can_request_a_version_range() {
+    let sb = Sandbox::new();
+    let leaf_dir = sb.root.join("range-leaf");
+    make_repo(&leaf_dir, &[("SKILL.md", "---\nname: leaf\n---\nLeaf.\n")]);
+    git_in(&leaf_dir, &["tag", "v1.0.0"]);
+    std::fs::write(leaf_dir.join("NOTES.md"), "x\n").unwrap();
+    git_in(&leaf_dir, &["add", "-A"]);
+    git_in(&leaf_dir, &["commit", "-qm", "1.1"]);
+    git_in(&leaf_dir, &["tag", "-a", "v1.1.0", "-m", "v1.1.0"]);
+    let v110 = skill_head(&leaf_dir);
+    std::fs::write(leaf_dir.join("NOTES.md"), "y\n").unwrap();
+    git_in(&leaf_dir, &["add", "-A"]);
+    git_in(&leaf_dir, &["commit", "-qm", "2"]);
+    git_in(&leaf_dir, &["tag", "v2.0.0"]);
+    let leaf = format!(
+        "file://{}",
+        leaf_dir.display().to_string().replace('\\', "/")
+    );
+    let top = make_repo(
+        &sb.root.join("range-top"),
+        &[
+            ("SKILL.md", "---\nname: top\n---\nTop.\n"),
+            (
+                "ai.json",
+                &format!(r#"{{"skills":{{"leaf":{{"git":"{leaf}","version":"^1"}}}}}}"#),
+            ),
+        ],
+    );
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{"top":{{"git":"{top}","branch":"main"}}}}}}"#
+        ),
+    );
+    sb.ok(&["install"]);
+    let lock = lock_doc(&sb);
+    let leaf_row = lock["skills"]
+        .as_object()
+        .unwrap()
+        .values()
+        .find(|v| v["reference"] == "version:^1")
+        .unwrap_or_else(|| panic!("no transitive range entry: {lock}"));
+    assert_eq!(leaf_row["resolved_tag"], "v1.1.0", "{lock}");
+    assert_eq!(leaf_row["commit"], v110.as_str(), "{lock}");
+}
+
+#[test]
+fn lock_rejects_a_resolved_tag_that_does_not_satisfy_the_range() {
+    let sb = Sandbox::new();
+    range_fixture(&sb);
+    sb.ok(&["init", "--target", "claude"]);
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--version",
+        "^1.2",
+        "--name",
+        "greet",
+    ]);
+    for (from, to) in [
+        (r#""resolved_tag": "v1.4.1""#, r#""resolved_tag": "v2.0.0""#),
+        (r#""resolved_tag": "v1.4.1""#, r#""resolved_tag": "latest""#),
+    ] {
+        let lock = sb.read("ai.lock");
+        assert!(lock.contains(from), "{lock}");
+        std::fs::write(sb.project.join("ai.lock"), lock.replace(from, to)).unwrap();
+        let out = sb.spm(&["install", "--locked"]);
+        assert!(!out.status.success(), "{to} must be rejected");
+        assert!(
+            stderr_of(&out).contains("resolved_tag"),
+            "{}",
+            stderr_of(&out)
+        );
+        std::fs::write(sb.project.join("ai.lock"), lock).unwrap();
+    }
 }

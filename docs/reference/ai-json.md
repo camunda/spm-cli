@@ -12,6 +12,7 @@ and the skill dependencies for your project. spm validates it against an embedde
   "skills": {
     "pdf-tools": { "git": "https://github.com/org/skills", "tag": "v1.2.0", "path": "skills/pdf" },
     "reviewer":  { "git": "https://github.com/me/reviewer", "branch": "main" },
+    "linter":    { "git": "https://github.com/org/linter", "version": "^1.2" },
     "pinned":    { "git": "https://github.com/x/y",         "commit": "a1b2c3d" }
   }
 }
@@ -33,9 +34,10 @@ A map of local skill name → skill spec. Each spec has:
 | `tag`    | one-of   | git tag (annotated tags deref to commit).            |
 | `branch` | one-of   | branch tip at install/update time.                   |
 | `commit` | one-of   | exact commit.                                        |
+| `version`| one-of   | semver range; the highest matching tag (`^1.2`).     |
 | `path`   | optional | subdirectory to select (for monorepos of skills).    |
 
-Exactly **one** version selector (`tag`, `branch`, or `commit`) is required per
+Exactly **one** version selector (`tag`, `branch`, `commit`, or `version`) is required per
 skill. Each selector is locked to a resolved commit SHA in
 [`ai.lock`](/reference/ai-lock):
 
@@ -44,6 +46,24 @@ skill. Each selector is locked to a resolved commit SHA in
 | `tag`    | resolved SHA |
 | `branch` | resolved SHA |
 | `commit` | itself       |
+| `version`| resolved tag + SHA |
+
+### `version` ranges
+
+`version` is a [semver requirement](https://docs.rs/semver/latest/semver/struct.VersionReq.html)
+— `^1.2`, `~1.4`, `>=1.2, <2`, `1`, `=1.4.1` — resolved to the **highest** tag
+that satisfies it:
+
+- a tag may carry one leading `v` (`v1.4.1` and `1.4.1` both match); the
+  requirement itself may not (`^v1.2` is rejected — write `^1.2`);
+- non-semver tags (`latest`, floating `v1`) are ignored;
+- pre-release tags only match a requirement that names a pre-release of the same
+  version (`~1.5.0-rc.1`);
+- if both `v1.2.0` and `1.2.0` exist, the `v`-prefixed one wins.
+
+The chosen tag and its commit are pinned in [`ai.lock`](/reference/ai-lock).
+`spm install` keeps that pin; `spm update` moves it to the newest tag still in
+the range. A `tag` selector is always an exact tag, never a range.
 
 ## `resolveTransitive`
 

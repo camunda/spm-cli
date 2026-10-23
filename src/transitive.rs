@@ -759,6 +759,7 @@ fn resolve_child(spec: &SkillSpec, synth: &str, ctx: &Ctx) -> Result<Option<Lock
                     store: store_key(&spec.git, &commit),
                     path: spec.path.clone(),
                     commit,
+                    resolved_tag: prev.resolved_tag.clone(),
                     bundled_skills: Vec::new(),
                     requested_by: Vec::new(),
                     also_satisfies: Vec::new(),

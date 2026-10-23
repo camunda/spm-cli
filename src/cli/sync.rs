@@ -196,8 +196,7 @@ fn plan(
     }
 
     for (name, spec) in &manifest.skills {
-        let requested = spec.version()?; // validates selectors
-        let reference = requested.label();
+        spec.version()?; // validates selectors
         let refresh = force_refresh && only.is_none_or(|o| o == name);
 
         // Reuse the pinned commit if the request is unchanged and we're not refreshing.
@@ -246,6 +245,7 @@ fn plan(
             }
         }
         let short = &locked.commit[..locked.commit.len().min(8)];
+        let reference = locked.display_reference();
         println!("  {name:<width$}  {reference} @ {short}  ({how})");
         lock.skills.insert(name.clone(), locked);
     }
@@ -254,8 +254,7 @@ fn plan(
     // on the pinned commit being unchanged; its bundled-skill list is (re)filled
     // from the store checkout below, so we never carry a stale one forward.
     for (name, spec) in &manifest.plugins {
-        let requested = spec.version()?;
-        let reference = requested.label();
+        spec.version()?;
         let refresh = force_refresh && only.is_none_or(|o| o == name);
         let reuse = match reusable_pin(prev.plugins.remove(name), spec, refresh)? {
             Ok(l) => Some(l),
@@ -275,6 +274,7 @@ fn plan(
         locked.bundled_skills.clear();
         locked.also_satisfies.clear();
         let short = &locked.commit[..locked.commit.len().min(8)];
+        let reference = locked.display_reference();
         println!("  {name:<width$}  {reference} @ {short}  (plugin, {how})");
         lock.plugins.insert(name.clone(), locked);
     }
@@ -320,7 +320,7 @@ fn plan(
                 "warning: plugin `{name}` ({} @ {}) has no `.claude-plugin/plugin.json`{} — \
                  is it really a plugin? (only its bundled skills, if any, will be materialized)",
                 locked.git,
-                locked.reference,
+                locked.display_reference(),
                 locked
                     .path
                     .as_deref()

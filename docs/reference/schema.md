@@ -30,7 +30,7 @@ validation in editors that support JSON Schema:
 
 - `targets` is a list of supported vendors (`amp`, `claude`, `cline`, `codex`, `copilot`, `cursor`, `gemini`, `windsurf`).
 - Each entry under `skills` requires a `git` URL and **exactly one** version
-  selector (`tag`, `branch`, or `commit`) — enforced via a `oneOf` constraint.
+  selector (`tag`, `branch`, `commit`, or `version`) — enforced via a `oneOf` constraint.
 - Each entry under `plugins` uses the **same spec shape** as a skill (a `git`
   URL plus exactly one version selector, optional `path`) — it declares a full
   Claude Code plugin rather than a single skill.

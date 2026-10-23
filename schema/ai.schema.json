@@ -50,12 +50,17 @@
           "minLength": 1,
           "description": "Git repository URL (https, ssh, scp-style, or file://)."
         },
-        "tag": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string", "minLength": 1, "description": "Exact tag name." },
         "branch": { "type": "string", "minLength": 1 },
         "commit": {
           "type": "string",
           "pattern": "^[0-9a-fA-F]{40}$",
           "description": "Full 40-character commit SHA."
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Semver requirement (e.g. `^1.2`, `~1.4.0`, `>=1.2, <2`; a bare `1.2` means `^1.2`) resolved to the highest matching semver tag (`v1.4.1` or `1.4.1`). Non-semver tags are ignored, and prereleases only match when the requirement names one."
         },
         "path": {
           "type": "string",
@@ -66,7 +71,8 @@
       "oneOf": [
         { "required": ["tag"] },
         { "required": ["branch"] },
-        { "required": ["commit"] }
+        { "required": ["commit"] },
+        { "required": ["version"] }
       ]
     }
   }

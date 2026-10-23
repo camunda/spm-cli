@@ -19,6 +19,23 @@ ai.json ──resolve──▶ ai.lock ──fetch/project──▶ materialized
 | `tag`              | resolved commit SHA    |
 | `branch`           | resolved commit SHA    |
 | `commit`           | itself                 |
+| `version`          | resolved tag + its commit SHA |
+
+A `version` entry stores the requirement in `reference` and the concrete tag it
+resolved to in `resolved_tag`:
+
+```json
+"linter": {
+  "git": "https://github.com/org/linter",
+  "reference": "version:^1.2",
+  "resolved_tag": "v1.4.1",
+  "commit": "<40-hex sha>",
+  "store": "linter-1a2b3c4d@<40-hex sha>"
+}
+```
+
+spm validates it on load: `resolved_tag` must be a semver tag that satisfies the
+requirement, and no other selector may carry one.
 
 [Full plugins](/reference/ai-json#plugins) declared under `plugins` are pinned
 the same way, and `ai.lock` additionally records each plugin's **bundled skill
@@ -53,7 +70,8 @@ git commit -m "chore: pin skills"
 
 ## Updating pins
 
-`branch` and `tag` selectors only move when you ask them to:
+`branch`, `tag` and `version` selectors only move when you ask them to (a
+`version` range moves to the newest tag still inside the range):
 
 ```bash
 spm update            # re-resolve all skills to latest, rewrite ai.lock

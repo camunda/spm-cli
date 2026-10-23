@@ -49,6 +49,11 @@ pub struct LockedSkill {
     pub reference: String,
     /// Resolved immutable commit.
     pub commit: String,
+    /// For a `version:<requirement>` reference: the concrete semver tag the
+    /// requirement resolved to (e.g. `v1.4.1`), so `list`/`outdated` can show
+    /// `^1.2 → v1.4.1` without a remote lookup. Absent for every other selector.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub resolved_tag: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub path: Option<String>,
     /// Store directory key: `<repo-name>-<url-hash>@<sha>`.
@@ -78,6 +83,15 @@ pub struct LockedSkill {
 }
 
 impl LockedSkill {
+    /// The requested selector as shown to humans: the `reference` label, plus
+    /// the concrete tag a `version` range resolved to (`version:^1.2 → v1.4.1`).
+    pub fn display_reference(&self) -> String {
+        match &self.resolved_tag {
+            Some(tag) => format!("{} → {tag}", self.reference),
+            None => self.reference.clone(),
+        }
+    }
+
     /// Compare this pin against the request it would satisfy. `None` when the
     /// pin was resolved from exactly `spec`'s git + selector + path, so it can
     /// be reused without re-resolving; otherwise a human-readable description of
@@ -176,6 +190,7 @@ fn validate_locked_map(map: &BTreeMap<String, LockedSkill>, kind: &str) -> Resul
             crate::manifest::validate_skill_name(r)
                 .with_context(|| format!("{kind} `{name}`: requested_by name"))?;
         }
+        validate_resolved_tag(l).with_context(|| format!("{kind} `{name}`"))?;
         for r in &l.also_satisfies {
             if crate::manifest::Version::from_label(r).is_none() {
                 bail!("{kind} `{name}`: also_satisfies entry `{r}` is not a version selector");
@@ -183,6 +198,32 @@ fn validate_locked_map(map: &BTreeMap<String, LockedSkill>, kind: &str) -> Resul
         }
     }
     Ok(())
+}
+
+/// A `version:<requirement>` pin must record the semver tag it resolved to,
+/// and that tag must satisfy the requirement; any other selector must not carry
+/// one. A hand-edited `ai.lock` therefore cannot make `list`/`outdated` claim a
+/// tag the range could never have picked.
+fn validate_resolved_tag(l: &LockedSkill) -> Result<()> {
+    use crate::manifest::{parse_version_req, semver_of_tag, Version};
+    match (Version::from_label(&l.reference), &l.resolved_tag) {
+        (Some(Version::Range(req)), Some(tag)) => {
+            let req = parse_version_req(&req)?;
+            match semver_of_tag(tag) {
+                Some(v) if req.matches(&v) => Ok(()),
+                Some(_) => bail!("resolved_tag `{tag}` does not satisfy `{}`", l.reference),
+                None => bail!("resolved_tag `{tag}` is not a semver tag"),
+            }
+        }
+        (Some(Version::Range(_)), None) => {
+            bail!("`{}` has no resolved_tag", l.reference)
+        }
+        (_, Some(tag)) => bail!(
+            "resolved_tag `{tag}` is only valid for a `version:` reference, not `{}`",
+            l.reference
+        ),
+        (_, None) => Ok(()),
+    }
 }
 
 /// A project id may be used verbatim as a directory name, so restrict it to a
@@ -309,6 +350,7 @@ mod tests {
                 git: "https://example.com/repo.git".into(),
                 reference: "branch:main".into(),
                 commit: sha.clone(),
+                resolved_tag: None,
                 path: None,
                 store: "totally-not-the-derived-key".into(),
                 bundled_skills: Vec::new(),
@@ -339,6 +381,7 @@ mod tests {
                 git: git.into(),
                 reference: "branch:main".into(),
                 commit: sha.clone(),
+                resolved_tag: None,
                 path: None,
                 store: store_key(git, &sha),
                 bundled_skills: vec!["../evil".into()],
@@ -368,6 +411,7 @@ mod tests {
                 git: git.into(),
                 reference: "branch:main".into(),
                 commit: sha.clone(),
+                resolved_tag: None,
                 path: None,
                 store: store_key(git, &sha),
                 bundled_skills: Vec::new(),
@@ -420,6 +464,7 @@ mod tests {
                 git: git.into(),
                 reference: "branch:main".into(),
                 commit: sha.clone(),
+                resolved_tag: None,
                 path: None,
                 store: store_key(git, &sha),
                 bundled_skills: Vec::new(),
@@ -433,6 +478,7 @@ mod tests {
                 git: git.into(),
                 reference: "branch:main".into(),
                 commit: sha.clone(),
+                resolved_tag: None,
                 path: Some("leaf".into()),
                 store: store_key(git, &sha),
                 bundled_skills: Vec::new(),
@@ -490,6 +536,7 @@ mod tests {
                 git: git.into(),
                 reference: "branch:main".into(),
                 commit: sha.clone(),
+                resolved_tag: None,
                 path: None,
                 store: store_key(git, &sha),
                 bundled_skills: Vec::new(),
@@ -503,5 +550,71 @@ mod tests {
         };
         let err = lock.validate().unwrap_err();
         assert!(format!("{err:#}").contains("invalid skill name"), "{err:#}");
+    }
+
+    fn with_reference(reference: &str, resolved_tag: Option<&str>) -> Lockfile {
+        let git = "https://example.com/repo.git";
+        let sha = "a".repeat(40);
+        let mut skills = BTreeMap::new();
+        skills.insert(
+            "pdf".to_string(),
+            LockedSkill {
+                git: git.into(),
+                reference: reference.into(),
+                commit: sha.clone(),
+                resolved_tag: resolved_tag.map(str::to_string),
+                path: None,
+                store: store_key(git, &sha),
+                bundled_skills: Vec::new(),
+                requested_by: Vec::new(),
+                also_satisfies: Vec::new(),
+            },
+        );
+        Lockfile {
+            skills,
+            ..Default::default()
+        }
+    }
+
+    /// A `version:` pin must carry a resolved tag that satisfies its
+    /// requirement; no other selector may carry one.
+    #[test]
+    fn validate_checks_resolved_tag_against_the_reference() {
+        with_reference("version:^1.2", Some("v1.4.1"))
+            .validate()
+            .unwrap();
+        with_reference("version:^1.2", Some("1.2.0"))
+            .validate()
+            .unwrap();
+        for (reference, tag, needle) in [
+            ("version:^1.2", None, "has no resolved_tag"),
+            ("version:^1.2", Some("v2.0.0"), "does not satisfy"),
+            ("version:^1.2", Some("v1.1.9"), "does not satisfy"),
+            ("version:^1.2", Some("latest"), "not a semver tag"),
+            (
+                "version:not-semver",
+                Some("v1.2.0"),
+                "invalid version requirement",
+            ),
+            (
+                "tag:v1.4.1",
+                Some("v1.4.1"),
+                "only valid for a `version:` reference",
+            ),
+        ] {
+            let err = with_reference(reference, tag).validate().unwrap_err();
+            assert!(format!("{err:#}").contains(needle), "{reference}: {err:#}");
+        }
+    }
+
+    #[test]
+    fn display_reference_appends_the_resolved_tag() {
+        let lock = with_reference("version:^1.2", Some("v1.4.1"));
+        assert_eq!(
+            lock.skills["pdf"].display_reference(),
+            "version:^1.2 → v1.4.1"
+        );
+        let lock = with_reference("tag:v1.4.1", None);
+        assert_eq!(lock.skills["pdf"].display_reference(), "tag:v1.4.1");
     }
 }

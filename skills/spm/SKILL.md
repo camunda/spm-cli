@@ -41,7 +41,8 @@ gitignored and never committed. Run `spm --help` or
 | Fresh clone, new git worktree, or skills missing | `spm install` |
 | CI, or check `ai.lock` matches `ai.json` without changing it | `spm install --locked` |
 | See which pins have newer upstream versions, without changing anything | `spm outdated --json` |
-| Skill declared with a branch or tag should move to the latest commit | `spm update [name]` |
+| Follow compatible releases of a skill (e.g. any 1.x from 1.2) | `spm add <git-url> --version "^1.2"` |
+| Skill declared with a branch, tag or version range should move to the latest commit | `spm update [name]` |
 | Also pull in skills a dependency itself declares | set `"resolveTransitive": true` in `ai.json`, then `spm install` |
 | Changed a version selector by editing `ai.json` | `spm install` |
 | Check what is declared and pinned | `spm list --json` |
@@ -70,7 +71,7 @@ when `ai.json` exists leaves the file untouched and exits 0.
 
 ```bash
 spm add <git-url | github.com/<owner>/<repo>[@<ref>]> \
-        [--tag <t> | --branch <b> | --commit <sha>] \
+        [--tag <t> | --branch <b> | --commit <sha> | --version "<range>"] \
         [--path <subdir>] [--name <local-name>] [--all] [--plugin] [--force] \
         [--protocol ssh|https] [--protocol-fallback] [-g]
 ```
@@ -80,12 +81,20 @@ scans the content, and materializes it, all in one step. It needs an existing
 `ai.json`: run `spm init` first.
 
 - The version selector is optional. Give at most one of `--tag`, `--branch`,
-  `--commit`; combining them is a usage error. With none, spm resolves the
+  `--commit`, `--version`; combining them is a usage error. With none, spm resolves the
   remote's default branch, prints the branch it chose, and records it as an
   explicit `branch` entry in `ai.json` — the common "just give me the skill"
   case. If the default branch cannot be determined (empty repo, detached HEAD)
   it fails and leaves `ai.json` untouched. Prefer `--tag` for reproducibility;
   `--commit` needs the full 40-character SHA.
+- `--version "<range>"` takes a semver requirement (`^1.2`, `~1.4`,
+  `>=1.2, <2`) and locks the highest tag satisfying it; `ai.json` records it as
+  `"version"`, `ai.lock` as `reference: "version:^1.2"` plus `resolved_tag`.
+  Tags may have one leading `v`; non-semver tags are ignored, and pre-releases
+  only match a range that names one. `spm install` keeps the pin, `spm update`
+  moves it to the newest tag still in the range (never past it). Always wrap the
+  range in double quotes — `^` is an escape character in Windows `cmd.exe`. A
+  `--tag` is always exact, never a range.
 - `--path <subdir>` selects a subdirectory of the repo (monorepos). It must be
   relative to the repo root and must not contain a `..` path component (a
   segment such as `v1..2` is fine).
@@ -111,7 +120,7 @@ The URL can be any form `git` understands: `https://...`, `git@host:org/repo.git
   `ai.json`, `ai.lock` and the store only ever see the full URL. An optional
   `@<ref>` replaces the version flag: a full SHA is taken as a commit, otherwise
   it is looked up once and used as a tag or a branch. `@<ref>` cannot be
-  combined with `--tag`/`--branch`/`--commit`. Any input not starting with
+  combined with `--tag`/`--branch`/`--commit`/`--version`. Any input not starting with
   `github.com/` is passed through untouched.
 - `--protocol ssh|https` rewrites a GitHub-style URL to that protocol before
   contacting the remote (`https://host/org/repo` <-> `git@host:org/repo`); a URL
@@ -163,8 +172,9 @@ for the global scope); do exactly that. It still fetches, so it is not offline.
 spm update [name] [--protocol ssh|https] [--protocol-fallback] [-g]
 ```
 
-Re-resolves `--tag` and `--branch` entries to their current commit and rewrites
-`ai.lock`. With a name, updates only that skill or plugin. A `--commit` entry
+Re-resolves `--tag` and `--branch` entries to their current commit, and
+`--version` ranges to the newest tag still in the range (never past it), and
+rewrites `ai.lock`. With a name, updates only that skill or plugin. A `--commit` entry
 never moves. An unchanged pin is only ever moved by `spm update`;
 `spm install` keeps it, and re-resolves just the entries whose URL, selector or
 path you changed, or that have no pin yet. `--protocol`/`--protocol-fallback`
@@ -228,7 +238,8 @@ spm list [-g] [--json]
 ```
 
 Alias: `spm ls`. Prints each declared skill and plugin with its git URL and its pin as
-`<selector> @ <first 8 chars of the commit>`, or `not installed` when
+`<selector> @ <first 8 chars of the commit>` (a range shows the tag it chose:
+`version:^1.2 → v1.4.1 @ …`, and `resolvedTag` in `--json`), or `not installed` when
 `ai.lock` has no pin for it. Transitively-resolved skills are listed separately
 under a `transitive skills:` heading, each annotated with its provenance
 (`via <requester>`) — see [Transitive dependencies](#transitive-dependencies).
@@ -273,7 +284,11 @@ exists; non-semver and floating tags such as `v1` are ignored), `tag moved`
 (the pinned tag now points at a different commit — also printed as a warning;
 treat it as suspicious and tell the user before updating), `pinned` (a commit;
 never queried), `up to date`, or `error` (remote unreachable or ref gone; the
-other rows are still checked). Plugins are included; transitive skills are
+other rows are still checked). For a `version` range, `behind` means a newer
+tag exists **inside** the range (`spm update` moves to it; `latestInRange` in
+`--json`), `newer tag` means one exists only **outside** it (widen `version` in
+`ai.json`, then `spm install`), and `tag moved` means the locked
+`resolved_tag` was re-pointed. Plugins are included; transitive skills are
 marked `transitive; via <requester>`, and the fix belongs in that requester's
 own `ai.json`, not this one. With a name, only that entry is checked.
 A deduplicated entry shared through different selectors has every selector

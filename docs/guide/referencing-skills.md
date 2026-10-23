@@ -6,7 +6,7 @@ next — each resolves independently, then locks to a commit SHA in
 [`ai.lock`](/reference/ai-lock). This page shows every way to point at a skill
 and how to combine them.
 
-## The four knobs
+## The knobs
 
 | Field    | Role                                                              | Locks to     |
 |----------|------------------------------------------------------------------|--------------|
@@ -14,9 +14,10 @@ and how to combine them.
 | `tag`    | git tag; annotated tags deref to their commit                    | resolved SHA |
 | `branch` | branch tip at install/update time                               | resolved SHA |
 | `commit` | exact 40-character SHA                                           | itself       |
+| `version`| semver range; the highest matching tag                           | resolved tag + SHA |
 | `path`   | subdirectory (monorepo of skills), or **plugin root** for plugins | —            |
 
-Pick **exactly one** of `tag` / `branch` / `commit` per entry. See the
+Pick **exactly one** of `tag` / `branch` / `commit` / `version` per entry. See the
 [ai.json reference](/reference/ai-json) for the full schema.
 
 ## By tag — immutable release
@@ -27,6 +28,30 @@ Pick **exactly one** of `tag` / `branch` / `commit` per entry. See the
 
 The tag is resolved once and pinned in `ai.lock`, so the install is
 reproducible even if the tag is later moved.
+
+## By version range — follow compatible releases
+
+```json
+"linter": { "git": "https://github.com/org/linter", "version": "^1.2" }
+```
+
+spm picks the **highest** tag satisfying the
+[semver requirement](https://docs.rs/semver/latest/semver/struct.VersionReq.html)
+(`^1.2`, `~1.4`, `>=1.2, <2`, …) and pins both the tag and its commit in
+`ai.lock`. `spm install` keeps that pin; `spm update` moves to the newest tag
+still in the range, so a `^1.2` skill picks up `v1.9.0` but never `v2.0.0`.
+`spm outdated` tells you when a newer tag exists in the range (`behind`) or only
+outside it (`newer tag`).
+
+Tags may have one leading `v`; non-semver tags such as `latest` are ignored and
+pre-releases only match a requirement that names one. From the CLI:
+
+```bash
+spm add https://github.com/org/linter --version "^1.2"
+```
+
+Quote the range with **double quotes**: `^` is an escape character in Windows
+`cmd.exe`, and double quotes work in cmd, PowerShell and POSIX shells alike.
 
 ## By branch — track the tip
 

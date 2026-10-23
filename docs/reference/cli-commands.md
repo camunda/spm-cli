@@ -5,7 +5,7 @@ the authoritative, version-specific usage.
 
 ```bash
 spm init [--target amp|claude|cline|codex|copilot|cursor|gemini|windsurf ...] [-g]  # scaffold ai.json (repeatable / comma-separated)
-spm add <git> [--tag|--branch|--commit <v>] \      # add + install a skill (no selector = default branch; github.com/owner/repo@ref also works)
+spm add <git> [--tag|--branch|--commit <v>|--version "<range>"] \  # add + install a skill (no selector = default branch; github.com/owner/repo@ref also works)
         [--path <subdir>] [--name <local-name>] [--all] [--force] [-g]  # --all: add every skill under --path
         [--plugin]                                 # --plugin: add a full plugin instead of a skill
 spm target add [vendor ...] [-g]                   # add target vendor(s); no arg = pick interactively
@@ -68,13 +68,18 @@ selector:
 | `--tag`    | git tag (annotated tags deref to commit) |
 | `--branch` | branch tip at install/update time        |
 | `--commit` | exact commit                             |
+| `--version`| semver range; the highest matching tag (`--version "^1.2"`) |
+
+Quote a `--version` range with double quotes — `^` is an escape character in
+Windows `cmd.exe`, and double quotes work there as well as in PowerShell and
+POSIX shells. See [version ranges](/reference/ai-json#version-ranges).
 
 The repository can also be given as `github.com/<owner>/<repo>[@<ref>]`, which
 expands to `https://github.com/<owner>/<repo>.git`. `@<ref>` stands in for the
 version flag: spm looks it up on the remote and treats it as a tag or a branch
 (a full 40-character SHA is taken as a commit). It is an error if the ref is
 neither, or both a tag and a branch (use `--tag`/`--branch` instead), or if it is
-combined with `--tag`, `--branch` or `--commit`. `ai.json` records the expanded
+combined with `--tag`, `--branch`, `--commit` or `--version`. `ai.json` records the expanded
 URL, never the shorthand; any other input is passed through untouched.
 
 ```bash
@@ -167,7 +172,8 @@ spm remove design-system --plugin  # drop a plugin
 
 ### `spm update [name]`
 
-Re-resolves `branch`/`tag` selectors to their latest commit and updates
+Re-resolves `branch`/`tag` selectors to their latest commit (and `version`
+ranges to the newest tag still in the range) and updates
 `ai.lock`. With no name, updates **all** skills — including the whole transitive
 frontier.
 
@@ -193,7 +199,7 @@ installs the locked commit. Instead of quietly updating the lock it fails when
 `ai.lock` is out of sync with `ai.json`:
 
 - a skill or plugin declared in `ai.json` is missing from `ai.lock`;
-- its `git`, `tag`/`branch`/`commit` or `path` changed since the lock was written;
+- its `git`, `tag`/`branch`/`commit`/`version` or `path` changed since the lock was written;
 - `ai.lock` still has an entry no longer declared in `ai.json`;
 - with `"resolveTransitive": true`, a transitive child has no matching pin (or a
   transitive pin is no longer reached);
@@ -237,6 +243,9 @@ in a scheduled CI job or bot that reports drift.
 | `branch` | the remote branch tip vs the locked commit | `behind` when the tip moved |
 | `tag` | the newest [semver](https://semver.org) tag on the remote (a leading `v` is allowed; floating or non-semver tags such as `v1` or `latest` are ignored; pre-releases only count when the pinned tag is one) | `newer tag` |
 | `tag` | the pinned tag itself now resolves to a different commit | `tag moved`, plus a warning — someone re-pointed the tag |
+| `version` | the newest tag in the range vs the locked commit | `behind` — run `spm update` |
+| `version` | a newer semver tag exists only outside the range | `newer tag` — widen `version` in `ai.json` |
+| `version` | the locked `resolved_tag` now resolves to a different commit | `tag moved`, plus a warning |
 | `commit` | none (never queried) | `pinned` |
 
 ```text
@@ -372,7 +381,8 @@ with `-g` for `list`, `status` and `outdated`). With it:
       "name": "pdf-tools",
       "git": "https://github.com/org/skills",
       "path": "skills/pdf",                 // null when the repo root is the skill
-      "selector": { "tag": "v1.2.0" },      // or { "branch": … } / { "commit": … }
+      "selector": { "tag": "v1.2.0" },      // or { "branch": … } / { "commit": … } / { "version": … }
+      "resolvedTag": null,                  // for a version range: the tag it is locked to
       "commit": "<40-hex sha>",             // null when ai.lock has no pin
       "installed": true,                    // pinned in ai.lock
       "transitive": false,
@@ -382,7 +392,7 @@ with `-g` for `list`, `status` and `outdated`). With it:
   "plugins": [
     {
       "name": "design-system", "git": "…", "path": "plugins/cds",
-      "selector": { "branch": "main" }, "commit": "<40-hex sha>",
+      "selector": { "branch": "main" }, "resolvedTag": null, "commit": "<40-hex sha>",
       "installed": true, "bundledSkills": ["composer"]
     }
   ]
@@ -433,11 +443,14 @@ with `-g` for `list`, `status` and `outdated`). With it:
       "name": "pdf-tools",
       "git": "https://github.com/org/skills",
       "path": "skills/pdf",                 // null when the repo root is the skill
-      "selector": { "tag": "v1.2.0" },      // or { "branch": … } / { "commit": … }
+      "selector": { "tag": "v1.2.0" },      // or { "branch": … } / { "commit": … } / { "version": … }
+      "resolvedTag": null,                  // for a version range: the tag it is locked to
       "locked": "<40-hex sha>",             // the commit ai.lock pins
-      "remoteCommit": "<40-hex sha>",       // what the branch / pinned tag points at now;
-                                            // null for commits and errors
+      "remoteCommit": "<40-hex sha>",       // what the branch / pinned tag / newest in-range
+                                            // tag points at now; null for commits and errors
+      "latestInRange": null,                // for a version range: newest tag satisfying it
       "latestTag": "v1.3.0",                // newest semver tag, only when newer than the pin
+                                            // (for a range: newer than latestInRange)
       "latestTagCommit": "<40-hex sha>",    // the commit latestTag points at
       "status": "newer-tag",                // up-to-date | behind | newer-tag | tag-moved |
                                             // pinned | error
@@ -449,6 +462,7 @@ with `-g` for `list`, `status` and `outdated`). With it:
         {                                   // satisfies (ai.lock `also_satisfies`)
           "selector": { "branch": "main" },
           "remoteCommit": "<40-hex sha>",
+          "latestInRange": null,            // as above, for a version selector
           "latestTag": null,                // as above, for a tag selector
           "latestTagCommit": null,
           "status": "up-to-date",           // same values as the row's status

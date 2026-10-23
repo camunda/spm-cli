@@ -111,6 +111,7 @@ pub(super) fn add(scope: &Scope, req: AddRequest) -> Result<()> {
             tag: version.tag,
             branch: version.branch,
             commit: version.commit,
+            range: version.range,
             path,
         };
         spec.version()?; // validate exactly one selector
@@ -125,15 +126,15 @@ pub(super) fn add(scope: &Scope, req: AddRequest) -> Result<()> {
     Ok(())
 }
 
-/// When no `--tag`/`--branch`/`--commit` was given, default to the remote's
-/// default branch so `ai.json` still records an explicit `branch` (and `spm
-/// update` keeps working). Only `add` fills this in; `SkillSpec::version()` stays
-/// strict for hand-edited manifests. Explicit selectors pass through untouched,
-/// including a conflicting combination, which `version()` still rejects.
+/// When no `--tag`/`--branch`/`--commit`/`--version` was given, default to the
+/// remote's default branch so `ai.json` still records an explicit `branch` (and
+/// `spm update` keeps working). Only `add` fills this in; `SkillSpec::version()`
+/// stays strict for hand-edited manifests. Explicit selectors pass through
+/// untouched, including a conflicting combination, which `version()` still rejects.
 fn with_default_branch(git: &str, mut version: VersionArg) -> Result<VersionArg> {
-    if version.tag.is_none() && version.branch.is_none() && version.commit.is_none() {
+    if version.is_empty() {
         let branch = crate::git::default_branch(git)?;
-        println!("no --tag/--branch/--commit given; using default branch `{branch}`");
+        println!("no --tag/--branch/--commit/--version given; using default branch `{branch}`");
         version.branch = Some(branch);
     }
     Ok(version)
@@ -162,6 +163,7 @@ fn add_all(
         tag: version.tag,
         branch: version.branch,
         commit: version.commit,
+        range: version.range,
         path: path.clone(),
     };
     container.version()?;
@@ -202,6 +204,7 @@ fn add_all(
                 tag: container.tag.clone(),
                 branch: container.branch.clone(),
                 commit: container.commit.clone(),
+                range: container.range.clone(),
                 path: Some(subpath),
             },
         );

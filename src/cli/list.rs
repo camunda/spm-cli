@@ -23,6 +23,9 @@ struct SkillRow<'a> {
     git: &'a str,
     path: Option<&'a str>,
     selector: Option<Version>,
+    /// For a `version` range: the semver tag it is locked to; `null` otherwise
+    /// or when `ai.lock` has no pin.
+    resolved_tag: Option<&'a str>,
     /// Full locked commit SHA; `null` when `ai.lock` has no pin.
     commit: Option<&'a str>,
     installed: bool,
@@ -39,6 +42,7 @@ struct PluginRow<'a> {
     git: &'a str,
     path: Option<&'a str>,
     selector: Option<Version>,
+    resolved_tag: Option<&'a str>,
     commit: Option<&'a str>,
     installed: bool,
     bundled_skills: &'a [String],
@@ -79,6 +83,7 @@ fn collect<'a>(
             git: &spec.git,
             path: spec.path.as_deref(),
             selector: Some(spec.version()?),
+            resolved_tag: l.and_then(|l| l.resolved_tag.as_deref()),
             commit: l.map(|l| l.commit.as_str()),
             installed: l.is_some(),
             transitive: false,
@@ -97,6 +102,7 @@ fn collect<'a>(
             git: &l.git,
             path: l.path.as_deref(),
             selector: Version::from_label(&l.reference),
+            resolved_tag: l.resolved_tag.as_deref(),
             commit: Some(&l.commit),
             installed: true,
             transitive: true,
@@ -111,6 +117,7 @@ fn collect<'a>(
             git: &spec.git,
             path: spec.path.as_deref(),
             selector: Some(spec.version()?),
+            resolved_tag: l.and_then(|l| l.resolved_tag.as_deref()),
             commit: l.map(|l| l.commit.as_str()),
             installed: l.is_some(),
             bundled_skills: l.map(|l| l.bundled_skills.as_slice()).unwrap_or(&[]),
@@ -132,7 +139,7 @@ fn render_text(report: &ListReport) {
     for row in report.skills.iter().filter(|r| !r.transitive) {
         let pinned = row
             .lock
-            .map(|l| format!("{} @ {}", l.reference, short(&l.commit)))
+            .map(|l| format!("{} @ {}", l.display_reference(), short(&l.commit)))
             .unwrap_or_else(|| "not installed".into());
         println!("{:<24} {}  ({pinned})", row.name, row.git);
     }
@@ -148,7 +155,7 @@ fn render_text(report: &ListReport) {
                 "{:<24} {}  ({} @ {}; via {})",
                 row.name,
                 row.git,
-                l.reference,
+                l.display_reference(),
                 short(&l.commit),
                 row.requested_by.join(", ")
             );
@@ -159,11 +166,11 @@ fn render_text(report: &ListReport) {
             .lock
             .map(|l| {
                 if l.bundled_skills.is_empty() {
-                    format!("{} @ {}", l.reference, short(&l.commit))
+                    format!("{} @ {}", l.display_reference(), short(&l.commit))
                 } else {
                     format!(
                         "{} @ {}, skills: {}",
-                        l.reference,
+                        l.display_reference(),
                         short(&l.commit),
                         l.bundled_skills.join(", ")
                     )

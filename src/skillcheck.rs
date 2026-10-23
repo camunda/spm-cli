@@ -51,12 +51,16 @@ pub fn warn_if_not_loadable(
     }
 }
 
-/// Render a locked `reference` (`tag:v1`, `branch:main`, `commit:<sha>`) back
-/// into the CLI selector flag (`--tag v1`, …) so suggestions are runnable. Falls
-/// back to the raw reference if it is not in the expected `kind:value` shape.
+/// Render a locked `reference` (`tag:v1`, `branch:main`, `commit:<sha>`,
+/// `version:^1.2`) back into the CLI selector flag (`--tag v1`, …) so
+/// suggestions are runnable. A range is double-quoted: its `^`, `<`, `>` and
+/// spaces are special in POSIX shells, PowerShell and cmd.exe alike, and double
+/// quotes protect them in all three. Falls back to the raw reference if it is
+/// not in the expected `kind:value` shape.
 fn selector_flag(reference: &str) -> String {
     match reference.split_once(':') {
         Some((kind @ ("tag" | "branch" | "commit"), value)) => format!("--{kind} {value}"),
+        Some(("version", value)) => format!("--version \"{value}\""),
         _ => reference.to_string(),
     }
 }
@@ -142,6 +146,10 @@ mod tests {
     #[test]
     fn selector_flag_renders_runnable_flags() {
         assert_eq!(selector_flag("tag:v1.2.0"), "--tag v1.2.0");
+        assert_eq!(
+            selector_flag("version:>=1.2, <2"),
+            "--version \">=1.2, <2\""
+        );
         assert_eq!(selector_flag("branch:main"), "--branch main");
         assert_eq!(
             selector_flag("commit:0123456789abcdef0123456789abcdef01234567"),
