@@ -820,9 +820,28 @@ fn reject_link_overlaps(
         let id = identity(&resolve(p, &mut Vec::new())?)?;
         outputs.push((owner, p.clone(), id, true));
     }
+    // The links file itself must survive the targets' cleanup: inside their
+    // output (by its entry or where it points) it would be wiped, silently
+    // dropping every link.
+    let links_file = Links::path(scope)?;
+    let state = [
+        identity(&deletion_target(&links_file)?)?,
+        identity(&resolve(&links_file, &mut Vec::new())?)?,
+    ];
+    if let Some((owner, p, ..)) = outputs
+        .iter()
+        .find(|(_, _, out, through)| !through && state.iter().any(|s| s.starts_with(out)))
+    {
+        bail!(
+            "the links file `{}` lies inside `{}`, which target `{owner}` writes or deletes; \
+             refusing to continue, as that would drop your links — remove whatever puts it \
+             there (e.g. a symlink) and retry",
+            links_file.display(),
+            p.display()
+        );
+    }
     // The links file is also deleted once it holds nothing, which removes the
     // entry at its path (not what a final symlink there points at).
-    let links_file = Links::path(scope)?;
     let id = identity(&deletion_target(&links_file)?)?;
     outputs.push(("spm", links_file, id, false));
     for (name, dir, display, active) in guarded {

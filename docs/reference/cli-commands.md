@@ -223,6 +223,9 @@ spm install                               # re-run after further edits
   passes through a symlink inside the output (e.g. `.agents/skills/<name>`
   replaced by a symlink to your clone) is rejected, as syncing would replace it;
   so is a symlink inside the directory whose route passes through the output.
+  Likewise, a links file that lies inside a target's output (e.g. through a
+  symlinked `$SPM_HOME/links`) makes syncing, `clean` and `target remove`
+  refuse, since rebuilding that output would silently drop your links.
 - Under a [source policy](/guide/source-policy) a link is a local source, so it
   needs `file://*` even when the dependency it overrides is an allowed remote.
 - A linked plugin's working tree may bundle different skills than its locked
