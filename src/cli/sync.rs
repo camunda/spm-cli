@@ -716,13 +716,30 @@ fn resolve_links(
     Ok(out)
 }
 
+/// A working copy the overlap guard protects.
+struct Guarded {
+    name: String,
+    /// Canonical dir.
+    dir: PathBuf,
+    /// The path as recorded (its route counts too), anchored at its scope's base.
+    recorded: PathBuf,
+    /// The path as recorded, for messages.
+    display: String,
+    /// Where it was linked, for messages: empty for this command's scope.
+    origin: String,
+    /// Still linked in this command's scope (so relinking is a way out)?
+    active: bool,
+}
+
 /// Before `vendors` write or delete anything for `skills`/`plugins`, reject
 /// any overlap with a linked working copy: each `active` link, plus every one
-/// the links file on disk still records (one being dropped by `spm unlink`,
-/// re-pointed by `spm link`, or ignored as undeclared) — it is still the
-/// user's data even when spm no longer copies from it. A recorded dir that is
-/// gone has nothing left to protect. Every command that writes target output
-/// or deletes it (`sync`, `clean`, `target remove`) must call this first.
+/// recorded on this machine — in this scope's links file (one being dropped by
+/// `spm unlink`, re-pointed by `spm link`, or ignored as undeclared) and in
+/// every other scope's (a global link may point into a project's output, or one
+/// project's into another's). Each is still the user's data even when this
+/// command doesn't copy from it. A recorded dir that is gone has nothing left
+/// to protect. Every command that writes target output or deletes it (`sync`,
+/// `clean`, `target remove`) must call this first.
 pub(super) fn guard_working_copies(
     scope: &Scope,
     manifest_dir: &std::path::Path,
@@ -731,43 +748,78 @@ pub(super) fn guard_working_copies(
     skills: &[String],
     plugins: &[String],
 ) -> Result<()> {
-    let mut guarded: Vec<(&str, PathBuf, &str, bool)> = active
+    let mut guarded: Vec<Guarded> = active
         .iter()
-        .map(|(n, l)| (n.as_str(), l.dir.clone(), l.display.as_str(), true))
+        .map(|(n, l)| Guarded {
+            name: n.clone(),
+            dir: l.dir.clone(),
+            recorded: manifest_dir.join(&l.display),
+            display: l.display.clone(),
+            origin: String::new(),
+            active: true,
+        })
         .collect();
     // Fail closed: a links file or recorded dir that can't be read is not
     // "nothing to protect". Only a dir that is gone (or no longer a dir) is
     // skipped, so `spm unlink` can always drop a dead link.
-    let on_disk = Links::load(scope)?;
-    for (name, display) in &on_disk.links {
-        let dir = match manifest_dir.join(display).canonicalize() {
-            Ok(d) if d.is_dir() => d,
-            Ok(_) => continue,
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                ) =>
-            {
-                continue
-            }
-            Err(e) => {
-                return Err(e).with_context(|| {
-                    format!(
-                        "inspecting linked directory `{display}` for `{name}` — spm can't \
-                         rule out that this command would modify or delete it"
-                    )
-                })
-            }
+    let own_file = Links::path(scope)?;
+    let mut state_files = vec![own_file.clone()];
+    for rec in Links::all_recorded()? {
+        let own = rec.file == own_file;
+        let (base, origin) = if own {
+            (manifest_dir.to_path_buf(), String::new())
+        } else {
+            (rec.base, format!(" (linked {})", rec.origin))
         };
-        if !guarded
-            .iter()
-            .any(|(n, _, d, _)| n == name && *d == display)
-        {
-            guarded.push((name, dir, display, false));
+        if !own {
+            state_files.push(rec.file);
+        }
+        for (name, display) in rec.links.links {
+            let recorded = base.join(&display);
+            let dir = match recorded.canonicalize() {
+                Ok(d) if d.is_dir() => d,
+                Ok(_) => continue,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) =>
+                {
+                    continue
+                }
+                Err(e) => {
+                    return Err(e).with_context(|| {
+                        format!(
+                            "inspecting linked directory `{display}` for `{name}`{origin} — spm \
+                             can't rule out that this command would modify or delete it"
+                        )
+                    })
+                }
+            };
+            if !guarded
+                .iter()
+                .any(|g| g.name == name && g.recorded == recorded)
+            {
+                guarded.push(Guarded {
+                    name,
+                    dir,
+                    recorded,
+                    display,
+                    origin: origin.clone(),
+                    active: false,
+                });
+            }
         }
     }
-    reject_link_overlaps(scope, manifest_dir, vendors, &guarded, skills, plugins)
+    reject_link_overlaps(
+        scope,
+        manifest_dir,
+        vendors,
+        &guarded,
+        &state_files,
+        skills,
+        plugins,
+    )
 }
 
 /// Reject a linked working copy that overlaps any location a target writes or
@@ -782,12 +834,14 @@ pub(super) fn guard_working_copies(
 /// route counts too: deleting a symlink (or a dir holding one) it passes
 /// through would break — or, once regenerated, silently re-point — the link.
 ///
-/// `guarded` lists `(name, canonical dir, dir as recorded, still linked?)`.
+/// `state_files` are the links files this command must not wipe (this
+/// scope's first, which it also writes).
 fn reject_link_overlaps(
     scope: &Scope,
     manifest_dir: &std::path::Path,
     vendors: &[Box<dyn Vendor>],
-    guarded: &[(&str, PathBuf, &str, bool)],
+    guarded: &[Guarded],
+    state_files: &[PathBuf],
     skills: &[String],
     plugins: &[String],
 ) -> Result<()> {
@@ -823,41 +877,44 @@ fn reject_link_overlaps(
     // The links file itself must survive the targets' cleanup: inside their
     // output (by its entry or where it points) it would be wiped, silently
     // dropping every link.
-    let links_file = Links::path(scope)?;
-    let state = [
-        identity(&deletion_target(&links_file)?)?,
-        identity(&resolve(&links_file, &mut Vec::new())?)?,
-    ];
-    if let Some((owner, p, ..)) = outputs
-        .iter()
-        .find(|(_, _, out, through)| !through && state.iter().any(|s| s.starts_with(out)))
-    {
-        bail!(
-            "the links file `{}` lies inside `{}`, which target `{owner}` writes or deletes; \
-             refusing to continue, as that would drop your links — remove whatever puts it \
-             there (e.g. a symlink) and retry",
-            links_file.display(),
-            p.display()
-        );
+    for links_file in state_files {
+        let state = [
+            identity(&deletion_target(links_file)?)?,
+            identity(&resolve(links_file, &mut Vec::new())?)?,
+        ];
+        if let Some((owner, p, ..)) = outputs
+            .iter()
+            .find(|(_, _, out, through)| !through && state.iter().any(|s| s.starts_with(out)))
+        {
+            bail!(
+                "the links file `{}` lies inside `{}`, which target `{owner}` writes or \
+                 deletes; refusing to continue, as that would drop your links — remove whatever \
+                 puts it there (e.g. a symlink) and retry",
+                links_file.display(),
+                p.display()
+            );
+        }
     }
-    // The links file is also deleted once it holds nothing, which removes the
-    // entry at its path (not what a final symlink there points at).
+    // This scope's links file is also deleted once it holds nothing, which
+    // removes the entry at its path (not what a final symlink there points at).
+    let links_file = state_files[0].clone();
     let id = identity(&deletion_target(&links_file)?)?;
     outputs.push(("spm", links_file, id, false));
-    for (name, dir, display, active) in guarded {
-        let src = identity(dir)?;
+    for g in guarded {
+        let (name, display, active) = (&g.name, &g.display, g.active);
+        let src = identity(&g.dir)?;
         // Every location the content depends on: the recorded path's own hops,
         // and those of each symlink inside the tree the copy follows (one that
         // is broken, cyclic or escapes the tree is skipped by the copy and the
         // scan alike, so it is no route), tagged with the symlink for messages.
         let mut route: Vec<(Option<PathBuf>, Vec<NodeId>)> = Vec::new();
         let mut hops = Vec::new();
-        resolve(&manifest_dir.join(display), &mut hops)?;
+        resolve(&g.recorded, &mut hops)?;
         for h in &hops {
             route.push((None, identity(h)?));
         }
-        for link in symlinks_in(dir)? {
-            if crate::fsutil::resolve_within_canonical(dir, &link).is_none() {
+        for link in symlinks_in(&g.dir)? {
+            if crate::fsutil::resolve_within_canonical(&g.dir, &link).is_none() {
                 continue;
             }
             let mut hops = Vec::new();
@@ -882,7 +939,7 @@ fn reject_link_overlaps(
         });
         let hit = match hit {
             Some(h) => Some(h),
-            None => hard_linked_into(dir, &patched)?.map(|(owner, p, alias)| {
+            None => hard_linked_into(&g.dir, &patched)?.map(|(owner, p, alias)| {
                 (owner, p, format!(" (hard-linked as `{}`)", alias.display()))
             }),
         };
@@ -895,16 +952,19 @@ fn reject_link_overlaps(
             format!("target `{owner}`")
         };
         let clash = format!(
-            "linked directory `{display}` for `{name}` overlaps `{}`{how}, which {owner} writes \
-             or deletes",
+            "linked directory `{display}` for `{name}`{} overlaps `{}`{how}, which {owner} \
+             writes or deletes",
+            g.origin,
             p.display()
         );
-        let g = if scope.is_global() { " -g" } else { "" };
-        let relink = if *active {
+        let flag = if scope.is_global() { " -g" } else { "" };
+        let relink = if active {
             format!(
                 "link `{name}` to a directory outside spm's output \
-                 (`spm link {name} <dir>{g}`), or "
+                 (`spm link {name} <dir>{flag}`), or "
             )
+        } else if !g.origin.is_empty() {
+            "unlink it where it was linked, or ".to_string()
         } else {
             String::new()
         };

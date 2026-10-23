@@ -226,6 +226,10 @@ spm install                               # re-run after further edits
   Likewise, a links file that lies inside a target's output (e.g. through a
   symlinked `$SPM_HOME/links`) makes syncing, `clean` and `target remove`
   refuse, since rebuilding that output would silently drop your links.
+  This protection covers every link on the machine, whichever scope recorded it:
+  a global link (or another project's) pointing into this project's output
+  makes this project's syncs, `clean` and `target remove` refuse until it is
+  unlinked where it was linked.
 - Under a [source policy](/guide/source-policy) a link is a local source, so it
   needs `file://*` even when the dependency it overrides is an allowed remote.
 - A linked plugin's working tree may bundle different skills than its locked

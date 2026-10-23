@@ -9501,7 +9501,11 @@ fn links_file_lives_outside_the_checkout() {
     let name = links.file_name().unwrap().to_string_lossy().into_owned();
     assert!(name.starts_with("project-"), "{name}");
     let doc: serde_json::Value = serde_json::from_str(&read_path(&links)).unwrap();
-    assert_eq!(doc, serde_json::json!({ "links": { "greet": "../dev" } }));
+    let root = sb.project.canonicalize().unwrap();
+    assert_eq!(
+        doc,
+        serde_json::json!({ "links": { "greet": "../dev" }, "project": root.to_str().unwrap() })
+    );
     assert!(!sb.project.join(".spm").exists());
     assert_eq!(sb.read(".gitignore"), gitignore);
     let status = Command::new("git")
@@ -10777,5 +10781,81 @@ fn commands_never_wipe_a_links_file_inside_target_output() {
                 .read(".agents/skills/spm-managed-skills/greet/SKILL.md")
                 .contains("LOCAL"));
         }
+    }
+}
+
+/// Every working copy linked on this machine is protected, whichever scope
+/// linked it: a global link — or another project's — pointing into this
+/// project's output makes every command that would rebuild or delete that
+/// output refuse, until it's unlinked where it was linked.
+#[test]
+fn links_from_other_scopes_are_guarded_too() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    sb.ok(&["target", "add", "claude"]);
+    sb.ok(&["init", "-g", "--target", "copilot"]);
+    for g in [&[][..], &["-g"]] {
+        let mut args = vec!["add"];
+        args.extend_from_slice(g);
+        let url = sb.skill_url();
+        args.extend_from_slice(&[url.as_str(), "--branch", "main", "--name", "greet"]);
+        sb.ok(&args);
+    }
+    let wc = sb.project.join(".agents/skills/spm-managed-skills/dev");
+    let wc_arg = wc.to_str().unwrap();
+    let other = sb.root.join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    let in_other = |args: &[&str]| {
+        let out = sb.command(args).current_dir(&other).output().unwrap();
+        assert!(out.status.success(), "{args:?}: {}", stderr_of(&out));
+    };
+    in_other(&["init", "--target", "claude"]);
+    in_other(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--name",
+        "greet",
+    ]);
+
+    let attempts: [&[&str]; 5] = [
+        &["install"],
+        &["update"],
+        &["link", "greet", "../elsewhere"],
+        &["clean"],
+        &["target", "remove", "copilot"],
+    ];
+    let in_global = |args: &[&str]| {
+        let mut a = args.to_vec();
+        a.push("-g");
+        sb.ok(&a);
+    };
+    type Run<'a> = &'a dyn Fn(&[&str]);
+    let linkers: [(String, Run); 2] = [
+        ("linked globally".into(), &in_global),
+        (
+            format!("linked in `{}`", other.canonicalize().unwrap().display()),
+            &in_other,
+        ),
+    ];
+    std::fs::create_dir_all(sb.root.join("elsewhere")).unwrap();
+    for (origin, run) in linkers {
+        // Recreated each round: once unlinked, it's ordinary output again.
+        std::fs::create_dir_all(&wc).unwrap();
+        std::fs::write(
+            wc.join("SKILL.md"),
+            "---\nname: greet\ndescription: Say hello nicely.\n---\nWIP\n",
+        )
+        .unwrap();
+        run(&["link", "greet", wc_arg]);
+        for args in attempts {
+            let err = fails(&sb, args);
+            assert!(err.contains("overlaps"), "{origin} {args:?}: {err}");
+            assert!(err.contains(&origin), "{origin} {args:?}: {err}");
+            assert!(read_path(&wc.join("SKILL.md")).contains("WIP"), "wiped");
+        }
+        run(&["unlink", "greet"]);
+        sb.ok(&["install"]);
     }
 }

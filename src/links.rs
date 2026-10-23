@@ -36,6 +36,22 @@ pub struct Links {
     /// remove them from shared skill dirs once they are gone (or unlinked).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub managed: Vec<String>,
+    /// The canonical project root a project-scope file belongs to: only
+    /// written to disk (set by [`Links::save`]), so commands in *other* scopes
+    /// can resolve its relative paths and protect its working copies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    project: Option<String>,
+}
+
+/// Every links file on this machine, loaded with what its paths are relative to.
+pub struct Recorded {
+    /// The links file.
+    pub file: PathBuf,
+    /// Base relative link paths resolve against.
+    pub base: PathBuf,
+    /// Which scope recorded them, for messages: `globally` or `in <root>`.
+    pub origin: String,
+    pub links: Links,
 }
 
 /// A link resolved against the filesystem, ready to materialize from.
@@ -53,14 +69,54 @@ impl Links {
     pub fn path(scope: &Scope) -> Result<PathBuf> {
         let home = paths::spm_home()?;
         Ok(match scope {
-            Scope::Project { root } => {
-                let canon = root
-                    .canonicalize()
-                    .with_context(|| format!("resolving project root {}", root.display()))?;
-                home.join(PROJECT_DIR).join(project_file_name(&canon))
-            }
+            Scope::Project { root } => home
+                .join(PROJECT_DIR)
+                .join(project_file_name(&canonical_root(root)?)),
             Scope::Global => home.join(FILE),
         })
+    }
+
+    /// Every links file on this machine — the global one and each project's —
+    /// so a command can protect working copies linked from any scope. Fails
+    /// closed: one that can't be read is an error, not "no links".
+    pub fn all_recorded() -> Result<Vec<Recorded>> {
+        let home = paths::spm_home()?;
+        let mut out = Vec::new();
+        let global = home.join(FILE);
+        out.push(Recorded {
+            links: Self::load_from(&global)?,
+            file: global,
+            base: Scope::Global.manifest_dir()?,
+            origin: "globally".into(),
+        });
+        let dir = home.join(PROJECT_DIR);
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+        };
+        for entry in entries {
+            let file = entry
+                .with_context(|| format!("reading {}", dir.display()))?
+                .path();
+            let mut links = Self::load_from(&file)?;
+            if links.links.is_empty() {
+                continue;
+            }
+            let root = links.project.take().with_context(|| {
+                format!(
+                    "{} does not name its project — delete it and re-run `spm link`",
+                    file.display()
+                )
+            })?;
+            out.push(Recorded {
+                file,
+                origin: format!("in `{root}`"),
+                base: PathBuf::from(root),
+                links,
+            });
+        }
+        Ok(out)
     }
 
     /// Directory relative link paths are resolved against.
@@ -70,7 +126,9 @@ impl Links {
 
     /// Load the links file; a missing file means no links.
     pub fn load(scope: &Scope) -> Result<Self> {
-        Self::load_from(&Self::path(scope)?)
+        let mut links = Self::load_from(&Self::path(scope)?)?;
+        links.project = None;
+        Ok(links)
     }
 
     fn load_from(p: &Path) -> Result<Self> {
@@ -91,7 +149,21 @@ impl Links {
 
     /// Persist the links file, deleting it once it holds nothing.
     pub fn save(&self, scope: &Scope) -> Result<()> {
-        self.save_to(&Self::path(scope)?)
+        let mut doc = self.clone();
+        doc.project = match scope {
+            Scope::Project { root } if !(self.links.is_empty() && self.managed.is_empty()) => {
+                let canon = canonical_root(root)?;
+                let text = canon.to_str().with_context(|| {
+                    format!(
+                        "project path {} is not valid UTF-8, which links don't support",
+                        canon.display()
+                    )
+                })?;
+                Some(text.to_string())
+            }
+            _ => None,
+        };
+        doc.save_to(&Self::path(scope)?)
     }
 
     fn save_to(&self, p: &Path) -> Result<()> {
@@ -152,9 +224,14 @@ impl Links {
 }
 
 /// The links file name for a project: its directory name (for humans browsing
-/// `$SPM_HOME/links`) plus a stable hash of its canonical root (for
-/// uniqueness). FNV-1a is used because, unlike std's `DefaultHasher`, its output
+/// `$SPM_HOME/links`) plus a stable hash of its canonical root's native bytes
+/// (for uniqueness). FNV-1a is used because, unlike std's `DefaultHasher`, its output
 /// is fixed across Rust releases, so an upgrade never orphans a project's links.
+fn canonical_root(root: &Path) -> Result<PathBuf> {
+    root.canonicalize()
+        .with_context(|| format!("resolving project root {}", root.display()))
+}
+
 fn project_file_name(canon_root: &Path) -> String {
     let label: String = canon_root
         .file_name()
@@ -171,7 +248,9 @@ fn project_file_name(canon_root: &Path) -> String {
         .take(40)
         .collect();
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in canon_root.to_string_lossy().bytes() {
+    // Lossless (unlike `to_string_lossy`), and the UTF-8 bytes themselves for
+    // any path that is valid UTF-8.
+    for &b in canon_root.as_os_str().as_encoded_bytes() {
         hash ^= u64::from(b);
         hash = hash.wrapping_mul(0x0100_0000_01b3);
     }
@@ -243,6 +322,31 @@ mod tests {
         assert_eq!(a, "my_app-c0a1125f1079eaa1.json");
         assert_ne!(a, project_file_name(Path::new("/other/my app")));
         assert!(!project_file_name(Path::new("/x/a\\b..c")).contains(['/', '\\']));
+    }
+
+    /// Roots that only differ in bytes that aren't valid UTF-8 (which a lossy
+    /// conversion would fold together) still get distinct files.
+    #[test]
+    fn project_file_name_distinguishes_non_utf8_roots() {
+        #[cfg(unix)]
+        let (a, b) = {
+            use std::os::unix::ffi::OsStrExt;
+            let p = |b: &[u8]| PathBuf::from(std::ffi::OsStr::from_bytes(b));
+            (p(b"/work/\xFE/app"), p(b"/work/\xFF/app"))
+        };
+        #[cfg(windows)]
+        let (a, b) = {
+            use std::os::windows::ffi::OsStringExt;
+            let p = |unit: u16| {
+                let mut w: Vec<u16> = "C:\\work\\".encode_utf16().collect();
+                w.push(unit);
+                w.extend("\\app".encode_utf16());
+                PathBuf::from(std::ffi::OsString::from_wide(&w))
+            };
+            (p(0xD800), p(0xD801))
+        };
+        assert_eq!(a.to_string_lossy(), b.to_string_lossy());
+        assert_ne!(project_file_name(&a), project_file_name(&b));
     }
 
     #[test]
