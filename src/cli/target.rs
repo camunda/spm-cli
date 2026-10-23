@@ -129,10 +129,21 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
     // `.agents/skills/<name>/`, and a vendor dir may be symlinked onto (or into)
     // another target's output. Locations are compared by filesystem identity so
     // spelling aliases (e.g. case on a case-insensitive filesystem) still match.
+    //
+    // A remaining target's record can lag behind what it loads (e.g. a `target
+    // add codex cursor` that failed at `codex` never reached `cursor`, or an
+    // install that failed after `codex` wrote the `.agents/skills/` it shares
+    // with `amp`), so each remaining target also protects where it would load
+    // the removed targets' names from. Protecting more only keeps more.
+    let mut inferred = crate::owned::Owned::default();
+    for t in &removed {
+        inferred.extend(&owned_in(&owned, t, &linked));
+    }
     let mut needed: Vec<(&str, Vec<NodeId>, bool)> = Vec::new();
     for t in &remaining {
         let v = vendor::for_target(t)?;
-        let names = owned_in(&owned, t, &linked);
+        let mut names = owned_in(&owned, t, &linked);
+        names.extend(&inferred);
         let mut paths = v.skill_paths(scope, &names.skill_names())?;
         paths.extend(v.plugin_paths(scope, &names.plugin_names())?);
         let (mut traversed, mut content) = (Vec::new(), Vec::new());
@@ -172,51 +183,49 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
         None,
     )?;
     for ((t, v), names) in removed.iter().zip(&removed_vendors).zip(&removed_owned) {
-        // A remaining target's record can lag behind a physical location it
-        // shares with `t` (e.g. an install that failed after `codex` wrote
-        // `.agents/skills/<name>/` but before `amp` was reached): an entry `t`
-        // wrote where a remaining target loads the same name is that target's
-        // output too, so keep it and hand its ownership over.
+        let mut candidates = v.clean_paths(scope, &names.skill_names())?;
+        candidates.extend(v.plugin_clean_paths(scope, &names.plugin_names())?);
+        let mut spans = Vec::new();
+        for p in &candidates {
+            spans.push(identity(&deletion_target(p)?)?);
+        }
+        // What a remaining target loads from inside `t`'s output — the same
+        // shared entry, or one nested in `t`'s container — is kept (protected
+        // above) and is now that target's: hand it over so a later `clean` or
+        // install still removes it.
         for x in &remaining {
             let xv = vendor::for_target(x)?;
-            let mut shared = crate::owned::Owned::default();
+            let mut handed = crate::owned::Owned::default();
             for (name, is_plugin) in names
                 .skill_names()
                 .into_iter()
                 .map(|n| (n, false))
                 .chain(names.plugin_names().into_iter().map(|n| (n, true)))
             {
-                let paths = |v: &dyn vendor::Vendor| {
-                    let one = std::slice::from_ref(&name);
-                    if is_plugin {
-                        v.plugin_paths(scope, one)
-                    } else {
-                        v.skill_paths(scope, one)
-                    }
+                let one = std::slice::from_ref(&name);
+                let paths = if is_plugin {
+                    xv.plugin_paths(scope, one)?
+                } else {
+                    xv.skill_paths(scope, one)?
                 };
-                let mut ours = Vec::new();
-                for p in paths(&**v)? {
-                    if std::fs::symlink_metadata(&p).is_ok() {
-                        ours.push(identity(&deletion_target(&p)?)?);
+                for q in paths {
+                    let fin = resolve(&q, &mut Vec::new())?;
+                    if std::fs::symlink_metadata(&fin).is_err() {
+                        continue;
                     }
-                }
-                for q in paths(xv.as_ref())? {
-                    let id = identity(&deletion_target(&q)?)?;
-                    if ours.contains(&id) {
-                        needed.push((x.as_str(), id, true));
+                    let id = identity(&fin)?;
+                    if spans.iter().any(|s| id.starts_with(s)) {
                         let set = if is_plugin {
-                            &mut shared.plugins
+                            &mut handed.plugins
                         } else {
-                            &mut shared.skills
+                            &mut handed.skills
                         };
                         set.insert(name.clone());
                     }
                 }
             }
-            owned.grant(x, &shared);
+            owned.grant(x, &handed);
         }
-        let mut candidates = v.clean_paths(scope, &names.skill_names())?;
-        candidates.extend(v.plugin_clean_paths(scope, &names.plugin_names())?);
         let mut deletable = Vec::new();
         for p in candidates {
             let target = identity(&deletion_target(&p)?)?;

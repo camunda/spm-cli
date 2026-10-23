@@ -60,6 +60,12 @@ impl Owned {
         }
     }
 
+    /// Add every name in `other`.
+    pub fn extend(&mut self, other: &Owned) {
+        self.skills.extend(other.skills.iter().cloned());
+        self.plugins.extend(other.plugins.iter().cloned());
+    }
+
     pub fn skill_names(&self) -> Vec<String> {
         self.skills.iter().cloned().collect()
     }
@@ -97,7 +103,12 @@ impl Ownership {
     /// The recorded ownership, or `lock`'s set when nothing was recorded yet.
     pub fn load(scope: &Scope, lock: &Lockfile) -> Result<Self> {
         let p = Self::path(scope)?;
-        if !p.exists() {
+        // Only a record that is truly absent falls back to the lock: one that
+        // can't be inspected must stop the caller before it deletes anything.
+        if !p
+            .try_exists()
+            .with_context(|| format!("inspecting {}", p.display()))?
+        {
             return Ok(Self::Legacy(Owned::from_lock(lock)));
         }
         let text =
@@ -189,9 +200,7 @@ impl Ownership {
     /// target holds the lock's whole set.
     pub fn grant(&mut self, target: &str, owned: &Owned) {
         if let Self::Recorded(map) = self {
-            let entry = map.entry(target.to_string()).or_default();
-            entry.skills.extend(owned.skills.iter().cloned());
-            entry.plugins.extend(owned.plugins.iter().cloned());
+            map.entry(target.to_string()).or_default().extend(owned);
         }
     }
 

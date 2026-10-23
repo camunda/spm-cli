@@ -12565,6 +12565,72 @@ fn target_remove_after_a_partial_install_keeps_output_shared_with_a_remaining_ta
     }
 }
 
+/// Shared output nested inside a removed vendor's container: `.cursor/skills`
+/// aliases Claude's marketplace, and a `target add codex cursor` that fails at
+/// `codex` never reaches `cursor`, so nothing is recorded for it. Removing
+/// Claude must still keep the marketplace `cursor` loads, and hand `cursor`
+/// ownership of what it loads there so a later `clean` removes it.
+#[test]
+fn target_remove_after_a_partial_target_add_keeps_output_nested_in_its_dir() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let greet = sb.claude_market_dir().join("plugin/skills/greet/SKILL.md");
+    assert!(greet.exists());
+    std::fs::create_dir_all(sb.project.join(".cursor")).unwrap();
+    symlink(
+        "../.spm/claude/plugin/skills",
+        sb.project.join(".cursor/skills"),
+    );
+    let blocker = sb.project.join(".agents/skills/greet");
+    std::fs::create_dir_all(blocker.parent().unwrap()).unwrap();
+    std::fs::write(&blocker, "in the way\n").unwrap();
+    let err = fails(&sb, &["target", "add", "codex", "cursor"]);
+    assert!(err.contains("clearing") && err.contains("greet"), "{err}");
+
+    let out = sb.ok(&["target", "remove", "claude"]);
+    assert!(out.contains("still used by target `cursor`"), "{out}");
+    assert!(greet.exists(), "cursor still loads greet through the alias");
+
+    std::fs::remove_file(&blocker).unwrap();
+    sb.ok(&["clean"]);
+    assert!(!greet.exists(), "cursor's greet cleaned");
+}
+
+/// An ownership record that can't be inspected stops cleanup before anything is
+/// deleted, rather than falling back to the lock — which may name a user's own,
+/// never-installed skill.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_ownership_record_stops_clean_before_deleting() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = Sandbox::new();
+    let mine = make_repo(
+        &sb.root.join("mine"),
+        &[("SKILL.md", "---\nname: mine\n---\nTheirs.\n")],
+    );
+    sb.ok(&["init", "--target", "cursor"]);
+    let user = sb.project.join(".cursor/skills/mine");
+    std::fs::create_dir_all(&user).unwrap();
+    std::fs::write(user.join("SKILL.md"), "Mine.\n").unwrap();
+    sb.ok(&[
+        "add",
+        &mine,
+        "--branch",
+        "main",
+        "--name",
+        "mine",
+        "--lock-only",
+    ]);
+
+    let spm = sb.project.join(".spm");
+    std::fs::set_permissions(&spm, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let out = sb.spm(&["clean"]);
+    std::fs::set_permissions(&spm, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(!out.status.success(), "clean must fail");
+    assert_eq!(sb.read(".cursor/skills/mine/SKILL.md"), "Mine.\n");
+}
+
 /// Ownership is claimed name by name as the vendor reaches each entry: when
 /// removing an earlier entry fails (`a`, which can't be deleted), a later
 /// requested name the vendor never reached — the user's own `mine` — is not
