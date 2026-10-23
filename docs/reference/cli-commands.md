@@ -218,7 +218,12 @@ spm install                               # re-run after further edits
   Codex's `.agents/skills/<name>`, or the project root, which contains the
   output), nor be reached by a file spm edits in place (`ai.json`, `ai.lock`,
   `.spm/links.json`, `.gitignore`, Claude's settings) through a symlink — that would wipe or modify your working copy,
-  or copy the output into itself.
+  or copy the output into itself. The path as given counts too: one that
+  passes through a symlink inside the output (e.g. `.agents/skills/<name>`
+  replaced by a symlink to your clone) is rejected, as syncing would replace it.
+- A linked plugin's working tree may bundle different skills than its locked
+  commit, but names its locked bundle still provides stay taken: `ai.lock` must
+  remain installable without the link.
 - Linking a name that is not declared in `ai.json` is an error. If you later
   `spm remove` a linked dependency, the leftover link is ignored with a warning
   until `spm unlink` drops it. If a linked directory disappears, syncs fail until

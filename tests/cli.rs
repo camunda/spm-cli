@@ -10097,7 +10097,6 @@ fn link_rejects_dirs_reached_by_files_spm_writes_through() {
     sb.ok(&["link", "greet", "../dev"]);
 }
 
-#[cfg(unix)]
 /// A local copy of the sandbox plugin at `<root>/dev-plugin` that drops the
 /// locked `composer` skill and adds an `extra` one.
 fn dev_plugin_without_composer(sb: &Sandbox) {
@@ -10262,5 +10261,112 @@ fn clean_and_target_remove_never_delete_a_linked_working_copy() {
         std::fs::remove_file(&skills).unwrap();
         sb.ok(cmd);
         assert!(read_path(&wc.join("SKILL.md")).contains("WIP"));
+    }
+}
+
+/// Collision checks see a linked plugin's *working tree*, but `ai.lock` keeps
+/// its locked bundle and must stay installable without the link — so a name
+/// only the locked bundle provides is still taken.
+#[test]
+fn add_rejects_a_name_hidden_by_a_linked_plugins_reduced_bundle() {
+    let sb = Sandbox::new();
+    sb.add_plugin();
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"plugins":{{"ds":{{"git":"{}","branch":"main","path":"pkg"}}}}}}"#,
+            sb.skill_url()
+        ),
+    );
+    sb.ok(&["install"]);
+    dev_plugin_without_composer(&sb);
+    sb.ok(&["link", "ds", "../dev-plugin"]);
+    let (manifest, lock) = (
+        snapshot(&sb, "ai.json").unwrap(),
+        snapshot(&sb, "ai.lock").unwrap(),
+    );
+
+    let url = sb.skill_url();
+    for name in ["composer", "Composer"] {
+        let err = fails(&sb, &["add", &url, "--tag", "v0.1.0", "--name", name]);
+        assert!(err.contains("collision in ai.lock"), "{name}: {err}");
+        assert!(err.contains("plugin `ds`"), "{name}: {err}");
+    }
+    assert_eq!(snapshot(&sb, "ai.json").unwrap(), manifest);
+    assert_eq!(snapshot(&sb, "ai.lock").unwrap(), lock);
+    sb.ok(&["unlink", "ds"]);
+}
+
+/// A linked plugin's extra skill is owned only through the links file, so a
+/// link failing while applying must leave it recorded (or never copy it):
+/// once the failure is fixed, `install` and `clean` both remove it.
+#[test]
+fn failed_plugin_link_never_orphans_its_extra_skills() {
+    for recover in ["install", "clean"] {
+        let sb = Sandbox::new();
+        sb.add_plugin();
+        sb.ok(&["init", "--target", "codex"]);
+        write_manifest(
+            &sb,
+            &format!(
+                r#"{{"targets":["codex"],"plugins":{{"ds":{{"git":"{}","branch":"main","path":"pkg"}}}}}}"#,
+                sb.skill_url()
+            ),
+        );
+        sb.ok(&["install"]);
+        dev_plugin_without_composer(&sb);
+        corrupt_gitignore(&sb);
+        fails(&sb, &["link", "ds", "../dev-plugin"]);
+
+        std::fs::write(sb.project.join(".gitignore"), "").unwrap();
+        sb.ok(&[recover]);
+        assert!(
+            !sb.project.join(".agents/skills/extra").exists(),
+            "{recover} left the linked plugin's extra skill behind"
+        );
+    }
+}
+
+/// The overlap guard follows the recorded path itself, not just where it
+/// leads: a symlink (or a dir holding one) on the way to the working copy is
+/// part of the link, and replacing or deleting it would break the link.
+#[cfg(unix)]
+#[test]
+fn link_rejects_a_path_routed_through_target_output() {
+    for (target, via) in [
+        ("codex", ".agents/skills/greet"),
+        ("copilot", ".agents/skills/spm-managed-skills/alias"),
+    ] {
+        let sb = Sandbox::new();
+        sb.ok(&["init", "--target", target]);
+        sb.ok(&[
+            "add",
+            &sb.skill_url(),
+            "--branch",
+            "main",
+            "--name",
+            "greet",
+        ]);
+        let wc = sb.root.join("wc");
+        std::fs::create_dir_all(&wc).unwrap();
+        std::fs::write(wc.join("SKILL.md"), "---\nname: greet\n---\nWIP\n").unwrap();
+        let alias = sb.project.join(via);
+        if alias.exists() {
+            std::fs::remove_dir_all(&alias).unwrap();
+        }
+        symlink(wc.clone(), &alias);
+
+        let err = fails(&sb, &["link", "greet", via]);
+        assert!(err.contains("overlaps"), "{target}: {err}");
+        assert!(
+            std::fs::symlink_metadata(&alias)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "{target}: the route to the working copy was replaced"
+        );
+        assert!(read_path(&wc.join("SKILL.md")).contains("WIP"), "{target}");
+        assert!(!sb.project.join(".spm/links.json").exists(), "{target}");
     }
 }

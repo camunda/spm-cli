@@ -561,6 +561,7 @@ fn plan(
     // separately, across plugins — before any vendor writes a byte.
     reject_case_folding_collisions("skill", materialized.iter().map(|m| m.name.as_str()))?;
     reject_case_folding_collisions("plugin", plugins.iter().map(|p| p.name.as_str()))?;
+    reject_locked_skill_collisions(&lock)?;
     let output_skills: Vec<String> = materialized
         .iter()
         .map(|m| m.name.clone())
@@ -637,6 +638,21 @@ impl Plan {
         let lock = &self.lock;
         if self.declares_any {
             println!("materializing: {}", self.targets.join(", "));
+        }
+        // Skills copied from a linked plugin's working tree are owned only via
+        // the links file. Record the planned ones alongside the previous ones
+        // before any vendor writes, so a failure part-way through never leaves
+        // an agent-discovered skill that no later sync or `clean` knows to
+        // remove; the final links file (below) narrows it once all succeeded.
+        if let Some(links) = &self.links {
+            let on_disk = Links::load(scope)?;
+            let mut pending = on_disk.clone();
+            pending.managed.extend(links.managed.iter().cloned());
+            pending.managed.sort();
+            pending.managed.dedup();
+            if pending != on_disk {
+                pending.save(scope)?;
+            }
         }
         for vendor in &self.vendors {
             vendor.materialize(
@@ -716,8 +732,12 @@ pub(super) fn guard_working_copies(
     let on_disk = Links::load(scope).unwrap_or_default();
     for name in on_disk.links.keys() {
         if let Ok(Some(l)) = on_disk.resolve(scope, name) {
-            if !guarded.iter().any(|(_, d, ..)| *d == l.dir) {
-                guarded.push((name, l.dir, on_disk.links[name].as_str(), false));
+            let display = on_disk.links[name].as_str();
+            if !guarded
+                .iter()
+                .any(|(n, _, d, _)| n == name && *d == display)
+            {
+                guarded.push((name, l.dir, display, false));
             }
         }
     }
@@ -732,7 +752,9 @@ pub(super) fn guard_working_copies(
 /// `ai.lock`, the links file, the project `.gitignore`, a vendor's settings)
 /// are followed through symlinks, since writing them would modify whatever they
 /// point at. Compared by filesystem identity, so symlinks and spelling aliases
-/// (case on a case-insensitive filesystem) match.
+/// (case on a case-insensitive filesystem) match. The recorded path's access
+/// route counts too: deleting a symlink (or a dir holding one) it passes
+/// through would break — or, once regenerated, silently re-point — the link.
 ///
 /// `guarded` lists `(name, canonical dir, dir as recorded, still linked?)`.
 fn reject_link_overlaps(
@@ -774,8 +796,15 @@ fn reject_link_overlaps(
     }
     for (name, dir, display, active) in guarded {
         let src = identity(dir)?;
+        let mut route = Vec::new();
+        resolve(&manifest_dir.join(display), &mut route)?;
+        let route = route
+            .iter()
+            .map(|r| identity(r))
+            .collect::<Result<Vec<_>>>()?;
         let hit = outputs.iter().find(|(_, _, out, through)| {
-            out.starts_with(&src) || (!through && src.starts_with(out))
+            out.starts_with(&src)
+                || (!through && (src.starts_with(out) || route.iter().any(|r| r.starts_with(out))))
         });
         let Some((owner, p, ..)) = hit else {
             continue;
@@ -803,6 +832,36 @@ fn reject_link_overlaps(
             "{clash}; refusing to continue, as that could modify or delete the working copy — \
              {relink}remove whatever makes them overlap (e.g. a symlink) and retry"
         );
+    }
+    Ok(())
+}
+
+/// The checks above judge the *effective* skill set, where a linked plugin's
+/// working tree replaces its locked bundle. `ai.lock` must stay installable
+/// without the link (by teammates, CI, or after `spm unlink`), so its own skill
+/// namespace — standalone and transitive skills plus every plugin's locked
+/// bundle — must be free of exact and case-folding clashes too.
+fn reject_locked_skill_collisions(lock: &Lockfile) -> Result<()> {
+    let mut seen: std::collections::HashMap<String, (&str, String)> =
+        std::collections::HashMap::new();
+    let entries = lock
+        .skills
+        .keys()
+        .map(|n| (n.as_str(), format!("skill `{n}`")))
+        .chain(lock.plugins.iter().flat_map(|(p, l)| {
+            l.bundled_skills
+                .iter()
+                .map(move |s| (s.as_str(), format!("plugin `{p}`")))
+        }));
+    for (name, by) in entries {
+        if let Some((other, other_by)) = seen.insert(name.to_lowercase(), (name, by.clone())) {
+            bail!(
+                "skill name collision in ai.lock: `{other}` ({other_by}) and `{name}` ({by}) \
+                 would install to the same directory — a linked working copy may not bundle \
+                 one of them, but installing ai.lock without the link would; rename the \
+                 conflicting skill or plugin-bundled skill"
+            );
+        }
     }
     Ok(())
 }

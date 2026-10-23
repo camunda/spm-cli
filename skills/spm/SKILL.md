@@ -210,7 +210,7 @@ and still passes the [content scan](#content-scan). Linking an undeclared name
 is an error (`spm add` it first). `link`/`unlink` never write `ai.lock`; if it
 is missing or out of sync they fail with ``run `spm install` first`` — do that,
 then retry. A `<dir>` overlapping target output (e.g. `.agents/skills/<name>` or
-the project root) is rejected with `overlaps`; keep the working copy elsewhere. If a linked directory disappears, syncs fail
+the project root, or a symlink inside it) is rejected with `overlaps`; keep the working copy elsewhere and link its real path. If a linked directory disappears, syncs fail
 until you re-link or unlink it; a link left behind by `spm remove` is ignored
 with a warning. `--protocol`/`--protocol-fallback` behave as under
 [`spm add`](#spm-add). `spm list`/`spm status` show `linked → <dir>`.
