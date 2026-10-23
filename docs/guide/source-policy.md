@@ -62,7 +62,7 @@ A pattern is `host/path`, with no scheme:
 | `github.com/camunda/reviewer` | exactly that repository |
 | `github.com/*` | every repository on the host |
 | `git.example.com:8443/team/*` | a host on a non-default port (the port must be spelled out) |
-| `file://*` | local sources (`file://` URLs and plain filesystem paths; on Windows also drive paths like `C:\skills\repo`) |
+| `file://*` | local sources: `file://` URLs, absolute paths, `./`/`../` paths (on Windows also drive and UNC paths like `C:\skills\repo`) |
 
 - `*` is only allowed as the **whole last segment**, and matches one or more
   segments; `github.com/*` allows a whole host. A bare host (`github.com`) and
@@ -87,10 +87,13 @@ git@github.com:camunda/reviewer.git          →  github.com/camunda/reviewer
 github.com/camunda/reviewer@v1 (shorthand)   →  github.com/camunda/reviewer
 ```
 
-Local sources match only `file://*`. "Local" follows git's own rule: no colon,
+Local sources match only `file://*`. "Local" follows git's own rule — no colon,
 or a `/` before the first colon (a drive letter counts only on Windows) — so
-`host:org/repo` and `domain\user@host:org/repo` are SSH remotes judged by their
-host, never by `file://*`. A URL spm can't reduce to an identity (an
+`host:org/repo` is an SSH remote judged by its host, never by `file://*`. And
+since git resolves a bare name like `origin` or `team/skills` as a configured
+remote before trying it as a path, a local path must be unambiguous under a
+policy: a `file://` URL, an absolute path, or one starting with `./`/`../`.
+A URL spm can't reduce to an identity (an
 unknown scheme, a `transport::address` helper, a `?`/`#` inside the URL
 authority, a path with `..`, `%`-escapes or other ambiguous characters) is **denied** under any policy.
 
@@ -111,6 +114,14 @@ is written:
 - `spm outdated` reports a denied source as an error row instead of querying it.
 - `--protocol` and `--protocol-fallback` can't bypass the policy: the URL you
   wrote **and** every rewritten URL actually contacted must be allowed.
+- While a policy is in force git does not follow HTTP redirects
+  (`http.followRedirects=false`), so an allowed URL can't redirect to a host or
+  namespace the policy never judged. Without a policy, redirects behave as
+  before.
+
+Git's own URL rewriting in your git config (`url.<base>.insteadOf`) is machine
+configuration, trusted like the policy file itself; spm judges the URL as written
+in `ai.json`.
 
 Commands that never contact a remote (`list`, `status`, `clean`, `scan`, `prune`,
 `target remove`) don't evaluate the policy, so you can always inspect and clean

@@ -72,7 +72,7 @@ impl Source {
                     // for a userinfo separator.
                     match rest.find(['/', '?', '#', '\\']) {
                         Some(i) if rest.as_bytes()[i] == b'/' => {
-                            remote(strip_userinfo(&rest[..i]), &rest[i + 1..])
+                            remote_at(&rest[..i], &rest[i + 1..])
                         }
                         _ => Source::Opaque,
                     }
@@ -92,10 +92,10 @@ impl Source {
         // (`C:\…`, `C:/…`, `C:repo`) is a local path only on Windows; elsewhere
         // git reads it as the one-letter host `C`, and so do we.
         match s.find(':') {
-            None => Source::Local,
-            Some(i) if s[..i].contains('/') => Source::Local,
+            None => local_path(s),
+            Some(i) if s[..i].contains('/') => local_path(s),
             Some(1) if cfg!(windows) && s.as_bytes()[0].is_ascii_alphabetic() => Source::Local,
-            Some(i) => remote(strip_userinfo(&s[..i]), &s[i + 1..]),
+            Some(i) => remote_at(&s[..i], &s[i + 1..]),
         }
     }
 
@@ -121,9 +121,42 @@ fn split_scheme(s: &str) -> Option<(&str, &str)> {
     valid.then_some((scheme, rest))
 }
 
-/// Drop `user[:password]@` from an authority; the policy is about hosts.
-fn strip_userinfo(authority: &str) -> &str {
-    authority.rsplit_once('@').map_or(authority, |(_, h)| h)
+/// A local path git can only read as a path. A *relative* name such as
+/// `origin` or `team/skills` is ambiguous: git resolves a configured remote of
+/// that name first (`git ls-remote origin` contacts `remote.origin.url`), so it
+/// is opaque. Only forms that can't be remote names are local: absolute paths
+/// and `./`/`../` relative ones (`.`/`..` components are invalid in remote
+/// names), plus, on Windows, `\\`-prefixed (UNC) and `.\`/`..\` paths (a
+/// remote name can't hold a backslash).
+fn local_path(s: &str) -> Source {
+    let unambiguous = s.starts_with('/')
+        || s == "."
+        || s == ".."
+        || s.starts_with("./")
+        || s.starts_with("../")
+        || (cfg!(windows)
+            && (s.starts_with('\\') || s.starts_with(".\\") || s.starts_with("..\\")));
+    if unambiguous {
+        Source::Local
+    } else {
+        Source::Opaque
+    }
+}
+
+/// A remote from its raw authority (`[user[:password]@]host[:port]`) and path.
+/// The userinfo is dropped — the policy is about hosts — but only after the
+/// whole authority is checked: a `%`-escape or a stray delimiter could make
+/// git (which decodes SSH URLs before splitting them) see a different host
+/// than the text after the last `@`, as in `ssh://evil%2Fgit@allowed/o/r`.
+fn remote_at(authority: &str, path: &str) -> Source {
+    let clean = !authority
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control() || matches!(c, '%' | '/' | '\\' | '?' | '#'));
+    if !clean {
+        return Source::Opaque;
+    }
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    remote(host, path)
 }
 
 fn valid_host(host: &str) -> bool {
@@ -409,6 +442,18 @@ pub fn gate(git: &str) -> Result<()> {
     }
 }
 
+/// Whether any policy layer is in force for this process — the active one, or
+/// else the machine layer (a machine policy that fails to load counts as in
+/// force: fail closed). Lets the git layer tighten transport behavior (no HTTP
+/// redirects) only when a policy exists, keeping no-policy behavior unchanged.
+pub fn restricts() -> bool {
+    let active = ACTIVE.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    match active {
+        Some(policy) => !policy.layers.is_empty(),
+        None => fallback().map_or(true, |p| !p.layers.is_empty()),
+    }
+}
+
 /// The policy [`gate`] applies when no command activated one: the machine
 /// layer. In-process unit tests (which drive `git`/`store` helpers directly and
 /// never activate a policy) get no layer instead, so a policy configured on the
@@ -484,23 +529,44 @@ mod tests {
             "file://C:/Users/me/repo",
             "file:///C:/Users/me/repo",
             "/tmp/repo",
+            ".",
             "./repo",
             "../repo",
-            "repo",
-            r"\\server\share\repo",
-            r"dir\repo",
             "//server/share/repo",
-            "dir/with:colon",
+            "./dir/with:colon",
         ] {
             assert_eq!(Source::classify(url), Source::Local, "{url}");
         }
+    }
+
+    /// A relative name git could resolve as a configured remote (`git
+    /// ls-remote origin` contacts `remote.origin.url`) is not a local source.
+    #[test]
+    fn possible_remote_aliases_are_opaque() {
+        for url in [
+            "origin",
+            "repo",
+            "team/skills",
+            "dir/with:colon",
+            r"dir\repo",
+        ] {
+            assert_eq!(Source::classify(url), Source::Opaque, "{url}");
+        }
+        assert!(policy(&[ANY_LOCAL]).check("origin").is_err());
     }
 
     /// A drive letter is a local path only where git treats it as one.
     #[test]
     #[cfg(windows)]
     fn drive_paths_are_local_on_windows() {
-        for url in [r"C:\Users\me\repo", "C:/Users/me/repo", "C:repo"] {
+        for url in [
+            r"C:\Users\me\repo",
+            "C:/Users/me/repo",
+            "C:repo",
+            r"\\server\share\repo",
+            r".\repo",
+            r"..\repo",
+        ] {
             assert_eq!(Source::classify(url), Source::Local, "{url}");
         }
     }
@@ -519,12 +585,13 @@ mod tests {
     }
 
     /// A backslash before the colon doesn't make a path local (git only looks
-    /// at `/`): `domain\user@host:o/r` is an SSH source on every platform.
+    /// at `/`): `domain\user@host:o/r` is an SSH source on every platform, so
+    /// it is never `file://*` — and with a backslash in its authority, opaque.
     #[test]
-    fn backslash_in_scp_userinfo_is_still_a_remote() {
+    fn backslash_in_scp_userinfo_is_never_local() {
         assert_eq!(
             Source::classify(r"domain\user@evil.test:org/repo"),
-            remote_src("evil.test", "org/repo")
+            Source::Opaque
         );
         let local_only = policy(&[ANY_LOCAL]);
         assert!(local_only.check(r"domain\user@evil.test:org/repo").is_err());
@@ -541,6 +608,11 @@ mod tests {
             r"https://evil.test\@github.com/camunda/repo.git",
             "ssh://git@evil.test?@github.com/camunda/repo.git",
             "git://evil.test#@github.com/camunda/repo",
+            // git decodes SSH URLs before splitting host from path.
+            "ssh://evil.test%2Fgit@github.com/camunda/repo.git",
+            "https://evil.test%40@github.com/camunda/repo.git",
+            "evil.test%2F@github.com:camunda/repo.git",
+            "ev il@github.com:camunda/repo.git",
         ] {
             assert_eq!(Source::classify(url), Source::Opaque, "{url}");
             assert!(p.check(url).is_err(), "{url}");

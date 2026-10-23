@@ -7240,6 +7240,9 @@ fn policy_denied_add_fails_before_git_and_leaves_manifest_untouched() {
         // allowed host after the `@`.
         &["add", "https://evil.test?@example.test/org/skill.git"],
         &["add", "https://evil.test#@example.test/org/skill.git"],
+        // git decodes SSH URLs before splitting the host off: this is
+        // `evil.test`, with the rest as its path.
+        &["add", "ssh://evil.test%2Fgit@example.test/org/skill.git"],
         // The shorthand's ref lookup would need git: the expanded URL is
         // checked first.
         &["add", "github.com/attacker/skill@v1"],
@@ -7916,4 +7919,116 @@ fn policy_hand_edited_lock_cannot_bypass_it() {
         lock.contains(HTTPS_URL) && !lock.contains(EVIL_URL),
         "{lock}"
     );
+}
+
+/// A bare name can be a configured git remote (`git ls-remote origin`
+/// contacts `remote.origin.url`), so under a policy it is not a local source
+/// even for `file://*`: the alias could point anywhere.
+#[test]
+fn policy_remote_alias_is_not_a_local_source() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    git_in(&sb.project, &["init", "-q"]);
+    git_in(&sb.project, &["remote", "add", "origin", &sb.skill_url()]);
+    set_project_policy(&sb, &["file://*"]);
+    let before = sb.read("ai.json");
+    for name in ["origin", "origin/x"] {
+        let err = fails_without_git(&sb, &["add", name, "--branch", "main"]);
+        assert!(err.contains("is not allowed"), "{name}: {err}");
+        assert_eq!(sb.read("ai.json"), before, "{name}");
+    }
+    // An absolute path can't be a remote name, so it stays a local source.
+    let abs = sb.skill_repo.display().to_string();
+    sb.ok(&["add", &abs, "--branch", "main", "--name", "greet"]);
+}
+
+/// A one-shot HTTP server on 127.0.0.1 that answers every request under
+/// `/allowed/` with a 301 to the same path under `/denied/`, and 404s
+/// everything else. Returns the port and the request paths it has seen.
+fn redirecting_http_server() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = seen.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request = String::new();
+            if reader.read_line(&mut request).is_err() {
+                continue;
+            }
+            loop {
+                let mut header = String::new();
+                match reader.read_line(&mut header) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) if header.trim().is_empty() => break,
+                    Ok(_) => {}
+                }
+            }
+            let path = request.split_whitespace().nth(1).unwrap_or("").to_string();
+            log.lock().unwrap().push(path.clone());
+            let response = match path.strip_prefix("/allowed/") {
+                Some(rest) => format!(
+                    "HTTP/1.1 301 Moved Permanently\r\nLocation: http://127.0.0.1:{port}/denied/{rest}\r\n\
+                     Content-Length: 0\r\nConnection: close\r\n\r\n"
+                ),
+                None => "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_string(),
+            };
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    (port, seen)
+}
+
+/// Under a policy git must not follow an HTTP redirect from an allowed URL to
+/// a destination the policy never judged; without a policy, redirects are
+/// followed as before.
+#[test]
+fn policy_blocks_http_redirects_to_unchecked_destinations() {
+    let (port, seen) = redirecting_http_server();
+    let url = format!("http://127.0.0.1:{port}/allowed/skill.git");
+    let run = |sb: &Sandbox| {
+        sb.command(&["add", &url, "--branch", "main"])
+            .env("NO_PROXY", "*")
+            .env("no_proxy", "*")
+            .env_remove("http_proxy")
+            .env_remove("HTTP_PROXY")
+            .env_remove("all_proxy")
+            .env_remove("ALL_PROXY")
+            .output()
+            .unwrap()
+    };
+    let denied_hits = || {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|p| p.starts_with("/denied/"))
+            .count()
+    };
+
+    // With a policy allowing only `/allowed/*`: the redirect is not followed.
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    set_project_policy(&sb, &[&format!("127.0.0.1:{port}/allowed/*")]);
+    let out = run(&sb);
+    assert!(!out.status.success());
+    assert!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .any(|p| p.starts_with("/allowed/")),
+        "the allowed URL was contacted: {}",
+        stderr_of(&out)
+    );
+    assert_eq!(denied_hits(), 0, "{}", stderr_of(&out));
+
+    // No policy: unchanged behavior, git follows the redirect.
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    let out = run(&sb);
+    assert!(!out.status.success(), "the redirect target is a 404");
+    assert!(denied_hits() > 0, "{}", stderr_of(&out));
 }

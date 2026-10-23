@@ -88,6 +88,12 @@ fn git_command(args: &[&str]) -> Command {
     // legacy 260-char MAX_PATH (deep object/checkout paths under the store).
     // The setting is a no-op on other platforms.
     cmd.args(["-c", "core.longpaths=true"]);
+    // Under a source policy, git must not follow HTTP redirects: the policy
+    // judged the URL spm handed over, and a redirect (a transferred repo, a
+    // hostile server) would land on a host or namespace it never checked.
+    if crate::policy::restricts() {
+        cmd.args(["-c", "http.followRedirects=false"]);
+    }
     cmd.args(args);
     cmd.env("GIT_TERMINAL_PROMPT", "0");
     // Pin git (and the ssh/curl helpers it spawns) to the C locale so failure

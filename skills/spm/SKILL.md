@@ -454,7 +454,9 @@ configured, any source is accepted.
 
 - Patterns are `host/path` with no scheme: `github.com/camunda/*` (anything
   below, `*` only as the whole last segment), `github.com/me/one-skill` (exact),
-  `file://*` (local sources). An empty list allows nothing.
+  `file://*` (local sources: `file://` URLs, absolute or `./`/`../` paths — a
+  bare name like `origin` could be a git remote, so it is denied). An empty
+  list allows nothing.
 - HTTPS, `ssh://` and `git@host:org/repo` spellings match the same pattern.
 - It applies to `spm add` (before `ai.json` is written), to every sync
   (`install`, including `--locked` and cache-only installs, `update`, `remove`,
