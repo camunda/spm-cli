@@ -488,39 +488,25 @@ configured, any source is accepted.
 
 Failure states to know about:
 
-- A single `spm add` writes the new entry into `ai.json` *after* two pre-save
-  lookups but *before* it resolves and fetches. The pre-save lookups happen
-  first and never touch `ai.json`: expanding a `github.com/...@<ref>` shorthand
-  (a `git ls-remote` to classify the ref as a tag or branch) and, when no
-  `--tag`/`--branch`/`--commit` is given, resolving the remote's default branch.
-  So a failure *there* — a malformed shorthand, an `@<ref>` that is neither a
-  tag nor a branch, an auth/network error during either lookup, or an empty
-  repo/detached HEAD with no default branch — leaves `ai.json` untouched. Once
-  those pass, the entry is saved and only then does `sync` resolve, fetch, scan
-  and materialize; a failure at *that* stage (a bad explicit selector, an auth
-  error during the fetch, a blocked scan) leaves the entry in `ai.json` with no
-  pin (for a new name). Either fix the cause and run `spm install`, or drop it
-  with `spm remove <name>`. This ordering is specific to a single `spm add`:
-  `spm add --all` resolves and fetches the container (and checks each sub-skill
-  against the existing *skills*) *before* it writes `ai.json`, so a bad ref, auth
-  failure, invalid container or a collision with an existing skill leaves no new
-  entries. Other collisions are only detected *after* the write, when `sync`
-  reloads the manifest: a sub-skill whose name matches an existing *plugin* (or a
-  skill bundled by one of your plugins) is saved into `ai.json` first and only
-  then rejected, and — like a scan block — leaves the batch entries behind.
-  Inspect the manifest before running `spm remove` after any add failure
-  rather than assuming the state either way.
-- `ai.lock` is only written when a sync fully succeeds, so a failure *before*
-  materialization (resolution, fetch, scan, collision check) leaves `ai.lock` and
-  every materialized skill on the old pin. Materialization itself is not atomic,
-  though: `sync` rewrites each configured target in turn before saving `ai.lock`,
-  so a copy/configuration failure partway through can leave some targets updated
-  (or partially rewritten) while `ai.lock` still holds the old pin. If `spm add
-  --force` replaces an existing entry and then fails, `ai.json` holds the new
-  (failing) selector; `spm list` and `spm status` keep reporting the old pin as
-  installed — and `status` only compares names, so it will not flag a
-  half-updated target — until an `spm install` succeeds. Re-run `spm install`
-  after fixing the cause to restore every target to a consistent state.
+- Commands that edit `ai.json` and then sync — `spm add` (with or without
+  `--all`/`--force`), `spm remove` and `spm target add` — only write `ai.json`
+  once resolution, fetching, the content scan and collision checks have all
+  passed. So a failure at any of those steps (a bad ref or commit, an
+  unreachable source or auth error, a blocked scan, a name collision, a
+  malformed shorthand, a duplicate name) leaves `ai.json` and `ai.lock`
+  untouched: fix the cause and re-run the *same* command — it will not be
+  rejected as `already exists`.
+- If the command then fails while *writing the targets* (e.g. an unreadable
+  `.gitignore`, a permission error), some targets may already hold the new
+  output, so `ai.json` deliberately keeps the change (it is what lets spm clean
+  that output later) and the error ends with a `hint:` saying `ai.json` keeps
+  this change and to fix the cause and run `spm install` to finish applying it.
+  Do exactly that; to abandon the change instead, run `spm install` first and
+  then `spm remove <name>` / `spm target remove <target>`. `ai.lock` is only
+  written when a sync fully succeeds, and materialization is not atomic across
+  targets, so until that `spm install` succeeds some targets may be updated (or
+  partially rewritten) while others are not; `spm status` only compares names,
+  so it will not flag a half-updated target.
 - To change the version selector of an existing entry from the CLI, re-run
   `spm add` for it with `--force` and the new selector (and the same
   `--name` and `--path`).

@@ -1,10 +1,11 @@
 use crate::lockfile::{LockedSkill, Lockfile};
 use crate::manifest::{Manifest, SkillSpec};
 use crate::scope::Scope;
-use crate::vendor::{MaterializedPlugin, MaterializedSkill};
+use crate::vendor::{MaterializedPlugin, MaterializedSkill, Vendor};
 use crate::{resolver, store, transitive};
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 /// Core pipeline shared by add/remove/update/install:
 /// resolve manifest -> ai.lock -> populate store -> materialize vendor config.
@@ -25,12 +26,76 @@ pub(super) fn sync(
 ) -> Result<usize> {
     let dir = scope.manifest_dir()?;
     let manifest = Manifest::load(&dir, scope)?;
+    plan(scope, &manifest, force_refresh, only, locked)?.apply(scope)
+}
+
+/// Write an edited `manifest` to `ai.json` and [`sync`] it, without ever leaving
+/// a failed change half-recorded.
+///
+/// Every command that edits `ai.json` and then syncs (`add`, `add --all`,
+/// `remove`, `target add`) must go through here. The edited manifest is
+/// validated and [`plan`]ned *in memory* first; `ai.json` is only written once
+/// resolution, fetching, the content scan and collision checks have all passed.
+/// So any of those failures (an unreachable source, a bad ref, a blocked scan,
+/// ...) leaves `ai.json` byte-for-byte untouched and the same command can simply
+/// be retried.
+///
+/// If [`Plan::apply`] then fails, some targets may already hold the new output,
+/// so `ai.json` deliberately *keeps* the change: it is what records that spm
+/// owns that output (shared skill dirs are cleaned by declared/locked name
+/// only), and the next `spm install` finishes the job.
+pub(super) fn save_and_sync(scope: &Scope, manifest: &Manifest) -> Result<usize> {
+    let dir = scope.manifest_dir()?;
+    let path = Manifest::path_in(&dir);
+    let text = manifest.to_text()?;
+    // Validate exactly as the next `Manifest::load` will (schema, name
+    // collisions across skills/plugins, ...), so an invalid edit is never saved.
+    let manifest = Manifest::parse(&text, &path)?;
+    let plan = plan(scope, &manifest, false, None, false)?;
+    std::fs::write(&path, &text).with_context(|| format!("writing {}", path.display()))?;
+    plan.apply(scope).map_err(|err| {
+        anyhow!(
+            "{err:#}\nhint: {} keeps this change because some targets may already have been \
+             updated; fix the cause and run `{}` to finish applying it",
+            path.display(),
+            install_command(scope)
+        )
+    })
+}
+
+/// The outcome of [`plan`]: everything resolved, fetched into the store and
+/// checked, ready to be written into the targets by [`Plan::apply`].
+struct Plan {
+    dir: PathBuf,
+    targets: Vec<String>,
+    /// Whether any skill or plugin is declared (else nothing is announced).
+    declares_any: bool,
+    vendors: Vec<Box<dyn Vendor>>,
+    lock: Lockfile,
+    materialized: Vec<MaterializedSkill>,
+    plugins: Vec<MaterializedPlugin>,
+    previously_managed: Vec<String>,
+    previously_managed_plugins: Vec<String>,
+    locked: bool,
+}
+
+/// Resolve `manifest` -> lock, populate the store, and run every check (source
+/// policy, content scan, collisions, `--locked` drift). Writes nothing outside
+/// the global store: no target output, no `ai.json`, no `ai.lock`.
+fn plan(
+    scope: &Scope,
+    manifest: &Manifest,
+    force_refresh: bool,
+    only: Option<&str>,
+    locked: bool,
+) -> Result<Plan> {
+    let dir = scope.manifest_dir()?;
     if manifest.targets.is_empty() {
         bail!("ai.json declares no targets");
     }
     // Source policy: judge every direct source before any network access, and
     // report all denied ones at once.
-    let policy = crate::policy::activate(&manifest, &dir)?;
+    let policy = crate::policy::activate(manifest, &dir)?;
     let denied: Vec<String> = manifest
         .skills
         .iter()
@@ -405,23 +470,52 @@ pub(super) fn sync(
             );
         }
     }
-    // Same resolved skills + plugins projected into every configured vendor.
-    if !manifest.skills.is_empty() || !manifest.plugins.is_empty() {
-        println!("materializing: {}", manifest.targets.join(", "));
+    Ok(Plan {
+        dir,
+        targets: manifest.targets.clone(),
+        declares_any: !manifest.skills.is_empty() || !manifest.plugins.is_empty(),
+        vendors,
+        lock,
+        materialized,
+        plugins,
+        previously_managed,
+        previously_managed_plugins,
+        locked,
+    })
+}
+
+impl Plan {
+    /// Project the planned skills + plugins into every configured target, then
+    /// persist `ai.lock`. Returns the number of locked skills + plugins.
+    fn apply(self, scope: &Scope) -> Result<usize> {
+        let lock = &self.lock;
+        if self.declares_any {
+            println!("materializing: {}", self.targets.join(", "));
+        }
+        for vendor in &self.vendors {
+            vendor.materialize(
+                scope,
+                &lock.id,
+                &self.materialized,
+                &self.previously_managed,
+            )?;
+            vendor.materialize_plugins(
+                scope,
+                &lock.id,
+                &self.plugins,
+                &self.previously_managed_plugins,
+            )?;
+        }
+        // Only persist `ai.lock` once every fallible step (resolution, fetching,
+        // collision checks, and vendor materialization) has succeeded —
+        // otherwise a failed `install` could leave behind a lockfile pointing at
+        // state that was never actually materialized. `--locked` never writes
+        // it: it already matches (checked in `plan`).
+        if !self.locked {
+            lock.save(&self.dir)?;
+        }
+        Ok(lock.skills.len() + lock.plugins.len())
     }
-    for vendor in &vendors {
-        vendor.materialize(scope, &lock.id, &materialized, &previously_managed)?;
-        vendor.materialize_plugins(scope, &lock.id, &plugins, &previously_managed_plugins)?;
-    }
-    // Only persist `ai.lock` once every fallible step (resolution, fetching,
-    // collision checks, and vendor materialization) has succeeded — otherwise
-    // a failed `install` could leave behind a lockfile pointing at state that
-    // was never actually materialized. `--locked` never writes it: it already
-    // matches (checked above).
-    if !locked {
-        lock.save(&dir)?;
-    }
-    Ok(lock.skills.len() + lock.plugins.len())
 }
 
 /// The pin in `prev` if it can be reused for `spec` without re-resolving, else
@@ -485,12 +579,19 @@ fn stale_transitive_pins(
 
 /// How to fix a `--locked` failure, spelled for the scope in use.
 fn locked_fix_hint(scope: &Scope) -> String {
-    let g = if matches!(scope, Scope::Global) {
-        " -g"
+    format!(
+        "run `{}` (without --locked) and commit ai.lock",
+        install_command(scope)
+    )
+}
+
+/// `spm install`, spelled for the scope in use.
+fn install_command(scope: &Scope) -> &'static str {
+    if matches!(scope, Scope::Global) {
+        "spm install -g"
     } else {
-        ""
-    };
-    format!("run `spm install{g}` (without --locked) and commit ai.lock")
+        "spm install"
+    }
 }
 
 /// Reject materialized names that differ only by case. Vendor directories are

@@ -1,7 +1,7 @@
 use super::common::default_name;
 use super::common::VersionArg;
 use super::shorthand;
-use super::sync::sync;
+use super::sync::save_and_sync;
 use crate::manifest::{Manifest, SkillSpec};
 use crate::scope::Scope;
 use crate::{resolver, store};
@@ -119,8 +119,7 @@ pub(super) fn add(scope: &Scope, req: AddRequest) -> Result<()> {
         } else {
             manifest.skills.insert(name.clone(), spec);
         }
-        manifest.save(&dir)?;
-        sync(scope, false, None, false)?;
+        save_and_sync(scope, &manifest)?;
         println!("added {kind} {name}");
     }
     Ok(())
@@ -207,8 +206,7 @@ fn add_all(
             },
         );
     }
-    manifest.save(&dir)?;
-    sync(scope, false, None, false)?;
+    save_and_sync(scope, manifest)?;
     println!("added {} skill(s): {}", subs.len(), subs.join(", "));
     Ok(())
 }
