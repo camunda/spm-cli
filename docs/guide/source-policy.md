@@ -1,0 +1,137 @@
+# Source Policy (allowlist)
+
+Every skill or plugin spm installs is executable agent context, and so is every
+transitive skill it pulls in. A **source policy** restricts *where* that content
+may come from: an allowlist of repository patterns that every source — direct,
+transitive, or re-installed from `ai.lock` — must match before spm contacts it.
+
+With no policy configured, behavior is unchanged: any URL `git` understands is
+accepted.
+
+## Where a policy comes from
+
+There are two layers. Each is optional, and a source must be allowed by **every**
+layer that is configured (the effective policy is their intersection):
+
+| Layer | Where | Who controls it |
+| --- | --- | --- |
+| Machine | The file named by `SPM_POLICY`, else `$SPM_HOME/policy.json` (default `~/.spm/policy.json`) | The user, or an organization via managed machines / CI |
+| Project | `allowedSources` in the root project's `ai.json` (or the global `ai.json` for `-g`) | The repository |
+
+So a project can **narrow** a machine policy but can never widen it. A
+dependency's own (nested) `ai.json` may not declare `allowedSources` at all —
+that is a hard error, so a skill can't loosen or even shape the policy that
+governs it.
+
+### Project policy
+
+```json
+{
+  "targets": ["claude"],
+  "allowedSources": ["github.com/camunda/*", "github.com/my-org/approved-skill"],
+  "skills": {
+    "reviewer": { "git": "https://github.com/camunda/reviewer", "tag": "v1.0.0" }
+  }
+}
+```
+
+### Machine policy
+
+```json
+{ "allowedSources": ["github.com/camunda/*", "gitlab.example.com/platform/*"] }
+```
+
+The file accepts only `allowedSources` (and an optional `$schema`); any other key
+is an error, so a typo can't silently switch the policy off. A policy that is
+present but broken never fails open:
+
+- `SPM_POLICY` naming a file that doesn't exist is an error (an empty
+  `SPM_POLICY` counts as unset).
+- Unreadable or malformed JSON, an unknown key, a missing `allowedSources` or an
+  invalid pattern are errors.
+- Only a missing **default** `$SPM_HOME/policy.json` means "no machine policy".
+
+## Pattern syntax
+
+A pattern is `host/path`, with no scheme:
+
+| Pattern | Allows |
+| --- | --- |
+| `github.com/camunda/*` | every repository under `camunda`, including nested groups (`github.com/camunda/team/repo`) |
+| `github.com/camunda/reviewer` | exactly that repository |
+| `github.com/*` | every repository on the host |
+| `git.example.com:8443/team/*` | a host on a non-default port (the port must be spelled out) |
+| `file://*` | local sources (`file://` URLs and plain filesystem paths, including Windows paths like `C:\skills\repo`) |
+
+- `*` is only allowed as the **whole last segment**, and matches one or more
+  segments; `github.com/*` allows a whole host. A bare host (`github.com`) and
+  partial wildcards (`camunda-*`, `*/repo`) are rejected.
+- The host is matched case-insensitively; the path is matched **case-sensitively**.
+- A trailing `.git` is ignored on both sides.
+- Patterns with a scheme (`https://github.com/...`) are rejected — the policy
+  judges *which repository* is used, not the transport.
+
+An empty list (`"allowedSources": []`) allows nothing.
+
+## How sources are matched
+
+A source URL is reduced to a canonical `host/path` identity before matching, so
+the same repository matches one pattern regardless of how it is spelled:
+
+```
+https://github.com/camunda/reviewer.git      →  github.com/camunda/reviewer
+https://user@GitHub.com/camunda/reviewer     →  github.com/camunda/reviewer
+ssh://git@github.com/camunda/reviewer.git    →  github.com/camunda/reviewer
+git@github.com:camunda/reviewer.git          →  github.com/camunda/reviewer
+github.com/camunda/reviewer@v1 (shorthand)   →  github.com/camunda/reviewer
+```
+
+Local sources match only `file://*`. A URL spm can't reduce to an identity (an
+unknown scheme, a `transport::address` helper, a path with `..`, `%`-escapes or
+other ambiguous characters) is **denied** under any policy.
+
+## What is enforced, and when
+
+The policy is checked **before** any git call, and before `ai.json` or `ai.lock`
+is written:
+
+- `spm add` checks the URL (after expanding a `github.com/...` shorthand) before
+  the default-branch lookup and before saving `ai.json`.
+- `spm install`, `spm update`, `spm remove` and `spm target add` check every
+  direct skill and plugin up front and report **all** denied ones at once.
+  This includes `spm install --locked` and installs that would be served
+  entirely from `ai.lock` and the local store cache.
+- With [`resolveTransitive`](/guide/transitive-dependencies), every nested
+  source is checked before it is resolved or fetched; the error names the chain
+  of skills that required it.
+- `spm outdated` reports a denied source as an error row instead of querying it.
+- `--protocol` and `--protocol-fallback` can't bypass the policy: the URL you
+  wrote **and** every rewritten URL actually contacted must be allowed.
+
+Commands that never contact a remote (`list`, `status`, `clean`, `scan`, `prune`,
+`target remove`) don't evaluate the policy, so you can always inspect and clean
+up a project whose sources are no longer allowed.
+
+## Errors
+
+```text
+error: cannot add `https://evil.example/x/skill.git`: source `https://evil.example/x/skill.git`
+(evil.example/x/skill) is not allowed: denied by the project policy `allowedSources`
+in /work/app/ai.json (allows `github.com/camunda/*`)
+```
+
+```text
+error: 2 dependencies are not allowed by the source policy:
+  - skill `a`: source `https://evil.example/x/a.git` (evil.example/x/a) is not allowed: denied by the machine policy /home/me/.spm/policy.json (allows `github.com/camunda/*`) and by the project policy `allowedSources` in /work/app/ai.json (allows `github.com/camunda/*`)
+  - plugin `p`: source `git@evil.example:x/p.git` (evil.example/x/p) is not allowed: denied by the machine policy /home/me/.spm/policy.json (allows `github.com/camunda/*`) and by the project policy `allowedSources` in /work/app/ai.json (allows `github.com/camunda/*`)
+```
+
+```text
+error: nested skill `helper` required by `toolkit` (via toolkit -> helper): source
+`https://evil.example/x/helper.git` (evil.example/x/helper) is not allowed: denied by ...
+```
+
+To fix a denial, either change the dependency to an allowed source or — if you
+trust it — add a pattern for it to the layer that denied it (the error names
+it). A machine policy is the boundary for the whole machine; a project can't
+override it.

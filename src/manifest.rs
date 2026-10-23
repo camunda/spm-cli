@@ -23,6 +23,16 @@ pub struct Manifest {
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub resolve_transitive: bool,
+    /// Project source allowlist (see `crate::policy`): when set, every skill and
+    /// plugin source — direct or transitive — must match one of these patterns
+    /// (and the machine policy, if any). Read **only** from the root project's
+    /// manifest; a dependency's nested `ai.json` declaring it is rejected.
+    #[serde(
+        default,
+        rename = "allowedSources",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub allowed_sources: Option<Vec<String>>,
     #[serde(default, deserialize_with = "deserialize_unique_skills")]
     pub skills: BTreeMap<String, SkillSpec>,
     /// Full-plugin dependencies (agents/MCP servers/hooks/scripts + bundled
@@ -324,6 +334,10 @@ impl Manifest {
         // original bytes through `deserialize_unique_skills`.
         let manifest: Self =
             serde_json::from_str(&text).with_context(|| format!("parsing {}", p.display()))?;
+        if let Some(patterns) = &manifest.allowed_sources {
+            crate::policy::validate_patterns(patterns)
+                .with_context(|| format!("`allowedSources` in {}", p.display()))?;
+        }
         for (name, spec) in &manifest.skills {
             validate_skill_name(name).with_context(|| format!("in {}", p.display()))?;
             if let Some(sub) = &spec.path {
@@ -402,6 +416,18 @@ impl DependencyManifest {
                 "nested {} at {}: `resolveTransitive` is not allowed in a dependency's manifest — \
                  transitive resolution is controlled only by the root project's ai.json; \
                  remove it here (it has no effect)",
+                MANIFEST_FILE,
+                p.display()
+            );
+        }
+        // Same rule for the source policy: only the root project (and the
+        // machine policy) decides where content may come from — a dependency
+        // must not appear to widen or narrow it.
+        if value.get("allowedSources").is_some() {
+            bail!(
+                "nested {} at {}: `allowedSources` is not allowed in a dependency's manifest — \
+                 the source policy is set only by the root project's ai.json and the machine \
+                 policy; remove it here",
                 MANIFEST_FILE,
                 p.display()
             );

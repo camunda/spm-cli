@@ -49,6 +49,11 @@ A dependency's own `ai.json` is parsed with a deliberately **lenient** shape:
 - `resolveTransitive` is **rejected** in a nested manifest: recursion is governed
   solely by *your* root project's flag. A dependency cannot re-enable resolution
   you opted out of.
+- `allowedSources` is **rejected** in a nested manifest too: only your root
+  project (and the machine policy) decides where content may come from. Every
+  nested source must pass that [source policy](/guide/source-policy) before it is
+  resolved or fetched; a denied one fails the install and names the chain that
+  required it (``nested skill `helper` required by `toolkit` (via toolkit -> helper)``).
 
 Only the `ai.json` **co-located with a skill's own content** is read (the repo
 root for a whole-repo skill, or the skill's `path` subdirectory for a monorepo

@@ -24,6 +24,10 @@ pub fn ensure(locked: &LockedSkill) -> Result<Ensured> {
     // point so no path can inject a separator or `..` into the store location.
     crate::lockfile::validate_commit(&locked.commit)?;
     crate::lockfile::validate_store_key(&locked.store)?;
+    // The source policy applies to every checkout handed out, including one
+    // already cached in the store, so a lock entry (even a hand-edited one)
+    // cannot smuggle a denied source in through the shared cache.
+    crate::policy::gate(&locked.git)?;
     let repo_dir = paths::store_dir()?.join(&locked.store);
 
     let fetched = !git::is_at_commit(&repo_dir, &locked.commit);

@@ -16,6 +16,29 @@ pub fn store_dir() -> Result<PathBuf> {
     Ok(spm_home()?.join("store"))
 }
 
+/// Where the machine source policy lives (see `crate::policy`).
+pub struct PolicyLocation {
+    pub path: PathBuf,
+    /// Named explicitly by `SPM_POLICY` (so a missing file is an error rather
+    /// than "no machine policy").
+    pub explicit: bool,
+}
+
+/// The machine policy file: `SPM_POLICY` when set and non-empty, else
+/// `$SPM_HOME/policy.json`.
+pub fn policy_file() -> Result<PolicyLocation> {
+    match std::env::var_os("SPM_POLICY") {
+        Some(p) if !p.is_empty() => Ok(PolicyLocation {
+            path: PathBuf::from(p),
+            explicit: true,
+        }),
+        _ => Ok(PolicyLocation {
+            path: spm_home()?.join("policy.json"),
+            explicit: false,
+        }),
+    }
+}
+
 /// The user's home directory. Used by the vendor adapters to resolve
 /// user-global materialization locations (e.g. `~/.copilot/skills`,
 /// `~/.claude/settings.json`) for global-scope installs — deliberately

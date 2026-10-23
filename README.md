@@ -110,6 +110,25 @@ Two skills requiring the same repo at different commits is a hard error. See the
 [Transitive Skill Dependencies guide](docs/guide/transitive-dependencies.md) for
 naming, provenance (`spm list`/`status`), and conflict resolution.
 
+### Source allowlist (`allowedSources`)
+
+Restrict where skills and plugins may come from with an allowlist of `host/path`
+patterns (no scheme; `*` as the whole last segment matches anything below,
+`file://*` allows local sources):
+
+```json
+{ "targets": ["claude"], "allowedSources": ["github.com/camunda/*", "github.com/me/one-skill"], "skills": {} }
+```
+
+Every source — direct, transitive, re-installed from `ai.lock` or the store
+cache — must match **before** spm contacts it; `add` fails without touching
+`ai.json`, and `--protocol`/`--protocol-fallback` can't route around it. HTTPS,
+`ssh://` and scp-style spellings of one repo match the same pattern. A machine
+policy file (`SPM_POLICY`, else `$SPM_HOME/policy.json`, shape
+`{ "allowedSources": [...] }`) is intersected with the project list, so a project
+can narrow but never widen it; a dependency's nested `ai.json` may not declare
+`allowedSources`. See the [Source Policy guide](docs/guide/source-policy.md).
+
 ### Full plugins (`plugins`)
 
 Alongside individual `skills`, `ai.json` can depend on a **full Claude Code
@@ -476,6 +495,7 @@ To see what each harness actually loaded: `claude plugin list` /
 
 - **Cross-OS**: shells out to the system `git` (no libgit2 build deps); no symlinks; all paths via `std::path`. Runs on Linux, macOS, Windows.
 - **`SPM_HOME`** overrides the store root (default `~/.spm`, holding only the fetch cache) — used by tests. Vendor output is always project-local and is not affected by `SPM_HOME`.
+- **`SPM_POLICY`** names the machine source-policy file (default `$SPM_HOME/policy.json`); see [`allowedSources`](#source-allowlist-allowedsources).
 - **Vendor adapters**: adding a target means implementing one `Vendor` trait (`src/vendor/`). `claude` assembles a plugin-marketplace layout (`marketplace.json` → `plugin.json` → `skills/<name>/SKILL.md`) into the gitignored project-local `.spm/claude/` and points to it; `copilot` copies skills into the gitignored project-local `.agents/skills/spm-managed-skills/`; the remaining targets (`gemini`, `codex`, `cursor`, `cline`, `windsurf`, `amp`) copy skills one level deep into a shared, team-committable skills dir via the generic `src/vendor/shareddir.rs` adapter — each is just a config row naming its project/global dirs (which may differ, e.g. Windsurf's `~/.codeium/windsurf/skills` and Amp's `~/.config/agents/skills`). All share the `src/vendor/dirskills.rs` copy/remove helpers and keep their materialized files out of VCS via the shared `src/gitignore.rs` helper.
 
 ## Development

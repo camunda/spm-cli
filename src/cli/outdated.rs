@@ -201,6 +201,9 @@ pub(super) fn outdated(
 ) -> Result<()> {
     let dir = scope.manifest_dir()?;
     let manifest = Manifest::load(&dir, scope)?;
+    // Every remote this reports on is queried through the policy gate; a denied
+    // source shows up as an error row instead of being contacted.
+    crate::policy::activate(&manifest, &dir)?;
     let lock = Lockfile::load_or_default(&dir)?;
     if let Some(name) = name {
         if !lock.skills.contains_key(name) && !lock.plugins.contains_key(name) {

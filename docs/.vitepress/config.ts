@@ -61,6 +61,7 @@ export default defineConfig({
           { text: "Referencing a Skill", link: "/guide/referencing-skills" },
           { text: "Targets & Vendors", link: "/guide/targets" },
           { text: "Transitive Dependencies", link: "/guide/transitive-dependencies" },
+          { text: "Source Policy", link: "/guide/source-policy" },
           { text: "Worktrees & Fresh Clones", link: "/guide/worktrees" },
           { text: "Agent Skill", link: "/guide/agent-skill" },
           { text: "Design Notes", link: "/guide/design-notes" },

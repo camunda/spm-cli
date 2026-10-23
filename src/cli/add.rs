@@ -37,7 +37,14 @@ pub(super) fn add(scope: &Scope, req: AddRequest) -> Result<()> {
     // uninitialized project (no `ai.json`) fails with the usual missing-manifest
     // hint instead of a `git ls-remote` network/auth error from the shorthand's
     // ref lookup.
-    let (git, version) = shorthand::expand(git, version)?;
+    //
+    // The source policy is checked here, before `ai.json` is touched and before
+    // any git call (the shorthand's ref lookup checks the expanded URL first).
+    let policy = crate::policy::activate(&manifest, &dir)?;
+    let (git, version) = shorthand::expand(git, version, &policy)?;
+    policy
+        .check(&git)
+        .with_context(|| format!("cannot add `{git}`"))?;
     if let Some(sub) = &path {
         crate::manifest::validate_subpath(sub)?;
     }

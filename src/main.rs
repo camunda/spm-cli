@@ -7,6 +7,7 @@ mod lockfile;
 mod manifest;
 mod paths;
 mod plugin;
+mod policy;
 mod resolver;
 mod scan;
 mod schema;

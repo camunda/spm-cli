@@ -280,11 +280,20 @@ fn is_connectivity_failure(err: &anyhow::Error) -> bool {
 /// or auth failure — never after a ref/path error — and always says so on
 /// stderr. Only the URL handed to git changes: callers keep recording the URL
 /// the user supplied.
+///
+/// Every URL actually handed to git — the original and any protocol rewrite —
+/// first passes the source policy ([`crate::policy::gate`]), so no remote
+/// operation can reach a denied source, whatever the caller.
 fn with_transport<T>(
     transport: Transport,
     url: &str,
     mut op: impl FnMut(&str) -> Result<T>,
 ) -> Result<T> {
+    let mut op = |u: &str| {
+        crate::policy::gate(u)?;
+        op(u)
+    };
+    crate::policy::gate(url)?;
     let first = transport
         .force
         .and_then(|p| rewrite(url, p))
