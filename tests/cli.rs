@@ -11487,3 +11487,143 @@ fn a_link_containing_the_temp_dir_is_refused() {
     assert!(err.contains("contains spm's temporary directory"), "{err}");
     assert!(!sb.project_links().exists());
 }
+
+/// Commands that edit `ai.json` read it under the scope lock, so one queued
+/// behind another edits what that one left — never a stale copy whose save
+/// would undo it (restoring a removed dependency or target, dropping an added
+/// one).
+#[test]
+fn queued_manifest_edits_never_undo_each_other() {
+    let url = |sb: &Sandbox| sb.skill_url();
+    type Check = fn(&serde_json::Value);
+    let cases: [(&[&str], &[&str], Check); 4] = [
+        (&["remove", "a"], &["remove", "b"], |m| {
+            assert_eq!(m["skills"], serde_json::json!({}), "{m}");
+        }),
+        (&["remove", "a"], &["target", "remove", "claude"], |m| {
+            assert!(m["skills"].get("a").is_none(), "{m}");
+            assert_eq!(m["targets"], serde_json::json!(["copilot"]), "{m}");
+        }),
+        (&["target", "add", "codex"], &["remove", "a"], |m| {
+            assert!(m["skills"].get("a").is_none(), "{m}");
+            assert_eq!(
+                m["targets"],
+                serde_json::json!(["copilot", "claude", "codex"]),
+                "{m}"
+            );
+        }),
+        (
+            &["target", "remove", "claude"],
+            &["target", "add", "codex"],
+            |m| {
+                assert_eq!(m["targets"], serde_json::json!(["copilot", "codex"]), "{m}");
+            },
+        ),
+    ];
+    for (first, second, check) in cases {
+        let sb = Sandbox::new();
+        sb.ok(&["init", "--target", "copilot,claude"]);
+        for n in ["a", "b"] {
+            sb.ok(&["add", &url(&sb), "--branch", "main", "--name", n]);
+        }
+        let held = hold_links_lock_exclusively(&sb);
+        let a = BlockedOnStateLock::spawn(&sb, first);
+        let b = BlockedOnStateLock::spawn(&sb, second);
+        drop(held);
+        a.finish();
+        b.finish();
+        check(&serde_json::from_str(&sb.read("ai.json")).unwrap());
+    }
+
+    // `add` too: two queued additions both land.
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    let held = hold_links_lock_exclusively(&sb);
+    let skill = sb.skill_url();
+    let a = BlockedOnStateLock::spawn(&sb, &["add", &skill, "--branch", "main", "--name", "a"]);
+    let b = BlockedOnStateLock::spawn(&sb, &["add", &skill, "--branch", "main", "--name", "b"]);
+    drop(held);
+    a.finish();
+    b.finish();
+    let m: serde_json::Value = serde_json::from_str(&sb.read("ai.json")).unwrap();
+    assert!(
+        m["skills"].get("a").is_some() && m["skills"].get("b").is_some(),
+        "{m}"
+    );
+}
+
+/// `clean` reads `ai.json` under the scope lock too: queued behind a
+/// `target add`, it removes that new target's output as well.
+#[test]
+fn clean_queued_behind_target_add_cleans_the_new_target() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--name",
+        "greet",
+    ]);
+    let held = hold_links_lock_exclusively(&sb);
+    let add = BlockedOnStateLock::spawn(&sb, &["target", "add", "claude"]);
+    let clean = BlockedOnStateLock::spawn(&sb, &["clean"]);
+    drop(held);
+    add.finish();
+    clean.finish();
+    assert!(
+        !sb.project.join(".spm/claude").exists(),
+        "claude output left behind"
+    );
+    assert!(!sb
+        .project
+        .join(".agents/skills/spm-managed-skills")
+        .exists());
+}
+
+/// Linked content is materialized from a snapshot in the temporary directory;
+/// if that lies inside a target's output (e.g. `TMPDIR` under `.spm/claude`),
+/// rebuilding the output would delete the snapshot before copying it. Refused
+/// before any target is touched, leaving the installation as it was.
+#[test]
+fn a_temp_dir_inside_target_output_is_refused() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot,claude"]);
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--name",
+        "greet",
+    ]);
+    local_skill_checkout(&sb, "dev", "LOCAL");
+    sb.ok(&["link", "greet", "../dev"]);
+    let output = sb.project.join(".spm/claude");
+    let installed = output.join("plugin/skills/greet/SKILL.md");
+    let before = read_path(&installed);
+    let tmp = output.join("tmp");
+    std::fs::create_dir_all(&tmp).unwrap();
+    for args in [&["install"][..], &["link", "greet", "../dev"]] {
+        let out = sb
+            .command(args)
+            .env("TMPDIR", &tmp)
+            .env("TMP", &tmp)
+            .env("TEMP", &tmp)
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{args:?} succeeded");
+        assert!(
+            err.contains("temporary directory") && err.contains("lies inside"),
+            "{args:?}: {err}"
+        );
+        assert_eq!(read_path(&installed), before, "{args:?}");
+        assert_eq!(
+            std::fs::read_dir(&tmp).unwrap().count(),
+            0,
+            "{args:?}: snapshot left"
+        );
+    }
+}

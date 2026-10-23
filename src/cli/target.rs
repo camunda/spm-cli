@@ -15,9 +15,11 @@ use std::path::{Path, PathBuf};
 /// not an error, so the command is safe to re-run.
 pub(super) fn target_add(scope: &Scope, vendors: Vec<String>) -> Result<()> {
     let dir = scope.manifest_dir()?;
-    let mut manifest = Manifest::load(&dir, scope)?;
 
     let requested = if vendors.is_empty() {
+        // Not locked yet: no command should wait on an interactive prompt. The
+        // choice is re-checked against `ai.json` as read under the lock below.
+        let manifest = Manifest::load(&dir, scope)?;
         let available: Vec<&str> = vendor::ALL_TARGETS
             .iter()
             .copied()
@@ -40,6 +42,9 @@ pub(super) fn target_add(scope: &Scope, vendors: Vec<String>) -> Result<()> {
         vendors
     };
 
+    // Held from reading `ai.json` to the last write (see `StateLock`).
+    let state_lock = crate::links::StateLock::acquire(scope, false)?;
+    let mut manifest = Manifest::load(&dir, scope)?;
     let mut added = Vec::new();
     for v in requested {
         if manifest.targets.iter().any(|cur| cur == &v) {
@@ -56,7 +61,7 @@ pub(super) fn target_add(scope: &Scope, vendors: Vec<String>) -> Result<()> {
     }
 
     // Materialize existing skills into the newly-added vendor(s).
-    save_and_sync(scope, &manifest)?;
+    save_and_sync(scope, state_lock, &manifest)?;
     println!("added target(s): {}", added.join(", "));
     Ok(())
 }
@@ -71,6 +76,9 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
         vendor::for_target(v)?;
     }
     let dir = scope.manifest_dir()?;
+    // Held from reading `ai.json` and link state until the deletions below are
+    // done (see `StateLock`).
+    let _state_lock = crate::links::StateLock::acquire(scope, false)?;
     let mut manifest = Manifest::load(&dir, scope)?;
 
     let mut removed: Vec<String> = Vec::new();
@@ -108,9 +116,6 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
         );
     }
 
-    // Held from reading link state until the deletions below are done (see
-    // `StateLock`).
-    let _state_lock = crate::links::StateLock::acquire(scope, false)?;
     let lock = Lockfile::load_or_default(&dir)?;
     let (managed, managed_plugins) = managed_names(&lock, &crate::links::Links::load(scope)?);
     // Physical locations a remaining target still loads skills, plugins or
@@ -151,6 +156,7 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
         &Default::default(),
         &managed,
         &managed_plugins,
+        None,
     )?;
     for v in &removed_vendors {
         let mut candidates = v.clean_paths(scope, &managed)?;

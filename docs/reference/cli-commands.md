@@ -212,7 +212,8 @@ spm install                               # re-run after further edits
   private temporary directory (owner-only on Unix, one numbered slot per link)
   and scans and materializes that snapshot, so edits made
   while the sync runs can't reach a target unscanned (a directory containing
-  that temporary directory can't be linked). It is not fetched into the store; with
+  that temporary directory can't be linked, and a temporary directory inside a
+  target's output is refused). It is not fetched into the store; with
   `"resolveTransitive": true` its transitive dependencies still come from its
   locked commit's nested `ai.json`.
 - Every sync (`install`, `update`, `add`, …) re-copies linked content; there is
@@ -239,9 +240,10 @@ spm install                               # re-run after further edits
   they can't race: `link`/`unlink` serialize with every command that rewrites
   target output via a machine-wide lock (`$SPM_HOME/links.lock`), and commands
   on the same project (or on the global scope) run one at a time (a lock per
-  scope under `$SPM_HOME/locks/`). Both are held from reading link state to the
-  last write, so a waiting command always acts on the links as they are once it
-  resumes. A command that has to wait says so on stderr.
+  scope under `$SPM_HOME/locks/`). Both are held from reading `ai.json` and link
+  state to the last write, so a waiting command always acts on the manifest and
+  links as they are once it resumes (two queued `spm remove`s never undo each
+  other). A command that has to wait says so on stderr.
 - Under a [source policy](/guide/source-policy) a link is a local source, so it
   needs `file://*` even when the dependency it overrides is an allowed remote.
 - A linked plugin's working tree may bundle different skills than its locked

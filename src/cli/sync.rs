@@ -119,14 +119,20 @@ impl LockMode {
 /// so `ai.json` deliberately *keeps* the change: it is what records that spm
 /// owns that output (shared skill dirs are cleaned by declared/locked name
 /// only), and the next `spm install` finishes the job.
-pub(super) fn save_and_sync(scope: &Scope, manifest: &Manifest) -> Result<usize> {
+///
+/// `state_lock` must have been taken before `manifest` was read (see
+/// [`StateLock`]), so a command queued behind another edits what that one left.
+pub(super) fn save_and_sync(
+    scope: &Scope,
+    state_lock: StateLock,
+    manifest: &Manifest,
+) -> Result<usize> {
     let dir = scope.manifest_dir()?;
     let path = Manifest::path_in(&dir);
     let text = manifest.to_text()?;
     // Validate exactly as the next `Manifest::load` will (schema, name
     // collisions across skills/plugins, ...), so an invalid edit is never saved.
     let manifest = Manifest::parse(&text, &path)?;
-    let state_lock = StateLock::acquire(scope, false)?;
     let plan = plan(
         scope,
         &manifest,
@@ -682,6 +688,7 @@ fn plan(
         &linked,
         &output_skills,
         &output_plugins,
+        snapshots.as_ref().map(|s| s.root.as_path()),
     )?;
     if locked {
         // Backstop for the whole defect class: whatever the specific checks above
@@ -849,6 +856,7 @@ pub(super) fn guard_working_copies(
     active: &BTreeMap<String, Linked>,
     skills: &[String],
     plugins: &[String],
+    snapshot: Option<&std::path::Path>,
 ) -> Result<()> {
     let mut guarded: Vec<Guarded> = active
         .iter()
@@ -918,10 +926,23 @@ pub(super) fn guard_working_copies(
         manifest_dir,
         vendors,
         &guarded,
-        &state_files,
+        Kept {
+            state_files: &state_files,
+            snapshot,
+        },
         skills,
         plugins,
     )
+}
+
+/// What the targets' writes and deletions must leave alone besides working
+/// copies (see [`reject_link_overlaps`]).
+struct Kept<'a> {
+    /// The links files this command must not wipe (this scope's first, which
+    /// it also writes).
+    state_files: &'a [PathBuf],
+    /// Where this command copied linked content to materialize it from.
+    snapshot: Option<&'a std::path::Path>,
 }
 
 /// Reject a linked working copy that overlaps any location a target writes or
@@ -936,18 +957,22 @@ pub(super) fn guard_working_copies(
 /// route counts too: deleting a symlink (or a dir holding one) it passes
 /// through would break — or, once regenerated, silently re-point — the link.
 ///
-/// `state_files` are the links files this command must not wipe (this
-/// scope's first, which it also writes).
+/// Nor may the targets wipe what `kept` lists: a links file (dropping every
+/// link), or the snapshot before they copy from it.
 fn reject_link_overlaps(
     scope: &Scope,
     manifest_dir: &std::path::Path,
     vendors: &[Box<dyn Vendor>],
     guarded: &[Guarded],
-    state_files: &[PathBuf],
+    kept: Kept,
     skills: &[String],
     plugins: &[String],
 ) -> Result<()> {
     use crate::pathid::{deletion_target, identity, resolve, NodeId};
+    let Kept {
+        state_files,
+        snapshot,
+    } = kept;
     // Nothing to protect: no working copy, and no links file to lose.
     if guarded.is_empty() && !state_files.iter().any(|f| f.symlink_metadata().is_ok()) {
         return Ok(());
@@ -1023,6 +1048,22 @@ fn reject_link_overlaps(
                  continue, as that would drop your links — remove whatever puts it there (e.g. \
                  a symlink) and retry",
                 links_file.display(),
+                p.display()
+            );
+        }
+    }
+    // The snapshot root is canonical, so its identity is its whole route.
+    if let Some(root) = snapshot {
+        let id = identity(root)?;
+        if let Some((owner, p, ..)) = outputs
+            .iter()
+            .find(|(_, _, out, through)| !through && id.starts_with(out))
+        {
+            bail!(
+                "spm's temporary directory `{}` lies inside `{}`, which target `{owner}` \
+                 writes or deletes, so linked content copied there would be lost — point the \
+                 temporary directory elsewhere (`TMPDIR`; `TMP`/`TEMP` on Windows) and retry",
+                root.display(),
                 p.display()
             );
         }

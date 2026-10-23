@@ -9,10 +9,10 @@ use anyhow::Result;
 
 pub(super) fn clean(scope: &Scope) -> Result<()> {
     let dir = scope.manifest_dir()?;
-    let manifest = Manifest::load(&dir, scope)?;
-    // Held from reading link state until the deletions below are done (see
-    // `StateLock`).
+    // Held from reading `ai.json` and link state until the deletions below are
+    // done (see `StateLock`).
     let _state_lock = crate::links::StateLock::acquire(scope, false)?;
+    let manifest = Manifest::load(&dir, scope)?;
     let lock = Lockfile::load_or_default(&dir)?;
     let (managed, managed_plugins) = managed_names(&lock, &Links::load(scope)?);
     let vendors = manifest
@@ -27,6 +27,7 @@ pub(super) fn clean(scope: &Scope) -> Result<()> {
         &Default::default(),
         &managed,
         &managed_plugins,
+        None,
     )?;
     for vendor in &vendors {
         vendor.clean(scope, &managed)?;

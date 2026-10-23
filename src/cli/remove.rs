@@ -5,6 +5,8 @@ use anyhow::{bail, Result};
 
 pub(super) fn remove(scope: &Scope, name: &str, plugin: bool) -> Result<()> {
     let dir = scope.manifest_dir()?;
+    // Held from reading `ai.json` to the last write (see `StateLock`).
+    let state_lock = crate::links::StateLock::acquire(scope, false)?;
     let mut manifest = Manifest::load(&dir, scope)?;
     let (removed, kind) = if plugin {
         (manifest.plugins.remove(name).is_some(), "plugin")
@@ -17,7 +19,7 @@ pub(super) fn remove(scope: &Scope, name: &str, plugin: bool) -> Result<()> {
             Manifest::path_in(&dir).display()
         );
     }
-    save_and_sync(scope, &manifest)?;
+    save_and_sync(scope, state_lock, &manifest)?;
     println!("removed {kind} {name}");
     Ok(())
 }
