@@ -10417,3 +10417,88 @@ fn link_rejects_a_working_copy_hard_linked_to_a_file_spm_writes() {
     );
     assert!(!sb.project.join(".spm/links.json").exists());
 }
+
+/// A link's effective source is a local directory, so it needs `file://*`
+/// under a source policy, however approved the remote it overrides is — when
+/// linking a skill or a plugin, and for a pre-existing link at `install --locked`.
+#[test]
+fn links_need_a_policy_that_allows_local_sources() {
+    const REMOTE: &str = "https://example.test/org/skill.git";
+    let sb = Sandbox::new();
+    sb.add_plugin();
+    let url = sb.skill_url();
+    let remotes = [(REMOTE, url.as_str())];
+    let run = |args: &[&str]| {
+        let out = sb.spm_remotes(args, &remotes);
+        (out.status.success(), stderr_of(&out))
+    };
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"skills":{{"greet":{{"git":"{REMOTE}","branch":"main"}}}},
+                "plugins":{{"ds":{{"git":"{REMOTE}","branch":"main","path":"pkg"}}}}}}"#
+        ),
+    );
+    assert!(run(&["install"]).0);
+    local_skill_checkout(&sb, "dev", "LOCAL");
+    dev_plugin_without_composer(&sb);
+    assert!(run(&["link", "greet", "../dev"]).0);
+
+    let remote_only = ["example.test/org/*"];
+    let policy = sb.spm_home.join("policy.json");
+    write_policy_file(&policy, &remote_only);
+    let (ok, err) = run(&["install", "--locked"]);
+    assert!(
+        !ok && err.contains("link `greet`") && err.contains("file://*"),
+        "{err}"
+    );
+    let (ok, err) = run(&["link", "ds", "../dev-plugin"]);
+    assert!(!ok && err.contains("link `ds`"), "{err}");
+    assert!(!sb.read(".spm/links.json").contains("ds"));
+    assert!(
+        run(&["unlink", "greet"]).0,
+        "unlinking needs no local source"
+    );
+
+    std::fs::remove_file(&policy).unwrap();
+    set_project_policy(&sb, &remote_only);
+    let (ok, err) = run(&["link", "ds", "../dev-plugin"]);
+    assert!(!ok && err.contains("link `ds`"), "project policy: {err}");
+    set_project_policy(&sb, &["example.test/org/*", "file://*"]);
+    assert!(run(&["link", "ds", "../dev-plugin"]).0);
+    assert!(run(&["install", "--locked"]).0);
+}
+
+/// Symlinks inside the working copy are followed by the copy, so their routes
+/// are protected too: one passing through target output would be deleted by
+/// materialization, leaving the working copy's file dangling.
+#[cfg(unix)]
+#[test]
+fn link_rejects_a_working_copy_whose_symlinks_route_through_output() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex"]);
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--name",
+        "greet",
+    ]);
+    let dev = local_skill_checkout(&sb, "dev", "LOCAL");
+    std::fs::rename(dev.join("SKILL.md"), dev.join("real.md")).unwrap();
+    let alias = sb.project.join(".agents/skills/greet/alias");
+    symlink(dev.join("real.md"), &alias);
+    symlink(alias.clone(), dev.join("SKILL.md"));
+
+    let err = fails(&sb, &["link", "greet", "../dev"]);
+    assert!(err.contains("overlaps"), "{err}");
+    assert!(err.contains("through the symlink"), "{err}");
+    assert!(
+        std::fs::symlink_metadata(&alias).is_ok(),
+        "output was changed"
+    );
+    assert!(read_path(&dev.join("SKILL.md")).contains("LOCAL"));
+    assert!(!sb.project.join(".spm/links.json").exists());
+}

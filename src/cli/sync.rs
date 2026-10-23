@@ -163,6 +163,7 @@ fn plan(
     // Source policy: judge every direct source before any network access, and
     // report all denied ones at once.
     let policy = crate::policy::activate(manifest, &dir)?;
+    let linked = resolve_links(scope, manifest, &links)?;
     let denied: Vec<String> = manifest
         .skills
         .iter()
@@ -174,6 +175,12 @@ fn plan(
                 .err()
                 .map(|e| format!("{kind} `{name}`: {e:#}"))
         })
+        .chain(linked.iter().filter_map(|(name, l)| {
+            policy
+                .check_local(&l.display)
+                .err()
+                .map(|e| format!("link `{name}`: {e:#}"))
+        }))
         .collect();
     if !denied.is_empty() {
         bail!(
@@ -193,7 +200,6 @@ fn plan(
         .iter()
         .map(|t| crate::vendor::for_target(t))
         .collect::<Result<Vec<_>>>()?;
-    let linked = resolve_links(scope, manifest, &links)?;
     if locked && !Lockfile::path_in(&dir).exists() {
         bail!(
             "{}: {} not found\n{}",
@@ -769,7 +775,7 @@ fn reject_link_overlaps(
     skills: &[String],
     plugins: &[String],
 ) -> Result<()> {
-    use crate::pathid::{deletion_target, identity, resolve};
+    use crate::pathid::{deletion_target, identity, resolve, NodeId};
     if guarded.is_empty() {
         return Ok(());
     }
@@ -800,20 +806,36 @@ fn reject_link_overlaps(
     }
     for (name, dir, display, active) in guarded {
         let src = identity(dir)?;
-        let mut route = Vec::new();
-        resolve(&manifest_dir.join(display), &mut route)?;
-        let route = route
-            .iter()
-            .map(|r| identity(r))
-            .collect::<Result<Vec<_>>>()?;
-        let hit = outputs
-            .iter()
-            .find(|(_, _, out, through)| {
-                out.starts_with(&src)
-                    || (!through
-                        && (src.starts_with(out) || route.iter().any(|r| r.starts_with(out))))
-            })
-            .map(|(owner, p, ..)| (*owner, p.as_path(), String::new()));
+        // Every location the content depends on: the recorded path's own hops,
+        // and those of each symlink inside the tree (which the copy follows),
+        // tagged with the symlink for messages.
+        let mut route: Vec<(Option<PathBuf>, Vec<NodeId>)> = Vec::new();
+        let mut hops = Vec::new();
+        resolve(&manifest_dir.join(display), &mut hops)?;
+        for h in &hops {
+            route.push((None, identity(h)?));
+        }
+        for link in symlinks_in(dir)? {
+            let mut hops = Vec::new();
+            resolve(&link, &mut hops)?;
+            for h in &hops {
+                route.push((Some(link.clone()), identity(h)?));
+            }
+        }
+        let hit = outputs.iter().find_map(|(owner, p, out, through)| {
+            if out.starts_with(&src) || (!through && src.starts_with(out)) {
+                return Some((*owner, p.as_path(), String::new()));
+            }
+            if *through {
+                return None;
+            }
+            let (via, _) = route.iter().find(|(_, r)| r.starts_with(out))?;
+            let how = via
+                .as_ref()
+                .map(|v| format!(" (through the symlink `{}`)", v.display()))
+                .unwrap_or_default();
+            Some((*owner, p.as_path(), how))
+        });
         let hit = match hit {
             Some(h) => Some(h),
             None => hard_linked_into(dir, &patched)?.map(|(owner, p, alias)| {
@@ -848,6 +870,25 @@ fn reject_link_overlaps(
         );
     }
     Ok(())
+}
+
+/// Every symlink inside `dir`, not descending into `.git` (never copied) or
+/// through symlinks.
+fn symlinks_in(dir: &std::path::Path) -> Result<Vec<PathBuf>> {
+    let mut found = Vec::new();
+    let mut dirs = vec![dir.to_path_buf()];
+    while let Some(d) = dirs.pop() {
+        for entry in std::fs::read_dir(&d).with_context(|| format!("reading {}", d.display()))? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if kind.is_symlink() {
+                found.push(entry.path());
+            } else if kind.is_dir() && entry.file_name() != ".git" {
+                dirs.push(entry.path());
+            }
+        }
+    }
+    Ok(found)
 }
 
 /// A file spm writes in place (`files`: owner, path) that is a hard link to a

@@ -220,7 +220,10 @@ spm install                               # re-run after further edits
   `.spm/links.json`, `.gitignore`, Claude's settings) through a symlink or a hard link (detected on Unix) — that would wipe or modify your working copy,
   or copy the output into itself. The path as given counts too: one that
   passes through a symlink inside the output (e.g. `.agents/skills/<name>`
-  replaced by a symlink to your clone) is rejected, as syncing would replace it.
+  replaced by a symlink to your clone) is rejected, as syncing would replace it;
+  so is a symlink inside the directory whose route passes through the output.
+- Under a [source policy](/guide/source-policy) a link is a local source, so it
+  needs `file://*` even when the dependency it overrides is an allowed remote.
 - A linked plugin's working tree may bundle different skills than its locked
   commit, but names its locked bundle still provides stay taken: `ai.lock` must
   remain installable without the link.

@@ -405,10 +405,20 @@ impl Policy {
     /// Fail unless every layer allows `git`. The error names the source, the
     /// identity it was matched as, and each layer that denied it.
     pub fn check(&self, git: &str) -> Result<()> {
+        self.judge(git, Source::classify(git))
+    }
+
+    /// Fail unless every layer allows a local directory (`dir`, as spelled for
+    /// messages): a `spm link` override is the local source it really is, so it
+    /// needs `file://*` whatever the dependency it overrides declares.
+    pub fn check_local(&self, dir: &str) -> Result<()> {
+        self.judge(dir, Source::Local)
+    }
+
+    fn judge(&self, git: &str, source: Source) -> Result<()> {
         if self.layers.is_empty() {
             return Ok(());
         }
-        let source = Source::classify(git);
         let denied: Vec<String> = self
             .layers
             .iter()
