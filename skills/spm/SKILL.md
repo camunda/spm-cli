@@ -386,12 +386,17 @@ re-fetched by the next `spm install`. It has no `-g` flag.
 ### `spm scan`
 
 ```bash
-spm scan [path] [--json]
+spm scan [path] [--within <dir>] [--json]
 ```
 
 Runs spm's deterministic content scanner over a file or directory (default
 `.`) and prints every finding. It exits non-zero when any finding is high or
 critical severity. See [Content scan](#content-scan).
+
+Symlinks are followed only when they resolve inside the scanned path. Pass
+`--within <dir>` (a directory containing the path, such as the repository root
+of a plugin kept in a subdirectory) to follow symlinks anywhere inside `<dir>`,
+the same boundary the install gate uses.
 
 ### Machine-readable output (`--json`)
 

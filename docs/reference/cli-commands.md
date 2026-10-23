@@ -20,7 +20,7 @@ spm status [-g] [--json]                           # check skills are materializ
 spm outdated [name] [-g] [--json] [--exit-code]       # report newer upstream versions (read-only)
 spm clean [-g]                                     # remove generated vendor config
 spm prune [--yes]                                  # wipe the global fetch cache ($SPM_HOME/store, default ~/.spm/store)
-spm scan [path] [--json]                           # scan skill content for suspicious patterns (default: .)
+spm scan [path] [--within <dir>] [--json]          # scan skill content for suspicious patterns (default: .)
 ```
 
 Four commands have short aliases that behave identically, including `-g`:
@@ -410,6 +410,13 @@ Runs spm's deterministic **content scanner** over a path — a single file or a
 directory (default: the current directory) — and prints every finding. **Exits
 non-zero** when any blocking (high/critical) finding is present, so it works as a
 CI gate on skill sources.
+
+Symlinks are followed only when they resolve inside the scanned path. With
+`--within <dir>`, a symlink is followed when it resolves anywhere inside `<dir>`,
+which must contain the path. That is the boundary the install gate uses for a
+dependency at a repository subdirectory (its checkout root), so
+`spm scan <checkout>/plugins/kit --within <checkout>` sees exactly what
+installing that plugin would materialize.
 
 The same scan runs automatically as a **pre-materialize gate**: every skill and
 plugin is scanned from its store checkout — fetched only when its pin is new or

@@ -44,7 +44,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write        # push the spm/update-* branches
+  contents: write        # push the spm/update/* branches
   pull-requests: write   # open and update the pull requests
 
 jobs:
@@ -58,8 +58,11 @@ jobs:
 
 Each run calls [`spm outdated`](/reference/cli-commands#spm-outdated-name) and, for
 every outdated dependency, commits the change to `ai.json`/`ai.lock` on its own
-`spm/update-<name>` branch and opens (or refreshes) a pull request titled
-`chore(deps): update skill <name> to <version>`:
+`spm/update/<name>-<hash>` branch and opens (or refreshes) a pull request titled
+`chore(deps): update skill <name> to <version>`. The hash covers the dependency
+name, the project directory and the base branch, so the same dependency in two
+projects of one repository, or updated on `main` and on a maintenance branch,
+gets separate branches and pull requests:
 
 | Declared as | Proposed change |
 | --- | --- |
@@ -76,6 +79,13 @@ dependency that moved again updates its existing pull request.
 The pull request body shows the old and new version and commit, a compare link
 (for GitHub-hosted sources), any other `ai.lock` entries that changed with it
 (new transitive dependencies), and the `spm scan` findings for the new code.
+The scan covers what `spm install` would materialize: for a dependency kept in
+a subdirectory of its repository, symlinks to elsewhere in that repository are
+followed (`spm scan --within`), as the install gate does.
+
+The action checks out a branch per update, so it stops with an error, without
+touching anything, if the repository has uncommitted changes to tracked files.
+Run it on a clean checkout (untracked files are fine).
 
 ### Blocking scan findings
 

@@ -350,7 +350,7 @@ spm status [-g] [--json]                           # check skills are materializ
 spm outdated [name] [-g] [--json] [--exit-code]       # report newer upstream versions (read-only)
 spm clean [-g]                                     # remove generated vendor config
 spm prune [--yes]                                  # wipe the global fetch cache ($SPM_HOME/store, default ~/.spm/store)
-spm scan [path] [--json]                           # scan skill content for suspicious patterns (default: .)
+spm scan [path] [--within <dir>] [--json]          # scan skill content for suspicious patterns (default: .)
 ```
 
 `list`, `status`, `outdated` and `scan` accept `--json` for scripts, CI and agents: stdout

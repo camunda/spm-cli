@@ -9,6 +9,12 @@ import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+/// A text file of this repository with LF line endings, however git checked it
+/// out (Windows runners convert to CRLF), so tests can parse it portably.
+export function readRepoText(...path) {
+  return readFileSync(join(REPO_ROOT, ...path), "utf8").replace(/\r\n/g, "\n");
+}
 const EXE = process.platform === "win32" ? ".exe" : "";
 
 /// The spm binary under test: `SPM_TEST_BIN`, else the `cargo build` output.
@@ -156,16 +162,19 @@ export async function fakeGitHub(t, { repository = "acme/project", token = "test
     if (req.method === "GET" && path === "/pulls") {
       const head = url.searchParams.get("head");
       const st = url.searchParams.get("state");
+      const base = url.searchParams.get("base");
       return send(
         res,
         200,
-        state.pulls.filter((p) => `${owner}:${p.head}` === head && (st === "all" || p.state === st)).map(view),
+        state.pulls
+          .filter((p) => `${owner}:${p.head}` === head && (st === "all" || p.state === st) && (!base || p.base === base))
+          .map(view),
       );
     }
     if (req.method === "POST" && path === "/pulls") {
       const pushed = spawnSync("git", ["ls-remote", "--exit-code", origin, `refs/heads/${body.head}`]).status === 0;
       if (!pushed) return send(res, 422, { message: `head ${body.head} does not exist` });
-      if (state.pulls.some((p) => p.head === body.head && p.state === "open")) {
+      if (state.pulls.some((p) => p.head === body.head && p.base === body.base && p.state === "open")) {
         return send(res, 422, { message: "A pull request already exists" });
       }
       const number = state.pulls.length + 1;

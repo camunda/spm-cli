@@ -14,6 +14,7 @@ import {
   parseMarker,
   planFor,
   renderBody,
+  sameIdentity,
   shortVersion,
 } from "./report.mjs";
 
@@ -43,12 +44,15 @@ function storeDir(env) {
   return join(env.SPM_HOME !== undefined ? env.SPM_HOME : join(homedir(), ".spm"), "store");
 }
 
-/// `spm scan --json` over the store checkout of one lock entry. Finding paths
-/// are made relative to the scanned directory (forward slashes).
+/// `spm scan --json` over the store checkout of one lock entry, bounded by its
+/// checkout root (`--within`) exactly like the install gate, so a subdirectory
+/// entry's symlinks into the rest of its repository are scanned too. Finding
+/// paths are made relative to the scanned directory (forward slashes).
 function scanEntry(change, { cwd, env }) {
   const { name, to } = change;
-  const dir = join(storeDir(env), to.store, ...(to.path ? to.path.split("/") : []));
-  const r = exec("spm", ["scan", "--json", dir], { cwd, env, allowFail: true });
+  const root = join(storeDir(env), to.store);
+  const dir = join(root, ...(to.path ? to.path.split("/") : []));
+  const r = exec("spm", ["scan", "--json", "--within", root, dir], { cwd, env, allowFail: true });
   try {
     const report = JSON.parse(r.stdout);
     const findings = report.findings.map((f) => ({
@@ -78,6 +82,18 @@ export async function run(env, { cwd = process.cwd() } = {}) {
   const baseSha = out(["rev-parse", "HEAD"]);
   const base = getInput(env, "base") || startRef;
   if (!base) throw new Error("HEAD is detached: check out the branch to update, or set the `base` input");
+  // Each update is checked out with `-f` and the start is restored with `-f`:
+  // refuse to run over tracked changes anywhere in the repository rather than
+  // silently discard them.
+  const dirty = out(["status", "--porcelain", "--untracked-files=no"]);
+  if (dirty) {
+    throw new Error(
+      `the repository has uncommitted changes to tracked files; commit or stash them before this action (it checks out a branch per update):\n${dirty}`,
+    );
+  }
+  // The project's repository-relative directory (forward slashes, `.` for the
+  // root) is part of each update's identity.
+  const dir = out(["rev-parse", "--show-prefix"]).replace(/\/+$/, "") || ".";
   const github = dryRun
     ? null
     : new GitHub({ apiUrl: env.GITHUB_API_URL, token, repository: env.GITHUB_REPOSITORY });
@@ -118,7 +134,7 @@ export async function run(env, { cwd = process.cwd() } = {}) {
     try {
       for (const row of candidates) {
         results.push(
-          await updateOne(row, { wd, env, spmEnv, git, out, files, baseSha, base, baseLock, manifest, github, labels, blockedLabel, dryRun, problems }),
+          await updateOne(row, { wd, dir, env, spmEnv, git, out, files, baseSha, base, baseLock, manifest, github, labels, blockedLabel, dryRun, problems }),
         );
       }
     } finally {
@@ -136,14 +152,15 @@ export async function run(env, { cwd = process.cwd() } = {}) {
 }
 
 async function updateOne(row, ctx) {
-  const { wd, env, spmEnv, git, out, files, baseSha, base, baseLock, manifest, github, labels, blockedLabel, dryRun, problems } = ctx;
+  const { wd, dir, env, spmEnv, git, out, files, baseSha, base, baseLock, manifest, github, labels, blockedLabel, dryRun, problems } = ctx;
   const { name, kind } = row;
   const plan = planFor(row);
   if (plan.action === "skip") {
     log.notice(`${kind} ${name}: skipped — ${plan.reason}`);
     return { name, kind, result: "skipped", reason: plan.reason };
   }
-  const branch = branchFor(name);
+  const id = { name, dir, base };
+  const branch = branchFor(id);
   log.group(`${kind} ${name} → ${branch}`);
   try {
     git(["checkout", "-q", "-f", "-B", branch, baseSha]);
@@ -176,6 +193,8 @@ async function updateOne(row, ctx) {
     const body = renderBody({
       name,
       kind,
+      dir,
+      base,
       git: to.git,
       path: to.path,
       from,
@@ -198,10 +217,10 @@ async function updateOne(row, ctx) {
       return { name, kind, branch, result: "dry-run", blocking };
     }
 
-    const closed = await github.listPulls(branch, "closed");
+    const closed = await github.listPulls(branch, "closed", base);
     const declined = closed.find((p) => {
       const m = parseMarker(p.body);
-      return !p.merged_at && m?.name === name && m?.commit === to.commit;
+      return !p.merged_at && sameIdentity(m, id) && m.commit === to.commit;
     });
     if (declined) {
       log.notice(`${kind} ${name}: ${to.commit.slice(0, 8)} was declined in #${declined.number}; skipping`);
@@ -209,7 +228,9 @@ async function updateOne(row, ctx) {
     }
 
     pushIfChanged(branch, { git, out });
-    const [open] = await github.listPulls(branch, "open");
+    // The branch already encodes the identity; a PR from it that was
+    // retargeted to another base is not this update's and is left alone.
+    const open = (await github.listPulls(branch, "open", base)).find((p) => p.base?.ref === base);
     let pr;
     let result;
     if (open) {

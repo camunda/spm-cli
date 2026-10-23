@@ -11,11 +11,12 @@ import {
   diffLocks,
   marker,
   parseMarker,
+  sameIdentity,
   planFor,
   renderBody,
   shortVersion,
 } from "../lib/report.mjs";
-import { readOutputs, tempDir } from "./helpers.mjs";
+import { readOutputs, run, tempDir } from "./helpers.mjs";
 
 const SHA_A = "a".repeat(40);
 const SHA_B = "b".repeat(40);
@@ -56,16 +57,30 @@ test("planFor: skips what this project's ai.json can't adopt", () => {
   assert.match(range.reason, /v2\.0\.0 is outside the version range `\^1`/);
 });
 
-test("branchFor keeps plain names and hashes anything git can't take verbatim", () => {
-  assert.equal(branchFor("my-skill_1.2"), "spm/update-my-skill_1.2");
-  for (const name of ["a b", "x..y", "v.lock", "-lead", ".dot", "trail.", "a~b^c", "ü", "a@{b"]) {
-    const b = branchFor(name);
-    assert.match(b, /^spm\/update-[A-Za-z0-9][A-Za-z0-9._-]*-[0-9a-f]{8}$/, `${name} -> ${b}`);
-    assert.ok(!b.includes(".."));
+test("branchFor gives every update identity its own valid branch", () => {
+  const id = (name, dir = ".", base = "main") => ({ name, dir, base });
+  assert.match(branchFor(id("my-skill_1.2")), /^spm\/update\/my-skill_1\.2-[0-9a-f]{12}$/);
+  const names = ["my-skill_1.2", "a b", "x..y", "v.lock", "-lead", ".dot", "trail.", "a~b^c", "ü", "a@{b", "x".repeat(80)];
+  for (const name of names) {
+    const b = branchFor(id(name));
+    assert.match(b, /^spm\/update\/[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9_])?-[0-9a-f]{12}$/, `${name} -> ${b}`);
+    assert.equal(run("git", ["check-ref-format", `refs/heads/${b}`], { allowFail: true }).status, 0, `git rejects ${b}`);
+    assert.equal(branchFor(id(name)), b, "stable across runs");
   }
-  // Names that sanitize to the same slug still get distinct branches.
-  assert.notEqual(branchFor("a b"), branchFor("a~b"));
-  assert.equal(branchFor("a b"), branchFor("a b"));
+  const distinct = [
+    // Names that sanitize alike, and a plain name equal to another's encoding.
+    id("a b"),
+    id("a~b"),
+    id("a-b"),
+    id(branchFor(id("a b")).slice("spm/update/".length)),
+    // The same dependency in another project of the repository…
+    id("a b", "tools/ai"),
+    // …or updating another base branch.
+    id("a b", ".", "release/1.x"),
+    id("a b", "tools/ai", "release/1.x"),
+  ];
+  const branches = distinct.map(branchFor);
+  assert.equal(new Set(branches).size, branches.length, branches.join("\n"));
 });
 
 test("compareUrl links GitHub-hosted sources in every URL form", () => {
@@ -122,8 +137,14 @@ test("diffLocks reports added, removed and re-pinned entries of both kinds", () 
 });
 
 test("the PR marker round-trips and ignores foreign or broken markers", () => {
-  const body = `text\n${marker("my skill", SHA_A)}\n`;
-  assert.deepEqual(parseMarker(body), { name: "my skill", commit: SHA_A });
+  const id = { name: "my skill", dir: "tools/ai", base: "release/1.x" };
+  const parsed = parseMarker(`text\n${marker(id, SHA_A)}\n`);
+  assert.deepEqual(parsed, { ...id, commit: SHA_A });
+  assert.ok(sameIdentity(parsed, id));
+  assert.ok(!sameIdentity(parsed, { ...id, dir: "." }));
+  assert.ok(!sameIdentity(parsed, { ...id, base: "main" }));
+  assert.ok(!sameIdentity(parsed, { ...id, name: "other" }));
+  assert.ok(!sameIdentity(null, id));
   assert.equal(parseMarker("no marker"), null);
   assert.equal(parseMarker("<!-- spm-update {broken} -->"), null);
   assert.equal(parseMarker(null), null);
@@ -140,7 +161,9 @@ const base = {
   kind: "skill",
   git: "https://github.com/o/r.git",
   path: "skills/s",
-  branch: "spm/update-s",
+  dir: ".",
+  base: "main",
+  branch: "spm/update/s-0123456789ab",
   from: { reference: "tag:v1.0.0", commit: SHA_A },
   to: { reference: "tag:v1.1.0", commit: SHA_B },
   changes: [],
@@ -154,8 +177,8 @@ test("the PR body shows old and new versions, the compare link and a clean scan"
   assert.match(body, /Source: `https:\/\/github\.com\/o\/r\.git` \(path `skills\/s`\)/);
   assert.match(body, new RegExp(`Upstream changes: https://github.com/o/r/compare/${SHA_A}\\.\\.\\.${SHA_B}`));
   assert.match(body, /### Content scan\n\nNo findings\./);
-  assert.match(body, /git fetch origin spm\/update-s/);
-  assert.deepEqual(parseMarker(body), { name: "s", commit: SHA_B });
+  assert.match(body, /git fetch origin spm\/update\/s-0123456789ab/);
+  assert.deepEqual(parseMarker(body), { name: "s", dir: ".", base: "main", commit: SHA_B });
   assert.doesNotMatch(body, /re-pointed|Other lock changes|CAUTION/);
 });
 
@@ -219,7 +242,7 @@ test("the PR body caps the findings table and its total size, keeping the marker
   const body = renderBody({ ...base, scans: [{ name: "s", summary: { total: 80, blocking: 0 }, findings }] });
   assert.ok(body.length <= 60000, `${body.length}`);
   assert.match(body, /_\(truncated\)_/);
-  assert.deepEqual(parseMarker(body), { name: "s", commit: SHA_B });
+  assert.deepEqual(parseMarker(body), { name: "s", dir: ".", base: "main", commit: SHA_B });
   const few = renderBody({ ...base, scans: [{ name: "s", summary: { total: 80, blocking: 0 }, findings: findings.map((f) => ({ ...f, detail: "d" })) }] });
   assert.match(few, /…and 30 more/);
 });

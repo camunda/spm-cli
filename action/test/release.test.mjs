@@ -7,9 +7,9 @@ import { test } from "node:test";
 import { TARGETS, assetName } from "../../npm/targets.mjs";
 import { stageRelease } from "../stage-release.mjs";
 import { CHECKSUMS, DEFAULT_RELEASE_URL, parseChecksums, resolveTarget, sha256 } from "../lib/setup.mjs";
-import { REPO_ROOT, run, tempDir } from "./helpers.mjs";
+import { REPO_ROOT, readRepoText, run, tempDir } from "./helpers.mjs";
 
-const read = (...p) => readFileSync(join(REPO_ROOT, ...p), "utf8");
+const read = readRepoText;
 
 /// GitHub's `on.push.tags` glob: `*` matches anything but `/`.
 function tagMatches(glob, tag) {

@@ -32,10 +32,13 @@ export class GitHub {
     return text ? JSON.parse(text) : null;
   }
 
-  /// Pull requests whose head is `branch` in this repository.
-  listPulls(branch, state) {
+  /// Pull requests from `branch` in this repository into `base`.
+  listPulls(branch, state, base) {
     const head = encodeURIComponent(`${this.owner}:${branch}`);
-    return this.request("GET", `/repos/${this.repository}/pulls?state=${state}&head=${head}&per_page=100`);
+    return this.request(
+      "GET",
+      `/repos/${this.repository}/pulls?state=${state}&head=${head}&base=${encodeURIComponent(base)}&per_page=100`,
+    );
   }
 
   createPull(pull) {

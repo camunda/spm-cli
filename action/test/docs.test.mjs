@@ -3,9 +3,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { REPO_ROOT, git, makeRepo, run, skillMd, spmBin, tempDir } from "./helpers.mjs";
+import { git, readRepoText, makeRepo, run, skillMd, spmBin, tempDir } from "./helpers.mjs";
 
-const read = (...p) => readFileSync(join(REPO_ROOT, ...p), "utf8");
+const read = readRepoText;
 const DOCS = [["docs", "guide", "ci.md"], ["README.md"], ["docs", "getting-started", "installation.md"]];
 
 test("the documented Renovate regex finds exactly the tag-pinned entries spm writes", (t) => {

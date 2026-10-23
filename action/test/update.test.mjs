@@ -1,9 +1,10 @@
 // End-to-end tests of the update action: the real spm binary, real git repos
 // (skills, a bare `origin` and its clone) and a fake GitHub REST API.
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { branchFor, parseMarker } from "../lib/report.mjs";
 import { run as update } from "../lib/update.mjs";
 import {
   MALICIOUS,
@@ -42,6 +43,7 @@ async function sandbox(t, { subdir = "" } = {}) {
     origin,
     gh,
     spm: (...args) => run("spm", args, { cwd: project, env: baseEnv }).stdout,
+    spmIn: (cwd, ...args) => run("spm", args, { cwd, env: baseEnv }).stdout,
     /// An upstream skill repo with `SKILL.md` committed on main and tagged.
     upstream(name, { files = {}, tag = "v1.0.0" } = {}) {
       const repo = join(dir, "upstream", name);
@@ -85,6 +87,10 @@ async function sandbox(t, { subdir = "" } = {}) {
     remoteSha(branch) {
       const r = run("git", ["--git-dir", origin, "rev-parse", "--verify", "-q", `refs/heads/${branch}`], { allowFail: true });
       return r.status === 0 ? r.stdout.trim() : null;
+    },
+    /// The branch of `name`'s update for this project and `base`.
+    branch(name, base = "main") {
+      return branchFor({ name, dir: subdir ? subdir.split("\\").join("/") : ".", base });
     },
     pull(number) {
       return gh.state.pulls.find((p) => p.number === number);
@@ -133,8 +139,8 @@ test("one PR per outdated dependency; re-runs are idempotent and upstream moves 
   assert.deepEqual(
     first.map((r) => [r.name, r.result, r.branch, r.number]),
     [
-      ["tagged", "created", "spm/update-tagged", 1],
-      ["tracked", "created", "spm/update-tracked", 2],
+      ["tagged", "created", sb.branch("tagged"), 1],
+      ["tracked", "created", sb.branch("tracked"), 2],
     ],
   );
   assertCleanCheckout(sb);
@@ -144,8 +150,8 @@ test("one PR per outdated dependency; re-runs are idempotent and upstream moves 
   assert.equal(taggedPr.title, "chore(deps): update skill tagged to v1.1.0");
   assert.equal(taggedPr.base, "main");
   assert.deepEqual(taggedPr.labels, ["dependencies"]);
-  assert.equal(JSON.parse(sb.remoteFile("spm/update-tagged", "ai.json")).skills.tagged.tag, "v1.1.0");
-  const taggedLock = JSON.parse(sb.remoteFile("spm/update-tagged", "ai.lock")).skills;
+  assert.equal(JSON.parse(sb.remoteFile(sb.branch("tagged"), "ai.json")).skills.tagged.tag, "v1.1.0");
+  const taggedLock = JSON.parse(sb.remoteFile(sb.branch("tagged"), "ai.lock")).skills;
   assert.equal(taggedLock.tagged.commit, taggedNew);
   assert.deepEqual(taggedLock.tracked, baseLock.skills.tracked, "one dependency per PR");
   assert.match(taggedPr.body, new RegExp(`\\| \\*\\*From\\*\\* \\| \`tag v1\\.0\\.0\` \\| \`${baseLock.skills.tagged.commit}\` \\|`));
@@ -154,8 +160,8 @@ test("one PR per outdated dependency; re-runs are idempotent and upstream moves 
 
   const trackedPr = sb.pull(2);
   assert.equal(trackedPr.title, `chore(deps): update skill tracked to main@${trackedNew.slice(0, 8)}`);
-  assert.equal(JSON.parse(sb.remoteFile("spm/update-tracked", "ai.lock")).skills.tracked.commit, trackedNew);
-  const commit = run("git", ["--git-dir", sb.origin, "log", "-1", "--format=%an <%ae>|%s", "spm/update-tracked"]).stdout.trim();
+  assert.equal(JSON.parse(sb.remoteFile(sb.branch("tracked"), "ai.lock")).skills.tracked.commit, trackedNew);
+  const commit = run("git", ["--git-dir", sb.origin, "log", "-1", "--format=%an <%ae>|%s", sb.branch("tracked")]).stdout.trim();
   assert.equal(commit, `github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>|${trackedPr.title}`);
 
   const outputs = readOutputs(join(sb.dir, "output"));
@@ -167,10 +173,10 @@ test("one PR per outdated dependency; re-runs are idempotent and upstream moves 
   assert.match(readFileSync(join(sb.dir, "summary"), "utf8"), /\| skill `tagged` \| created \| \[#1\]\(https:\/\/github\.test\/acme\/project\/pull\/1\) \|/);
 
   // Nothing new upstream: no push, no PR edits.
-  const shas = [sb.remoteSha("spm/update-tagged"), sb.remoteSha("spm/update-tracked")];
+  const shas = [sb.remoteSha(sb.branch("tagged")), sb.remoteSha(sb.branch("tracked"))];
   const writes = sb.writes().length;
   assert.deepEqual((await sb.update()).map((r) => r.result), ["unchanged", "unchanged"]);
-  assert.deepEqual([sb.remoteSha("spm/update-tagged"), sb.remoteSha("spm/update-tracked")], shas);
+  assert.deepEqual([sb.remoteSha(sb.branch("tagged")), sb.remoteSha(sb.branch("tracked"))], shas);
   assert.equal(sb.writes().length, writes);
 
   // The branch moves again: the same PR is refreshed.
@@ -182,7 +188,7 @@ test("one PR per outdated dependency; re-runs are idempotent and upstream moves 
     ["tracked", "updated", 2],
   ]);
   assert.equal(sb.gh.state.pulls.length, 2);
-  assert.equal(JSON.parse(sb.remoteFile("spm/update-tracked", "ai.lock")).skills.tracked.commit, trackedNewer);
+  assert.equal(JSON.parse(sb.remoteFile(sb.branch("tracked"), "ai.lock")).skills.tracked.commit, trackedNewer);
   assert.match(sb.pull(2).body, new RegExp(trackedNewer));
   assert.equal(sb.pull(2).title, `chore(deps): update skill tracked to main@${trackedNewer.slice(0, 8)}`);
   assertCleanCheckout(sb);
@@ -282,9 +288,9 @@ test("version ranges move within the range; a newer major outside it is skipped"
   const pr = sb.pull(moved.number);
   assert.equal(pr.title, "chore(deps): update skill ranged to v1.2.0");
   assert.match(pr.body, /\| \*\*To\*\* \| `version \^1 → v1\.2\.0` \|/);
-  const manifest = JSON.parse(sb.remoteFile("spm/update-ranged", "ai.json"));
+  const manifest = JSON.parse(sb.remoteFile(sb.branch("ranged"), "ai.json"));
   assert.equal(manifest.skills.ranged.version, "^1", "the range itself is kept");
-  assert.equal(JSON.parse(sb.remoteFile("spm/update-ranged", "ai.lock")).skills.ranged.commit, v12);
+  assert.equal(JSON.parse(sb.remoteFile(sb.branch("ranged"), "ai.lock")).skills.ranged.commit, v12);
 });
 
 test("a re-pointed tag is proposed with a warning", async (t) => {
@@ -301,7 +307,7 @@ test("a re-pointed tag is proposed with a warning", async (t) => {
   const pr = sb.pull(r.number);
   assert.equal(pr.title, "chore(deps): update skill moving to v1.0.0");
   assert.match(pr.body, /> \[!WARNING\]\n> The tag `v1\.0\.0` was \*\*re-pointed\*\* upstream/);
-  assert.equal(JSON.parse(sb.remoteFile("spm/update-moving", "ai.lock")).skills.moving.commit, moved);
+  assert.equal(JSON.parse(sb.remoteFile(sb.branch("moving"), "ai.lock")).skills.moving.commit, moved);
 });
 
 test("plugins are re-tagged with their path kept", async (t) => {
@@ -320,9 +326,9 @@ test("plugins are re-tagged with their path kept", async (t) => {
   git(repo, "tag", "v1.1.0");
 
   const [r] = await sb.update();
-  assert.deepEqual([r.kind, r.result, r.branch], ["plugin", "created", "spm/update-kit"]);
+  assert.deepEqual([r.kind, r.result, r.branch], ["plugin", "created", sb.branch("kit")]);
   assert.equal(sb.pull(r.number).title, "chore(deps): update plugin kit to v1.1.0");
-  const spec = JSON.parse(sb.remoteFile("spm/update-kit", "ai.json")).plugins.kit;
+  const spec = JSON.parse(sb.remoteFile(sb.branch("kit"), "ai.json")).plugins.kit;
   assert.deepEqual([spec.tag, spec.path], ["v1.1.0", "pkg"]);
   assert.match(sb.pull(r.number).body, /Source: `.*` \(path `pkg`\)/);
 });
@@ -337,10 +343,128 @@ test("a project in a subdirectory commits only its own spm files", async (t) => 
 
   const [r] = await sb.update();
   assert.equal(r.result, "created");
-  assert.equal(JSON.parse(sb.remoteFile("spm/update-alpha", "tools/ai/ai.lock")).skills.alpha.commit, head);
-  const changed = run("git", ["--git-dir", sb.origin, "diff", "--name-only", "main", "spm/update-alpha"]).stdout.trim();
+  assert.equal(JSON.parse(sb.remoteFile(sb.branch("alpha"), "tools/ai/ai.lock")).skills.alpha.commit, head);
+  const changed = run("git", ["--git-dir", sb.origin, "diff", "--name-only", "main", sb.branch("alpha")]).stdout.trim();
   assert.equal(changed, "tools/ai/ai.lock");
   assertCleanCheckout(sb);
+});
+
+test("a plugin's symlinks into the rest of its repository are scanned like the install gate does", { skip: process.platform === "win32" && "symlinks need privileges on Windows" }, async (t) => {
+  const sb = await sandbox(t);
+  const repo = join(sb.dir, "upstream", "plugin");
+  const url = makeRepo(repo, {
+    "agents/dev.md": "I am the dev agent.\n",
+    "plugins/kit/.claude-plugin/plugin.json": JSON.stringify({ name: "kit", version: "1.0.0" }),
+  });
+  symlinkSync("../../agents", join(repo, "plugins", "kit", "agents"));
+  commitAll(repo, "link agents");
+  git(repo, "tag", "v1.0.0");
+  sb.spm("add", url, "--tag", "v1.0.0", "--path", "plugins/kit", "--plugin", "--name", "kit");
+  sb.publish();
+  // The new version's blocking content sits outside the plugin directory,
+  // reached only through the in-checkout symlink.
+  writeFiles(repo, { "agents/dev.md": MALICIOUS });
+  commitAll(repo, "inject");
+  git(repo, "tag", "v1.1.0");
+
+  const [r] = await sb.update();
+  assert.equal(r.result, "created");
+  assert.ok(r.blocking > 0, "linked blocking content is reported");
+  const pr = sb.pull(r.number);
+  assert.deepEqual(pr.labels, ["dependencies", "spm-scan-blocked"]);
+  assert.match(pr.body, /`kit\/agents\/dev\.md:\d+`/);
+});
+
+test("uncommitted tracked changes anywhere in the repository stop the action before any checkout", async (t) => {
+  const sb = await sandbox(t, { subdir: "tools/ai" });
+  const up = sb.upstream("alpha", { tag: null });
+  sb.spm("add", up.url, "--branch", "main");
+  writeFiles(sb.work, { "README.md": "base\n", "notes.md": "base\n" });
+  sb.publish();
+  writeFiles(up.repo, { "a.md": "1\n" });
+  commitAll(up.repo, "one");
+
+  // An unstaged change outside `working-directory` and a staged one.
+  writeFiles(sb.work, { "README.md": "edited\n", "notes.md": "staged\n" });
+  git(sb.work, "add", "notes.md");
+  for (const inputs of [{}, { "dry-run": "true" }]) {
+    await assert.rejects(sb.update(inputs), /uncommitted changes to tracked files[\s\S]*README\.md[\s\S]*notes\.md/);
+    assert.equal(readFileSync(join(sb.work, "README.md"), "utf8"), "edited\n");
+    assert.equal(readFileSync(join(sb.work, "notes.md"), "utf8"), "staged\n");
+    assert.equal(git(sb.work, "diff", "--cached", "--name-only"), "notes.md");
+    assert.equal(git(sb.work, "symbolic-ref", "--short", "HEAD"), "main");
+  }
+  assert.deepEqual(sb.gh.state.requests, []);
+  assert.equal(sb.remoteSha(sb.branch("alpha")), null);
+
+  // Untracked files are no obstacle: forced checkouts of the base leave them be.
+  git(sb.work, "reset", "-q", "--hard");
+  writeFiles(sb.work, { "scratch.txt": "mine\n" });
+  const [r] = await sb.update();
+  assert.equal(r.result, "created");
+  assert.equal(readFileSync(join(sb.work, "scratch.txt"), "utf8"), "mine\n");
+});
+
+test("the same dependency in two projects of one repository gets a PR per project", async (t) => {
+  const sb = await sandbox(t, { subdir: "a" });
+  const up = sb.upstream("alpha", { tag: null });
+  const other = join(sb.work, "b");
+  mkdirSync(other, { recursive: true });
+  sb.spmIn(other, "init", "--target", "copilot");
+  for (const cwd of [sb.project, other]) sb.spmIn(cwd, "add", up.url, "--branch", "main");
+  sb.publish();
+  writeFiles(up.repo, { "a.md": "1\n" });
+  const head = commitAll(up.repo, "one");
+
+  const [ra] = await sb.update();
+  const [rb] = await sb.update({ "working-directory": "b" });
+  assert.deepEqual([ra.result, rb.result], ["created", "created"]);
+  assert.notEqual(ra.branch, rb.branch);
+  assert.equal(rb.branch, branchFor({ name: "alpha", dir: "b", base: "main" }));
+  assert.notEqual(ra.number, rb.number);
+  for (const [r, dir] of [[ra, "a"], [rb, "b"]]) {
+    const changed = run("git", ["--git-dir", sb.origin, "diff", "--name-only", "main", r.branch]).stdout.trim();
+    assert.equal(changed, `${dir}/ai.lock`);
+    assert.equal(JSON.parse(sb.remoteFile(r.branch, `${dir}/ai.lock`)).skills.alpha.commit, head);
+    assert.deepEqual(parseMarker(sb.pull(r.number).body), { name: "alpha", dir, base: "main", commit: head });
+  }
+  // A re-run of the first project refreshes its own PR, not the other's.
+  const [again] = await sb.update();
+  assert.deepEqual([again.result, again.number], ["unchanged", ra.number]);
+  assert.equal(sb.gh.state.pulls.length, 2);
+});
+
+test("updates of a maintenance branch get their own branch and PR against that base", async (t) => {
+  const sb = await sandbox(t);
+  const up = sb.upstream("alpha", { tag: null });
+  sb.spm("add", up.url, "--branch", "main");
+  sb.publish();
+  git(sb.work, "push", "-q", "origin", "HEAD:refs/heads/release/1.x");
+  writeFiles(up.repo, { "a.md": "1\n" });
+  const head = commitAll(up.repo, "one");
+
+  const [onMain] = await sb.update();
+  git(sb.work, "checkout", "-q", "-b", "release/1.x", "origin/main");
+  const [onRelease] = await sb.update();
+  assert.deepEqual([onMain.result, onRelease.result], ["created", "created"]);
+  assert.equal(onRelease.branch, sb.branch("alpha", "release/1.x"));
+  assert.notEqual(onMain.branch, onRelease.branch);
+  assert.deepEqual([sb.pull(onMain.number).base, sb.pull(onRelease.number).base], ["main", "release/1.x"]);
+  assert.equal(parseMarker(sb.pull(onRelease.number).body).base, "release/1.x");
+  assertCleanCheckout(sb, "release/1.x");
+
+  // The `base` input selects the identity too, whatever is checked out.
+  const [viaInput] = await sb.update({ base: "main" });
+  assert.deepEqual([viaInput.result, viaInput.number], ["unchanged", onMain.number]);
+
+  // A PR from the update branch that someone retargeted is not reused.
+  sb.pull(onMain.number).base = "elsewhere";
+  git(sb.work, "checkout", "-q", "main");
+  const [fresh] = await sb.update();
+  assert.equal(fresh.result, "created");
+  assert.notEqual(fresh.number, onMain.number);
+  assert.equal(sb.pull(fresh.number).base, "main");
+  assert.equal(JSON.parse(sb.remoteFile(fresh.branch, "ai.lock")).skills.alpha.commit, head);
 });
 
 test("dry-run commits locally but pushes nothing and needs no token", async (t) => {
@@ -352,8 +476,8 @@ test("dry-run commits locally but pushes nothing and needs no token", async (t) 
   commitAll(up.repo, "one");
 
   const results = await sb.update({ "dry-run": "true", token: "" });
-  assert.deepEqual(results.map((r) => [r.name, r.result, r.branch]), [["alpha", "dry-run", "spm/update-alpha"]]);
-  assert.equal(sb.remoteSha("spm/update-alpha"), null);
+  assert.deepEqual(results.map((r) => [r.name, r.result, r.branch]), [["alpha", "dry-run", sb.branch("alpha")]]);
+  assert.equal(sb.remoteSha(sb.branch("alpha")), null);
   assert.deepEqual(sb.gh.state.requests, []);
   assert.equal(readOutputs(join(sb.dir, "output"))["pull-requests"], "[]");
   assertCleanCheckout(sb);
@@ -371,7 +495,7 @@ test("a dependency whose remote can't be reached fails the run without blocking 
   commitAll(ok.repo, "one");
 
   await assert.rejects(sb.update(), /1 problem\(s\):\ngone: /);
-  assert.deepEqual(sb.gh.state.pulls.map((p) => p.head), ["spm/update-ok"]);
+  assert.deepEqual(sb.gh.state.pulls.map((p) => p.head), [sb.branch("ok")]);
   const summary = readFileSync(join(sb.dir, "summary"), "utf8");
   assert.match(summary, /\*\*Problems:\*\*\n- gone: /);
   assert.equal(JSON.parse(readOutputs(join(sb.dir, "output"))["pull-requests"]).length, 1);
@@ -390,10 +514,10 @@ test("a failing update is reported and the remaining dependencies still get PRs"
   writeFiles(second.repo, { "a.md": "1\n" });
   commitAll(second.repo, "one");
   // GitHub refuses the first PR.
-  sb.gh.state.fail = (r) => (r.method === "POST" && r.body?.head === "spm/update-first" ? 403 : 0);
+  sb.gh.state.fail = (r) => (r.method === "POST" && r.body?.head === sb.branch("first") ? 403 : 0);
 
   await assert.rejects(sb.update(), /1 problem\(s\):\nfirst: POST \/repos\/acme\/project\/pulls: HTTP 403/);
-  assert.deepEqual(sb.gh.state.pulls.map((p) => p.head), ["spm/update-second"]);
+  assert.deepEqual(sb.gh.state.pulls.map((p) => p.head), [sb.branch("second")]);
   const [failed] = JSON.parse(readOutputs(join(sb.dir, "output"))["pull-requests"]);
   assert.equal(failed.name, "second");
   assertCleanCheckout(sb);

@@ -2,7 +2,7 @@
 // name its branch, and how to describe it in a pull request.
 import { createHash } from "node:crypto";
 
-export const BRANCH_PREFIX = "spm/update-";
+export const BRANCH_PREFIX = "spm/update/";
 const MARKER = "spm-update";
 const BODY_LIMIT = 60000; // GitHub rejects PR bodies over 65536 characters.
 const FINDINGS_LIMIT = 50;
@@ -31,23 +31,27 @@ export function planFor(row) {
   return { action: "update" };
 }
 
-/// `spm/update-<name>`, or for a name git can't take verbatim as a ref
-/// component, a sanitized slug plus a hash of the real name so two different
-/// names can never share a branch.
-export function branchFor(name) {
-  const plain =
-    /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name) &&
-    !name.includes("..") &&
-    !name.endsWith(".lock") &&
-    !name.endsWith(".");
-  if (plain) return `${BRANCH_PREFIX}${name}`;
+/// The identity of one update: the dependency, the repository-relative project
+/// directory declaring it (`.` for the root) and the base branch it targets.
+/// Two runs share a branch and a pull request only when all three match.
+export function identity({ name, dir = ".", base }) {
+  return { name, dir, base };
+}
+
+/// `spm/update/<slug>-<hash>`: a readable slug of the dependency name plus a
+/// hash of its whole identity. Every name takes the same path through the
+/// encoding, so no two identities (names that sanitize alike, the same name
+/// in two projects or for two bases) can share a branch.
+export function branchFor(id) {
+  const { name, dir, base } = identity(id);
   const slug =
     name
       .replace(/[^A-Za-z0-9._-]+/g, "-")
       .replace(/\.{2,}/g, ".")
       .replace(/^[-.]+|[-.]+$/g, "")
-      .slice(0, 50) || "dependency";
-  const hash = createHash("sha256").update(name).digest("hex").slice(0, 8);
+      .slice(0, 50)
+      .replace(/[-.]+$/, "") || "dependency";
+  const hash = createHash("sha256").update(JSON.stringify([name, dir, base])).digest("hex").slice(0, 12);
   return `${BRANCH_PREFIX}${slug}-${hash}`;
 }
 
@@ -131,10 +135,11 @@ function code(text) {
   return `\`${String(text ?? "").replace(/`/g, "'").replace(/\r?\n/g, " ")}\``;
 }
 
-/// The hidden marker identifying the PR's dependency and target commit, so a
-/// later run can tell its own PRs (and declined ones) apart.
-export function marker(name, commit) {
-  return `<!-- ${MARKER} ${JSON.stringify({ name, commit })} -->`;
+/// The hidden marker recording the PR's update identity and target commit, so
+/// a later run can tell its own PRs (and declined ones) apart.
+export function marker(id, commit) {
+  const { name, dir, base } = identity(id);
+  return `<!-- ${MARKER} ${JSON.stringify({ name, dir, base, commit })} -->`;
 }
 
 export function parseMarker(body) {
@@ -145,6 +150,12 @@ export function parseMarker(body) {
   } catch {
     return null;
   }
+}
+
+/// Whether a parsed marker belongs to the update `id` (any commit).
+export function sameIdentity(parsed, id) {
+  const { name, dir, base } = identity(id);
+  return parsed?.name === name && parsed?.dir === dir && parsed?.base === base;
 }
 
 /// Total blocking findings across scans; a scan that failed to run counts as
@@ -193,7 +204,7 @@ function renderScans(scans) {
 }
 
 /// The pull request body for one dependency update.
-export function renderBody({ name, kind, git, path, from, to, changes, scans, serverUrl, branch }) {
+export function renderBody({ name, kind, dir = ".", base, git, path, from, to, changes, scans, serverUrl, branch }) {
   const link = compareUrl(git, from?.commit, to.commit, serverUrl);
   const lines = [
     `Updates the ${kind} **${cell(name)}** declared in \`ai.json\`.`,
@@ -227,11 +238,11 @@ export function renderBody({ name, kind, git, path, from, to, changes, scans, se
     `Opened by the [spm update action](https://camunda.github.io/spm-cli/guide/ci). ` +
       `To review locally: \`git fetch origin ${branch} && git checkout ${branch} && spm install --locked && spm scan\`. ` +
       "Closing this PR without merging skips this version; a newer one opens a new PR.",
-    marker(name, to.commit),
+    marker({ name, dir, base }, to.commit),
   );
   let body = lines.join("\n");
   if (body.length > BODY_LIMIT) {
-    const tail = `\n\n_(truncated)_\n${marker(name, to.commit)}`;
+    const tail = `\n\n_(truncated)_\n${marker({ name, dir, base }, to.commit)}`;
     body = body.slice(0, BODY_LIMIT - tail.length) + tail;
   }
   return body;
