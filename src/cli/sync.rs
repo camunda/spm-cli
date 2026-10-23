@@ -1,6 +1,7 @@
 use crate::links::{Linked, Links, StateLock};
 use crate::lockfile::{LockedSkill, Lockfile};
 use crate::manifest::{Manifest, SkillSpec};
+use crate::owned::Owned;
 use crate::scope::Scope;
 use crate::vendor::{MaterializedPlugin, MaterializedSkill, Vendor};
 use crate::{resolver, store, transitive};
@@ -190,8 +191,7 @@ struct Plan {
     lock: Lockfile,
     materialized: Vec<MaterializedSkill>,
     plugins: Vec<MaterializedPlugin>,
-    previously_managed: Vec<String>,
-    previously_managed_plugins: Vec<String>,
+    previously_owned: Owned,
     locked: bool,
     /// The `spm link` overrides to persist after applying (with `managed`
     /// refreshed), or `None` when the links file is already up to date.
@@ -351,31 +351,21 @@ fn plan(
     // walked (their transitive subtree is never visited).
     let mut skipped_roots: BTreeSet<String> = BTreeSet::new();
 
-    // Skill names spm materialized on the previous sync. Captured before the
-    // resolve loop mutates `prev`, so global/shared-dir vendors (which share a
-    // directory with the user's own skills) can purge only the entries spm
-    // previously owned but that were since dropped from the manifest.
-    //
-    // Plugin-bundled skills are flattened into the same shared skills dirs via
-    // `materialize`, so the previous set must include them too — otherwise
-    // removing a plugin (or shrinking its bundled skill set) would orphan those
-    // skill dirs in shared locations.
-    //
+    // What spm owns in the targets before this sync: everything the previous
+    // lock installs, plus whatever an install materialized that a lock-only
+    // write (or a pulled ai.lock) since dropped from the lock. Captured before
+    // the resolve loop mutates `prev`, so global/shared-dir vendors (which
+    // share a directory with the user's own skills) can purge only entries spm
+    // owned but that are no longer wanted. Plugin-bundled skills are flattened
+    // into the same shared skills dirs, so they count as skills here.
+    let mut previously_owned = Owned::from_lock(&prev);
+    previously_owned.extend(Owned::load(scope)?);
     // Skills last materialized from a *linked* plugin's working tree are not in
     // `ai.lock` (it records the locked commit's bundled skills), so the links
     // file remembers them for the same purpose.
-    let previously_managed: Vec<String> = prev
+    previously_owned
         .skills
-        .keys()
-        .cloned()
-        .chain(
-            prev.plugins
-                .values()
-                .flat_map(|l| l.bundled_skills.iter().cloned()),
-        )
-        .chain(links.managed.iter().cloned())
-        .collect();
-    let previously_managed_plugins: Vec<String> = prev.plugins.keys().cloned().collect();
+        .extend(links.managed.iter().cloned());
 
     // Stable, path-independent project id: reuse the locked one, else mint & persist.
     let id = if prev.id.is_empty() {
@@ -743,12 +733,12 @@ fn plan(
     let output_skills: Vec<String> = materialized
         .iter()
         .map(|m| m.name.clone())
-        .chain(previously_managed.iter().cloned())
+        .chain(previously_owned.skills.iter().cloned())
         .collect();
     let output_plugins: Vec<String> = plugins
         .iter()
         .map(|p| p.name.clone())
-        .chain(previously_managed_plugins.iter().cloned())
+        .chain(previously_owned.plugins.iter().cloned())
         .collect();
     guard_working_copies(
         scope,
@@ -806,8 +796,7 @@ fn plan(
         lock,
         materialized,
         plugins,
-        previously_managed,
-        previously_managed_plugins,
+        previously_owned,
         locked,
         links,
         _snapshots: snapshots,
@@ -822,6 +811,9 @@ impl Plan {
     fn apply(self, scope: &Scope) -> Result<usize> {
         let lock = &self.lock;
         if self.apply == Apply::LockOnly {
+            // Nothing is installed or removed now, so whatever the targets
+            // hold stays owned until the next install or clean deals with it.
+            self.previously_owned.save(scope)?;
             lock.save(&self.dir)?;
             println!(
                 "wrote ai.lock only; run `{}` to install into the targets",
@@ -847,20 +839,22 @@ impl Plan {
                 pending.save(scope)?;
             }
         }
+        let previously_managed: Vec<String> =
+            self.previously_owned.skills.iter().cloned().collect();
+        let previously_managed_plugins: Vec<String> =
+            self.previously_owned.plugins.iter().cloned().collect();
         for vendor in &self.vendors {
-            vendor.materialize(
-                scope,
-                &lock.id,
-                &self.materialized,
-                &self.previously_managed,
-            )?;
+            vendor.materialize(scope, &lock.id, &self.materialized, &previously_managed)?;
             vendor.materialize_plugins(
                 scope,
                 &lock.id,
                 &self.plugins,
-                &self.previously_managed_plugins,
+                &previously_managed_plugins,
             )?;
         }
+        // Every vendor now holds exactly `lock`'s set: anything else spm owned
+        // was purged above.
+        Owned::from_lock(lock).save(scope)?;
         // Only persist `ai.lock` once every fallible step (resolution, fetching,
         // collision checks, and vendor materialization) has succeeded —
         // otherwise a failed `install` could leave behind a lockfile pointing at

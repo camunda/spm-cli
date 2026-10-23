@@ -12212,3 +12212,161 @@ fn update_lock_only_with_transitive_keeps_other_transitive_pins() {
     assert!(err.contains("fetching skill `top`"), "{err}");
     assert_eq!(snapshot(&sb, "ai.lock"), lock_before);
 }
+
+/// A skills dir shared with the user's own skills (Codex in a project, Copilot
+/// globally), where spm may only remove what it owns.
+fn shared_skills_dir(sb: &Sandbox, global: bool) -> PathBuf {
+    if global {
+        sb.home.join(".copilot").join("skills")
+    } else {
+        sb.project.join(".agents").join("skills")
+    }
+}
+
+/// Install plugin `kit` (bundling `old`) and transitive root `top` (pulling in
+/// `leaf`) into a shared skills dir next to a user-authored `mine`, then make
+/// lock-only updates drop `old` (now `new`) and `leaf` from ai.lock. Returns
+/// the shared dir and `leaf`'s lock key.
+fn lock_only_drops_installed_skills(sb: &Sandbox, global: bool) -> (PathBuf, String) {
+    let g: &[&str] = if global { &["-g"] } else { &[] };
+    let run = |args: &[&str]| sb.ok(&[args, g].concat());
+    let kit_dir = sb.root.join("kit");
+    let kit = make_repo(
+        &kit_dir,
+        &[
+            (
+                "pkg/.claude-plugin/plugin.json",
+                r#"{"name":"kit","version":"1.0.0","skills":"./skills/"}"#,
+            ),
+            ("pkg/skills/old/SKILL.md", "---\nname: old\n---\nOld.\n"),
+        ],
+    );
+    let leaf = make_repo(
+        &sb.root.join("leaf"),
+        &[("SKILL.md", "---\nname: leaf\n---\nLeaf.\n")],
+    );
+    let top_dir = sb.root.join("top");
+    let top = make_repo(
+        &top_dir,
+        &[
+            ("SKILL.md", "---\nname: top\n---\nTop.\n"),
+            (
+                "ai.json",
+                &format!(r#"{{"skills":{{"leaf":{{"git":"{leaf}","branch":"main"}}}}}}"#),
+            ),
+        ],
+    );
+    let target = if global { "copilot" } else { "codex" };
+    run(&["init", "--target", target]);
+    let manifest_dir = if global { &sb.spm_home } else { &sb.project };
+    std::fs::write(
+        manifest_dir.join("ai.json"),
+        format!(
+            r#"{{"targets":["{target}"],"resolveTransitive":true,
+              "skills":{{"top":{{"git":"{top}","branch":"main"}}}},
+              "plugins":{{"kit":{{"git":"{kit}","branch":"main","path":"pkg"}}}}}}"#
+        ),
+    )
+    .unwrap();
+    let dir = shared_skills_dir(sb, global);
+    std::fs::create_dir_all(dir.join("mine")).unwrap();
+    std::fs::write(dir.join("mine/SKILL.md"), "---\nname: mine\n---\nMine.\n").unwrap();
+    run(&["install"]);
+    let lock: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(manifest_dir.join("ai.lock")).unwrap())
+            .unwrap();
+    let leaf_key = lock["skills"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .find(|k| k.starts_with("top__leaf-"))
+        .unwrap()
+        .clone();
+    for name in ["old", "top", leaf_key.as_str(), "mine"] {
+        assert!(dir.join(name).join("SKILL.md").exists(), "{name} installed");
+    }
+
+    git_in(&kit_dir, &["mv", "pkg/skills/old", "pkg/skills/new"]);
+    std::fs::write(
+        kit_dir.join("pkg/skills/new/SKILL.md"),
+        "---\nname: new\n---\nNew.\n",
+    )
+    .unwrap();
+    git_in(&kit_dir, &["commit", "-aqm", "rename old to new"]);
+    git_in(&top_dir, &["rm", "-q", "ai.json"]);
+    git_in(&top_dir, &["commit", "-qm", "drop leaf"]);
+    run(&["update", "kit", "--lock-only"]);
+    run(&["update", "top", "--lock-only"]);
+    let lock = std::fs::read_to_string(manifest_dir.join("ai.lock")).unwrap();
+    assert!(
+        !lock.contains(&leaf_key) && !lock.contains("\"old\""),
+        "{lock}"
+    );
+    for name in ["old", leaf_key.as_str()] {
+        assert!(dir.join(name).exists(), "lock-only leaves {name} installed");
+    }
+    (dir, leaf_key)
+}
+
+/// A skill a lock-only update drops from ai.lock (a plugin's bundled skill or a
+/// transitive pin) is still spm's: the next `install` purges it from the
+/// shared target, and the user's own skills there are left alone.
+#[test]
+fn install_after_lock_only_update_removes_the_skills_it_dropped() {
+    let sb = Sandbox::new();
+    let (dir, leaf_key) = lock_only_drops_installed_skills(&sb, false);
+    sb.ok(&["install"]);
+    for gone in ["old", leaf_key.as_str()] {
+        assert!(!dir.join(gone).exists(), "{gone} purged");
+    }
+    for kept in ["new", "top", "mine"] {
+        assert!(dir.join(kept).join("SKILL.md").exists(), "{kept} kept");
+    }
+    // Ownership now matches the lock again: removing `kit` purges `new`.
+    sb.ok(&["remove", "--plugin", "kit"]);
+    assert!(!dir.join("new").exists());
+    assert!(dir.join("mine/SKILL.md").exists());
+    // The record is machine-local state that ignores itself.
+    assert!(sb.read(".spm/.gitignore").lines().any(|l| l == "*"));
+}
+
+/// Same for `clean`: it removes what a lock-only update dropped from ai.lock,
+/// then forgets the ownership record.
+#[test]
+fn clean_after_lock_only_update_removes_the_skills_it_dropped() {
+    let sb = Sandbox::new();
+    let (dir, leaf_key) = lock_only_drops_installed_skills(&sb, false);
+    sb.ok(&["clean"]);
+    for gone in ["old", "top", leaf_key.as_str()] {
+        assert!(!dir.join(gone).exists(), "{gone} cleaned");
+    }
+    assert!(dir.join("mine/SKILL.md").exists(), "user skill kept");
+    assert!(!sb.project.join(".spm/owned.json").exists());
+}
+
+/// The global scope keeps its own record (under SPM_HOME) for Copilot's flat
+/// `~/.copilot/skills`, which is shared with the user's personal skills.
+#[cfg(unix)]
+#[test]
+fn global_install_and_clean_after_lock_only_update_remove_the_skills_it_dropped() {
+    for finish in ["install", "clean"] {
+        let sb = Sandbox::new();
+        let (dir, leaf_key) = lock_only_drops_installed_skills(&sb, true);
+        assert_eq!(dir, sb.copilot_global_skills());
+        assert!(sb.spm_home.join("owned-global.json").exists());
+        assert!(!sb.project.join(".spm").exists(), "{finish}");
+        sb.ok(&[finish, "-g"]);
+        for gone in ["old", leaf_key.as_str()] {
+            assert!(!dir.join(gone).exists(), "{finish}: {gone} removed");
+        }
+        assert!(
+            dir.join("mine/SKILL.md").exists(),
+            "{finish}: user skill kept"
+        );
+        assert_eq!(dir.join("new").exists(), finish == "install");
+        assert_eq!(
+            sb.spm_home.join("owned-global.json").exists(),
+            finish == "install"
+        );
+    }
+}

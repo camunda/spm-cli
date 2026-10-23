@@ -2,6 +2,7 @@ use super::common::{confirm, human_size};
 use crate::links::Links;
 use crate::lockfile::Lockfile;
 use crate::manifest::Manifest;
+use crate::owned::Owned;
 use crate::scope::Scope;
 use crate::vendor;
 use crate::{paths, store};
@@ -14,7 +15,7 @@ pub(super) fn clean(scope: &Scope) -> Result<()> {
     let _state_lock = crate::links::StateLock::acquire(scope, false)?;
     let manifest = Manifest::load(&dir, scope)?;
     let lock = Lockfile::load_or_default(&dir)?;
-    let (managed, managed_plugins) = managed_names(&lock, &Links::load(scope)?);
+    let (managed, managed_plugins) = managed_names(scope, &lock, &Links::load(scope)?)?;
     let vendors = manifest
         .targets
         .iter()
@@ -33,6 +34,7 @@ pub(super) fn clean(scope: &Scope) -> Result<()> {
         vendor.clean(scope, &managed)?;
         vendor.clean_plugins(scope, &managed_plugins)?;
     }
+    Owned::remove(scope)?;
     println!(
         "cleaned generated {} config for target(s): {}",
         scope.label(),
@@ -41,25 +43,23 @@ pub(super) fn clean(scope: &Scope) -> Result<()> {
     Ok(())
 }
 
-/// The skill and plugin names spm currently owns, per `ai.lock` plus the skills
-/// last materialized from linked plugins (see [`Links::managed`]): what a
-/// vendor's `clean` / `clean_plugins` must remove.
-pub(super) fn managed_names(lock: &Lockfile, links: &Links) -> (Vec<String>, Vec<String>) {
-    // Plugin-bundled skills are flattened into the same shared skills dirs as
-    // standalone skills (see `sync`'s `previously_managed`), so they must be
-    // included here too — otherwise a clean would leave their materialized
-    // dirs behind in shared-dir/global vendors.
-    let mut managed: Vec<String> = lock.skills.keys().cloned().collect();
-    managed.extend(
-        lock.plugins
-            .values()
-            .flat_map(|l| l.bundled_skills.iter().cloned()),
-    );
-    managed.extend(links.managed.iter().cloned());
-    managed.sort();
-    managed.dedup();
-    let managed_plugins: Vec<String> = lock.plugins.keys().cloned().collect();
-    (managed, managed_plugins)
+/// The skill and plugin names spm currently owns: everything `ai.lock`
+/// installs, whatever the local ownership record still lists (installed before
+/// a lock-only write or a pulled `ai.lock` dropped it), and the skills last
+/// materialized from linked plugins (see [`Links::managed`]). What a vendor's
+/// `clean` / `clean_plugins` must remove.
+pub(super) fn managed_names(
+    scope: &Scope,
+    lock: &Lockfile,
+    links: &Links,
+) -> Result<(Vec<String>, Vec<String>)> {
+    let mut owned = Owned::from_lock(lock);
+    owned.extend(Owned::load(scope)?);
+    owned.skills.extend(links.managed.iter().cloned());
+    Ok((
+        owned.skills.into_iter().collect(),
+        owned.plugins.into_iter().collect(),
+    ))
 }
 
 /// `spm prune`: wipe the whole global store (`$SPM_HOME/store`, default

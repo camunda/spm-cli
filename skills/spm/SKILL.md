@@ -200,7 +200,9 @@ too. See [Transitive dependencies](#transitive-dependencies).
 re-resolves, keeps every other entry exactly (so an unrelated, unreachable
 dependency does not block it), installs nothing, and ends with
 ``wrote ai.lock only; run `spm install` to install into the targets``. The lock
-matches what the same command writes without `--lock-only`.
+matches what the same command writes without `--lock-only`. Skills it drops
+from the lock stay installed until the next `spm install` (or `spm clean`),
+which removes them.
 
 ### `spm link`
 
@@ -383,8 +385,10 @@ Keep `-g` on these commands in global scope.
 spm clean [-g]
 ```
 
-Removes the generated vendor config for this scope. `ai.json` and `ai.lock`
-stay, so `spm install` restores everything.
+Removes the generated vendor config for this scope, including skills an
+earlier `--lock-only` change dropped from `ai.lock` but left installed (spm
+records what it installed in `.spm/owned.json`, or `$SPM_HOME/owned-global.json`
+with `-g`). `ai.json` and `ai.lock` stay, so `spm install` restores everything.
 
 ### `spm prune`
 
