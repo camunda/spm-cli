@@ -8392,3 +8392,32 @@ fn policy_reuses_only_cached_checkouts_made_under_a_policy() {
         .join(".agents/skills/spm-managed-skills/greet/SKILL.md")
         .exists());
 }
+
+/// A filter driver whose name contains `=` can't be overridden with `-c` (the
+/// `=` would end the key), so under a policy the checkout is refused outright.
+#[test]
+fn policy_refuses_checkout_when_a_filter_cant_be_disabled() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    set_project_policy(&sb, &["file://*"]);
+    let mut cmd = sb.command(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--name",
+        "greet",
+    ]);
+    with_user_git_config(&mut cmd, "filter.a=b.smudge", "cat");
+    let out = cmd.output().unwrap();
+    assert!(!out.status.success());
+    let err = stderr_of(&out);
+    assert!(
+        err.contains("checkout filter `a=b` can't be disabled"),
+        "{err}"
+    );
+    assert!(!sb
+        .project
+        .join(".agents/skills/spm-managed-skills/greet")
+        .exists());
+}
