@@ -435,6 +435,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+concurrency: { group: "spm-update-${{ github.ref }}", cancel-in-progress: false }
 jobs:
   update:
     runs-on: ubuntu-latest

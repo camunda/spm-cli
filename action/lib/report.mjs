@@ -121,6 +121,14 @@ export function shortVersion(entry) {
   return entry.commit.slice(0, 8);
 }
 
+/// The entry `name` of map `map` ("skills"/"plugins") in a parsed ai.json or
+/// ai.lock, or `null`. Own properties only: `constructor` or `toString` are
+/// valid dependency names, and must not resolve to inherited members.
+export function entryOf(doc, map, name) {
+  const entries = doc?.[map];
+  return entries && Object.hasOwn(entries, name) ? entries[name] : null;
+}
+
 /// JSON with object keys sorted, so equal entries compare equal whatever
 /// order their fields were written in.
 function canonical(value) {
@@ -142,11 +150,10 @@ export function diffLocks(before, after) {
     ["skills", "skill"],
     ["plugins", "plugin"],
   ]) {
-    const a = before?.[map] ?? {};
-    const b = after?.[map] ?? {};
-    for (const name of [...new Set([...Object.keys(a), ...Object.keys(b)])].sort()) {
-      const from = a[name] ?? null;
-      const to = b[name] ?? null;
+    const names = [...Object.keys(before?.[map] ?? {}), ...Object.keys(after?.[map] ?? {})];
+    for (const name of [...new Set(names)].sort()) {
+      const from = entryOf(before, map, name);
+      const to = entryOf(after, map, name);
       // Any difference counts (source, path, store, bundled skills, …), not
       // just the commit: whatever the sync re-pinned must be shown and scanned.
       if (!from || !to || canonical(from) !== canonical(to)) changes.push({ name, kind, from, to });

@@ -47,6 +47,11 @@ permissions:
   contents: write        # push the spm/update/* branches
   pull-requests: write   # open and update the pull requests
 
+# One run at a time per branch, never cancelled mid-publication (see below).
+concurrency:
+  group: spm-update-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   update:
     runs-on: ubuntu-latest
@@ -95,6 +100,14 @@ Run it on a clean checkout (untracked files are fine). The checked-out commit
 must also be on the base branch as pushed to origin (it may be behind it), since
 each update branch starts from it: a diverged or unpushed checkout would put
 unrelated commits in every pull request, so the action refuses it.
+
+Keep the `concurrency` group from the example: a scheduled run and a manual one
+must not publish the same update at once, or one could write its (older) scan
+report over the other's. With `cancel-in-progress: false`, a run that starts
+while another is publishing waits for it. Without the group, a run whose branch
+was pushed again by another run leaves that pull request alone (reported as
+`superseded`), and fails if the push happens while it is writing the pull
+request, so a mismatched report is never left silently.
 
 Updates are planned from `ai.lock` (what `spm outdated` reports), so the
 committed `ai.lock` must match `ai.json`. A dependency whose `ai.json` entry was

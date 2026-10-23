@@ -61,3 +61,20 @@ test("documented workflow snippets only pass inputs the actions declare", () => 
   }
   assert.ok(checked >= 6, `found ${checked} action usages in the docs`);
 });
+
+test("every documented update workflow serializes its runs without cancelling one mid-publication", () => {
+  let checked = 0;
+  for (const doc of DOCS) {
+    for (const [, block] of read(...doc).matchAll(/```ya?ml\n([\s\S]*?)```/g)) {
+      // Complete workflows only; step fragments inherit the workflow's settings.
+      if (!/^jobs:/m.test(block) || !/uses: camunda\/spm-cli\/update@/.test(block)) continue;
+      checked++;
+      const where = `${doc.join("/")}: workflow using the update action`;
+      const group = /^concurrency:(.*(?:\n {2}.*)*)/m.exec(block);
+      assert.ok(group, `${where} has no \`concurrency\` group`);
+      assert.match(group[1], /group:/, where);
+      assert.match(group[1], /cancel-in-progress: false/, where);
+    }
+  }
+  assert.ok(checked >= 2, `found ${checked} update workflows in the docs`);
+});

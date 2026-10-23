@@ -223,6 +223,57 @@ test("blocking scan findings label the PR and the label goes once the content is
   assert.doesNotMatch(sb.pull(fixed.number).body, /CAUTION/);
 });
 
+/// Two runs publishing the same update: a blocked PR exists, then this run
+/// computes a clean update and pushes it, and another run pushes the branch
+/// again (calling `race`) before or while this one writes the PR.
+async function overlappingRuns(t, race) {
+  const sb = await sandbox(t);
+  const up = sb.upstream("risky", { tag: null });
+  sb.spm("add", up.url, "--branch", "main");
+  sb.publish();
+  writeFiles(up.repo, { "SKILL.md": skillMd("risky", MALICIOUS) });
+  commitAll(up.repo, "inject");
+  const [flagged] = await sb.update();
+  writeFiles(up.repo, { "SKILL.md": skillMd("risky", "Fixed.\n") });
+  commitAll(up.repo, "fix");
+
+  const branch = sb.branch("risky");
+  // The other run's newer push: any commit other than this run's.
+  const theirs = sb.remoteSha("main");
+  sb.gh.state.requests.length = 0;
+  sb.gh.state.before = (request) => {
+    if (race(request)) {
+      run("git", ["--git-dir", sb.origin, "update-ref", `refs/heads/${branch}`, theirs]);
+      sb.gh.state.before = null;
+    }
+  };
+  return { sb, flagged, branch, theirs };
+}
+
+test("a run whose branch another run pushed since leaves that run's PR alone", async (t) => {
+  // The other run pushes after this one pushed, before it writes the PR.
+  const { sb, flagged, branch, theirs } = await overlappingRuns(t, (r) => r.method === "GET" && /state=open/.test(r.query));
+  const [r] = await sb.update();
+  assert.deepEqual([r.result, r.reason], ["superseded", "another run pushed a newer update"]);
+  assert.deepEqual(sb.writes(), [], "no body or label written");
+  const pr = sb.pull(flagged.number);
+  assert.deepEqual(pr.labels, ["dependencies", "spm-scan-blocked"], "the blocked label stays");
+  assert.match(pr.body, /CAUTION/);
+  assert.equal(sb.remoteSha(branch), theirs);
+  assert.match(readFileSync(join(sb.dir, "summary"), "utf8"), /\| skill `risky` \| superseded \| another run pushed a newer update \|/);
+  assertCleanCheckout(sb);
+});
+
+test("a branch pushed by another run while this one writes the PR fails the run", async (t) => {
+  // The other run pushes while this one is updating the PR body.
+  const { sb, flagged, branch } = await overlappingRuns(t, (r) => r.method === "PATCH");
+  await assert.rejects(
+    sb.update(),
+    new RegExp(`risky: another run pushed ${branch} while this one published #${flagged.number}, so its body and labels may describe an older commit: run the workflow in a \`concurrency\` group`),
+  );
+  assertCleanCheckout(sb);
+});
+
 test("a declined (closed, unmerged) update is not re-proposed until upstream moves again", async (t) => {
   const sb = await sandbox(t);
   const up = sb.upstream("alpha", { tag: null });

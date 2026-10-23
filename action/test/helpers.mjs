@@ -151,7 +151,10 @@ export async function fakeGitHub(t, { repository = "acme/project", token = "test
     const url = new URL(req.url, "http://x");
     const request = { method: req.method, path: url.pathname, query: url.search, body };
     state.requests.push(request);
-    // Tests inject API failures with `state.fail = (request) => status`.
+    // Tests act between requests (e.g. as a concurrent run) with
+    // `state.before = (request) => void`, and inject API failures with
+    // `state.fail = (request) => status`.
+    state.before?.(request);
     const failure = state.fail?.(request);
     if (failure) return send(res, failure, { message: "injected failure" });
     if (req.headers.authorization !== `Bearer ${token}`) return send(res, 401, { message: "Bad credentials" });

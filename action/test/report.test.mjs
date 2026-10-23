@@ -9,6 +9,7 @@ import {
   compareUrl,
   describeSelector,
   diffLocks,
+  entryOf,
   marker,
   parseMarker,
   sameIdentity,
@@ -163,6 +164,32 @@ test("diffLocks reports an entry that changed in any field, not only its commit"
   // Field order is not a change.
   const reordered = Object.fromEntries(Object.entries(entry).reverse());
   assert.deepEqual(diffLocks({ skills: { s: entry } }, { skills: { s: reordered } }), []);
+});
+
+test("lock entries named like Object members are looked up as own properties only", () => {
+  const entry = { git: "file:///r", reference: "tag:v1", commit: SHA_A, store: "r@a" };
+  const lock = (names) => JSON.parse(JSON.stringify({ skills: Object.fromEntries(names.map((n) => [n, entry])) }));
+  for (const name of ["constructor", "toString", "hasOwnProperty", "__proto__"]) {
+    // JSON.parse keeps `__proto__` as an own key, as in a real ai.lock.
+    const withIt = JSON.parse(`{"skills":{${JSON.stringify(name)}:${JSON.stringify(entry)}}}`);
+    assert.equal(entryOf(lock([]), "skills", name), null, name);
+    assert.deepEqual(entryOf(withIt, "skills", name), entry, name);
+    assert.deepEqual(
+      diffLocks(lock([]), withIt).map((c) => [c.name, c.from, c.to?.commit]),
+      [[name, null, SHA_A]],
+      `${name} added`,
+    );
+    assert.deepEqual(
+      diffLocks(withIt, lock([])).map((c) => [c.name, c.from?.commit, c.to]),
+      [[name, SHA_A, null]],
+      `${name} removed`,
+    );
+    // Rendering an added one in the other-changes table must not crash.
+    const body = renderBody({ ...base, changes: diffLocks(lock([]), withIt) });
+    assert.ok(body.includes(`\`${name}\``), name);
+  }
+  assert.equal(entryOf(null, "skills", "x"), null);
+  assert.equal(entryOf({}, "plugins", "x"), null);
 });
 
 test("the PR marker round-trips and ignores foreign or broken markers", () => {

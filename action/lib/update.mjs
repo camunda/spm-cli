@@ -11,6 +11,7 @@ import {
   blockingCount,
   branchFor,
   diffLocks,
+  entryOf,
   parseMarker,
   planFor,
   renderBody,
@@ -184,7 +185,7 @@ async function updateOne(row, ctx) {
     git(["checkout", "-q", "-f", "-B", branch, baseSha]);
     let args;
     if (plan.action === "retag") {
-      const spec = manifest?.[kind === "plugin" ? "plugins" : "skills"]?.[name];
+      const spec = entryOf(manifest, kind === "plugin" ? "plugins" : "skills", name);
       if (!spec) throw new Error(`${kind} \`${name}\` is not declared in ai.json`);
       // Values are attached with `=` and positionals follow `--`, so a name
       // (or URL, tag, path) starting with `-` is never parsed as a flag.
@@ -204,8 +205,8 @@ async function updateOne(row, ctx) {
     }
     const lock = readJson(join(wd, "ai.lock"));
     const map = kind === "plugin" ? "plugins" : "skills";
-    const from = baseLock?.[map]?.[name] ?? null;
-    const to = lock?.[map]?.[name];
+    const from = entryOf(baseLock, map, name);
+    const to = entryOf(lock, map, name);
     if (!to) throw new Error(`${kind} \`${name}\` is missing from ai.lock after \`spm ${args[0]}\``);
     const changes = diffLocks(baseLock, lock);
     const scans = changes.filter((c) => c.to).map((c) => scanEntry(c, { cwd: wd, env }));
@@ -248,10 +249,19 @@ async function updateOne(row, ctx) {
       return { name, kind, branch, result: "declined", number: declined.number, url: declined.html_url };
     }
 
-    pushIfChanged(branch, { git, out });
+    const published = pushIfChanged(branch, { git, out });
+    // Another run of the workflow may push this branch while this one is
+    // publishing (the documented `concurrency` group prevents it). The PR body
+    // and labels must describe the branch head, so they are only written while
+    // the head is still the one this run pushed.
+    const headMoved = () => remoteHead(branch, git) !== published;
     // The branch already encodes the identity; a PR from it that was
     // retargeted to another base is not this update's and is left alone.
     const open = (await github.listPulls(branch, "open", base)).find((p) => p.base?.ref === base);
+    if (headMoved()) {
+      log.notice(`${kind} ${name}: ${branch} was pushed by another run; leaving its pull request to that run`);
+      return { name, kind, branch, result: "superseded", reason: "another run pushed a newer update" };
+    }
     let pr;
     let result;
     if (open) {
@@ -266,6 +276,11 @@ async function updateOne(row, ctx) {
     const missing = want.filter((l) => !has.has(l));
     if (missing.length > 0) await github.addLabels(pr.number, missing);
     if (blocking === 0 && blockedLabel && has.has(blockedLabel)) await github.removeLabel(pr.number, blockedLabel);
+    if (headMoved()) {
+      throw new Error(
+        `another run pushed ${branch} while this one published #${pr.number}, so its body and labels may describe an older commit: run the workflow in a \`concurrency\` group (see https://camunda.github.io/spm-cli/guide/ci) and re-run it`,
+      );
+    }
     log.info(`${result} #${pr.number} ${pr.html_url}`);
     return { name, kind, branch, result, number: pr.number, url: pr.html_url, blocking };
   } catch (e) {
@@ -280,17 +295,24 @@ async function updateOne(row, ctx) {
 /// Force-push the update branch unless the remote one already holds the same
 /// tree (a re-run with nothing new must not churn the PR). The lease makes a
 /// concurrent push to the branch fail rather than be overwritten.
+/// Returns the commit the branch then has on origin.
 function pushIfChanged(branch, { git, out }) {
   const ref = `refs/heads/${branch}`;
-  const remote = git(["ls-remote", "--exit-code", "origin", ref], { allowFail: true }).stdout.split(/\s/)[0] ?? "";
+  const remote = remoteHead(branch, git);
   if (remote) {
     git(["fetch", "-q", "--no-tags", "origin", `+${ref}:refs/spm-update/remote`]);
     if (out(["rev-parse", "refs/spm-update/remote^{tree}"]) === out(["rev-parse", "HEAD^{tree}"])) {
       log.info(`${branch} is already up to date on origin`);
-      return;
+      return remote;
     }
   }
   git(["push", "-q", `--force-with-lease=${ref}:${remote}`, "origin", `HEAD:${ref}`]);
+  return out(["rev-parse", "HEAD"]);
+}
+
+/// The commit `branch` has on origin now, or "" when it doesn't exist.
+function remoteHead(branch, git) {
+  return git(["ls-remote", "origin", `refs/heads/${branch}`]).stdout.split(/\s/)[0] ?? "";
 }
 
 function summaryMarkdown(results, problems) {

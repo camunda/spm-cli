@@ -6,7 +6,9 @@ branding:
   color: "orange"
 
 # Needs `spm` on PATH (run `camunda/spm-cli@<ref>` first), a checkout of the
-# branch to update, and `contents: write` + `pull-requests: write`.
+# branch to update, and `contents: write` + `pull-requests: write`. Run it in a
+# workflow `concurrency` group with `cancel-in-progress: false` so two runs
+# never publish the same update at once (see docs/guide/ci.md).
 inputs:
   token:
     description: >-

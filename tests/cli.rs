@@ -7239,6 +7239,9 @@ fn outdated_flags_direct_entries_whose_ai_json_request_changed() {
     }
 }
 
+// Global scope needs a home dir, which the sandbox can only redirect on Unix
+// (like the other global `outdated` tests).
+#[cfg(unix)]
 #[test]
 fn outdated_drift_warning_carries_the_global_flag() {
     let sb = Sandbox::new();
