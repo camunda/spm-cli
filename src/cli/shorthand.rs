@@ -78,6 +78,7 @@ fn classify(url: &str, reference: &str) -> Result<VersionArg> {
         tag: None,
         branch: None,
         commit: None,
+        range: None,
     };
     if is_full_sha(reference) {
         version.commit = Some(reference.to_string());
@@ -124,10 +125,10 @@ pub(super) fn expand(
     let Some(reference) = short.reference else {
         return Ok((short.url, version));
     };
-    if version.tag.is_some() || version.branch.is_some() || version.commit.is_some() {
+    if !version.is_empty() {
         bail!(
             "`{input}` already names a ref with `@{reference}`; drop `@{reference}` or \
-             drop --tag/--branch/--commit"
+             drop --tag/--branch/--commit/--version"
         );
     }
     policy
@@ -244,6 +245,7 @@ mod tests {
             tag: Some("v1".into()),
             branch: None,
             commit: None,
+            range: None,
         };
         let (url, v) = expand("https://example.com/o/r".into(), v, &Policy::default()).unwrap();
         assert_eq!(url, "https://example.com/o/r");
@@ -256,6 +258,7 @@ mod tests {
             tag: None,
             branch: Some("main".into()),
             commit: None,
+            range: None,
         };
         let err = expand("github.com/o/r@v1".into(), v, &Policy::default())
             .err()
@@ -266,12 +269,42 @@ mod tests {
         );
     }
 
+    /// `@<ref>` is tag/branch/commit only; a range must come from `--version`
+    /// and cannot be combined with an `@<ref>`.
+    #[test]
+    fn ref_conflicts_with_version_range_flag() {
+        let v = VersionArg {
+            tag: None,
+            branch: None,
+            commit: None,
+            range: Some("^1.2".into()),
+        };
+        let err = expand("github.com/o/r@v1".into(), v, &Policy::default())
+            .err()
+            .unwrap();
+        assert!(format!("{err:#}").contains("--version"), "{err:#}");
+    }
+
+    #[test]
+    fn shorthand_without_ref_keeps_version_range_flag() {
+        let v = VersionArg {
+            tag: None,
+            branch: None,
+            commit: None,
+            range: Some("^1.2".into()),
+        };
+        let (url, v) = expand("github.com/o/r".into(), v, &Policy::default()).unwrap();
+        assert_eq!(url, "https://github.com/o/r.git");
+        assert_eq!(v.range.as_deref(), Some("^1.2"));
+    }
+
     #[test]
     fn shorthand_without_ref_keeps_flags() {
         let v = VersionArg {
             tag: Some("v1".into()),
             branch: None,
             commit: None,
+            range: None,
         };
         let (url, v) = expand("github.com/o/r".into(), v, &Policy::default()).unwrap();
         assert_eq!(url, "https://github.com/o/r.git");

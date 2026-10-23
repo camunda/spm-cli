@@ -1,7 +1,7 @@
 use super::common::print_json;
 use crate::git;
 use crate::lockfile::{LockedSkill, Lockfile};
-use crate::manifest::{Manifest, Version};
+use crate::manifest::{semver_of_tag, Manifest, Version};
 use crate::scope::Scope;
 use anyhow::{bail, Result};
 use serde::Serialize;
@@ -12,11 +12,14 @@ use std::collections::BTreeMap;
 #[serde(rename_all = "kebab-case")]
 enum Status {
     UpToDate,
-    /// The branch tip moved past the locked commit.
+    /// The branch tip moved past the locked commit, or a newer tag inside a
+    /// `version` range exists (`spm update` moves to it).
     Behind,
-    /// A newer semver tag than the pinned one exists on the remote.
+    /// A newer semver tag than the pinned one (or, for a `version` range,
+    /// than the newest tag in range) exists on the remote.
     NewerTag,
-    /// The pinned tag itself now resolves to a different commit.
+    /// The pinned tag (or the tag a range is locked to) now resolves to a
+    /// different commit.
     TagMoved,
     /// A commit selector: immutable, never queried.
     Pinned,
@@ -66,12 +69,18 @@ struct Row<'a> {
     path: Option<&'a str>,
     /// The locked selector; `null` if `ai.lock` holds an unrecognized reference.
     selector: Option<Version>,
+    /// For a `version` range: the tag it is locked to; `null` otherwise.
+    resolved_tag: Option<&'a str>,
     /// Full locked commit SHA.
     locked: &'a str,
-    /// Full SHA the selector resolves to on the remote now (branch tip, or the
-    /// pinned tag's current commit); `null` for commits and errors.
+    /// Full SHA the selector resolves to on the remote now (branch tip, the
+    /// pinned tag's current commit, or the newest tag in a `version` range);
+    /// `null` for commits and errors.
     remote_commit: Option<String>,
-    /// Newest semver tag on the remote, only when newer than the pinned tag.
+    /// For a `version` range: the newest tag that satisfies it now.
+    latest_in_range: Option<String>,
+    /// Newest semver tag on the remote, only when newer than the pinned tag
+    /// (for a `version` range: newer than `latestInRange`, i.e. outside it).
     latest_tag: Option<String>,
     /// Full SHA `latestTag` points at.
     latest_tag_commit: Option<String>,
@@ -98,10 +107,15 @@ struct Row<'a> {
 struct SelectorCheck {
     /// `null` if `ai.lock` holds an unrecognized reference.
     selector: Option<Version>,
+    /// For a `version` range: the tag it is locked to; `null` otherwise.
+    resolved_tag: Option<String>,
     /// Full SHA the selector resolves to on the remote now; `null` for
     /// commits and errors.
     remote_commit: Option<String>,
-    /// Newest semver tag on the remote, only when newer than a tag selector.
+    /// For a `version` range: the newest tag that satisfies it now.
+    latest_in_range: Option<String>,
+    /// Newest semver tag on the remote, only when newer than a tag selector
+    /// (or than `latestInRange`).
     latest_tag: Option<String>,
     /// Full SHA `latestTag` points at.
     latest_tag_commit: Option<String>,
@@ -114,8 +128,9 @@ struct SelectorCheck {
 /// locally declared dependency. A requester pinned to a tag or commit only
 /// sees the change once a new version of it is published *and* its own
 /// selector is bumped by its requester, recursively; a branch-tracking
-/// requester picks it up through `spm update`, and a pinned local dependency
-/// through an `ai.json` edit plus `spm install`.
+/// requester picks it up through `spm update`, a range-tracking one once it
+/// publishes a release inside its range (then `spm update`, no selector edit),
+/// and a pinned local dependency through an `ai.json` edit plus `spm install`.
 #[derive(Default, Debug, PartialEq)]
 struct Upgrade {
     /// Pinned transitive requesters to republish, each with the requesters
@@ -126,6 +141,9 @@ struct Upgrade {
     local_edits: Vec<String>,
     /// Some chain ends at a branch-tracking requester (`spm update`).
     via_branch: bool,
+    /// Requesters tracking a `version` range (name, requirement): a release
+    /// inside the range reaches the project through `spm update`.
+    in_range: Vec<(String, String)>,
 }
 
 impl Upgrade {
@@ -138,13 +156,12 @@ impl Upgrade {
                 continue;
             }
             let locked = lock.skills.get(req).or_else(|| lock.plugins.get(req));
-            let branch = locked.is_some_and(|q| {
-                matches!(Version::from_label(&q.reference), Some(Version::Branch(_)))
-            });
+            let selector = locked.and_then(|q| Version::from_label(&q.reference));
             let local = manifest.skills.contains_key(req) || manifest.plugins.contains_key(req);
-            match locked {
-                _ if branch => up.via_branch = true,
-                Some(q) if !local && !q.requested_by.is_empty() => {
+            match (locked, selector) {
+                (_, Some(Version::Branch(_))) => up.via_branch = true,
+                (_, Some(Version::Range(r))) => up.in_range.push((req.clone(), r)),
+                (Some(q), _) if !local && !q.requested_by.is_empty() => {
                     up.republish.push((req.clone(), q.requested_by.clone()));
                     queue.extend(&q.requested_by);
                 }
@@ -275,8 +292,10 @@ fn check<'a>(
         git: &l.git,
         path: l.path.as_deref(),
         selector: None,
+        resolved_tag: l.resolved_tag.as_deref(),
         locked: &l.commit,
         remote_commit: None,
+        latest_in_range: None,
         latest_tag: None,
         latest_tag_commit: None,
         status: Status::Error,
@@ -287,8 +306,15 @@ fn check<'a>(
         also_satisfies: Vec::new(),
         error: None,
     };
-    let primary = evaluate(&l.reference, &l.git, &l.commit, remotes);
+    let primary = evaluate(
+        &l.reference,
+        &l.git,
+        &l.commit,
+        l.resolved_tag.as_deref(),
+        remotes,
+    );
     row.remote_commit = primary.remote_commit;
+    row.latest_in_range = primary.latest_in_range;
     row.latest_tag = primary.latest_tag;
     row.latest_tag_commit = primary.latest_tag_commit;
     row.status = primary.status;
@@ -296,7 +322,15 @@ fn check<'a>(
     row.also_satisfies = l
         .also_satisfies
         .iter()
-        .map(|label| evaluate(label, &l.git, &l.commit, remotes))
+        .map(|s| {
+            evaluate(
+                &s.reference,
+                &l.git,
+                &l.commit,
+                s.resolved_tag.as_deref(),
+                remotes,
+            )
+        })
         .collect();
     row.outdated =
         row.status.is_outdated() || row.also_satisfies.iter().any(|s| s.status.is_outdated());
@@ -306,12 +340,21 @@ fn check<'a>(
 
 /// Compare one selector (the primary `reference` or an `also_satisfies`
 /// entry) with the locked commit. Primary and secondary selectors share this
-/// so neither can miss a check the other gets.
-fn evaluate(label: &str, git: &str, locked: &str, remotes: &mut Remotes) -> SelectorCheck {
+/// so neither can miss a check the other gets. `resolved_tag` is the tag a
+/// `version` range is locked to.
+fn evaluate(
+    label: &str,
+    git: &str,
+    locked: &str,
+    resolved_tag: Option<&str>,
+    remotes: &mut Remotes,
+) -> SelectorCheck {
     let selector = Version::from_label(label);
     let mut out = SelectorCheck {
         selector: None,
+        resolved_tag: resolved_tag.map(str::to_string),
         remote_commit: None,
+        latest_in_range: None,
         latest_tag: None,
         latest_tag_commit: None,
         status: Status::Error,
@@ -322,7 +365,19 @@ fn evaluate(label: &str, git: &str, locked: &str, remotes: &mut Remotes) -> Sele
     // without this a denied commit-pinned source would report `pinned`.
     let checked = crate::policy::gate(git)
         .map_err(|e| format!("{e:#}"))
-        .and_then(|()| compare(&mut out, selector.as_ref(), label, git, locked, remotes));
+        .and_then(|()| {
+            compare(
+                &mut out,
+                selector.as_ref(),
+                label,
+                Locked {
+                    git,
+                    commit: locked,
+                    resolved_tag,
+                },
+                remotes,
+            )
+        });
     if let Err(e) = checked {
         out.status = Status::Error;
         out.error = Some(e);
@@ -331,8 +386,8 @@ fn evaluate(label: &str, git: &str, locked: &str, remotes: &mut Remotes) -> Sele
     out
 }
 
-/// The commit a branch/tag selector resolves to on the remote now (`None`
-/// for a commit, which is never queried).
+/// The commit a branch/tag/range selector resolves to on the remote now
+/// (`None` for a commit, which is never queried).
 fn remote_commit_of(
     selector: Option<&Version>,
     reference: &str,
@@ -354,27 +409,81 @@ fn remote_commit_of(
             .cloned()
             .map(Some)
             .ok_or_else(|| format!("tag `{t}` no longer exists on the remote")),
+        Some(Version::Range(r)) => {
+            in_range(remotes.get(git)?, r).map(|(_, sha)| Some(sha.to_string()))
+        }
     }
+}
+
+/// The newest tag (and its commit) satisfying range `r`, as `spm update`
+/// would resolve it — the very same rule, so the two never disagree.
+fn in_range<'r>(refs: &'r BTreeMap<String, String>, r: &str) -> Result<(&'r str, &'r str), String> {
+    crate::resolver::highest_matching_tag(refs, r).map_err(|e| format!("{e:#}"))
+}
+
+/// What `ai.lock` pins for the selector being compared.
+struct Locked<'a> {
+    git: &'a str,
+    commit: &'a str,
+    /// The tag a `version` range is locked to, when known.
+    resolved_tag: Option<&'a str>,
 }
 
 fn compare(
     out: &mut SelectorCheck,
     selector: Option<&Version>,
     reference: &str,
-    git: &str,
-    locked: &str,
+    locked: Locked,
     remotes: &mut Remotes,
 ) -> Result<(), String> {
+    let Locked {
+        git,
+        commit: locked,
+        resolved_tag,
+    } = locked;
     let now = remote_commit_of(selector, reference, git, remotes)?;
-    if let Some(Version::Tag(t)) = selector {
-        if let Some((tag, sha)) = newest_tag(remotes.get(git)?, t) {
+    // The tag newer versions are measured from: the pinned tag, or the newest
+    // tag inside a range (so `latestTag` is what lies *outside* the range).
+    let baseline = match selector {
+        Some(Version::Tag(t)) => Some(t.clone()),
+        Some(Version::Range(r)) => {
+            let (tag, _) = in_range(remotes.get(git)?, r)?;
+            out.latest_in_range = Some(tag.to_string());
+            Some(tag.to_string())
+        }
+        _ => None,
+    };
+    if let Some(base) = baseline {
+        if let Some((tag, sha)) = newest_tag(remotes.get(git)?, &base) {
             out.latest_tag = Some(tag.to_string());
             out.latest_tag_commit = Some(sha.to_string());
         }
     }
+    // The tag a range is locked to was re-pointed since it was resolved. A
+    // deleted one is an error (as for an exact tag): comparing tag names alone
+    // would call an older surviving match "newer" and steer into a downgrade.
+    let range_tag_moved = match (selector, resolved_tag) {
+        (Some(Version::Range(r)), Some(t)) => {
+            match remotes.get(git)?.get(&format!("refs/tags/{t}")) {
+                Some(sha) => !sha.eq_ignore_ascii_case(locked),
+                None => {
+                    return Err(format!(
+                        "tag `{t}` (locked for `version: {r}`) no longer exists on the remote"
+                    ))
+                }
+            }
+        }
+        _ => false,
+    };
+    // A newer in-range tag can share the locked commit; `spm update` would
+    // still advance `resolved_tag`, so comparing commits alone misses it.
+    let range_tag_advanced = matches!(selector, Some(Version::Range(_)))
+        && resolved_tag.is_some_and(|t| out.latest_in_range.as_deref() != Some(t));
     out.status = match (selector, &now) {
         (_, None) => Status::Pinned,
         (Some(Version::Tag(_)), Some(now)) if !now.eq_ignore_ascii_case(locked) => Status::TagMoved,
+        (Some(Version::Range(_)), _) if range_tag_moved => Status::TagMoved,
+        (Some(Version::Range(_)), _) if range_tag_advanced => Status::Behind,
         (_, Some(now)) if !now.eq_ignore_ascii_case(locked) => Status::Behind,
         _ if out.latest_tag.is_some() => Status::NewerTag,
         _ => Status::UpToDate,
@@ -383,23 +492,17 @@ fn compare(
     Ok(())
 }
 
-/// Parse a tag as strict semver, allowing a leading `v` (`v1.2.0`). Floating
-/// or non-semver tags (`v1`, `latest`, `stable`) yield `None`.
-fn semver_of(tag: &str) -> Option<semver::Version> {
-    semver::Version::parse(tag.strip_prefix('v').unwrap_or(tag)).ok()
-}
-
 /// The newest semver tag in `refs` (name and commit) that is strictly newer
 /// than `pinned`, or `None` when `pinned` is already newest or is not semver.
 /// Pre-releases are only considered when the pinned tag is itself one, so a
 /// stable pin is never nudged towards an `-rc`.
 fn newest_tag<'r>(refs: &'r BTreeMap<String, String>, pinned: &str) -> Option<(&'r str, &'r str)> {
-    let current = semver_of(pinned)?;
+    let current = semver_of_tag(pinned)?;
     let allow_pre = !current.pre.is_empty();
     refs.iter()
         .filter_map(|(r, sha)| {
             let tag = r.strip_prefix("refs/tags/")?;
-            let v = semver_of(tag)?;
+            let v = semver_of_tag(tag)?;
             (allow_pre || v.pre.is_empty()).then_some((v, tag, sha.as_str()))
         })
         // SemVer precedence ignores build metadata (`1.2.3+b2` == `1.2.3`).
@@ -428,16 +531,22 @@ fn render_text(report: &OutdatedReport, declared: usize) {
     let rows: Vec<[String; 6]> = report
         .rows()
         .map(|r| {
-            let selector = match &r.selector {
-                Some(Version::Commit(c)) => format!("commit:{}", short(c)),
-                Some(v) => v.label(),
-                None => "?".into(),
+            let range = matches!(r.selector, Some(Version::Range(_)));
+            let selector = match (&r.selector, r.resolved_tag) {
+                (Some(Version::Commit(c)), _) => format!("commit:{}", short(c)),
+                (Some(v @ Version::Range(_)), Some(tag)) => format!("{} → {tag}", v.label()),
+                (Some(v), _) => v.label(),
+                (None, _) => "?".into(),
             };
             let latest = match (r.status, &r.latest_tag, &r.remote_commit) {
                 (Status::NewerTag, Some(tag), _) => format!("tag:{tag}"),
                 (Status::UpToDate, _, _) if matches!(r.selector, Some(Version::Tag(_))) => {
                     selector.clone()
                 }
+                (Status::UpToDate | Status::Behind, _, _) if range => r
+                    .latest_in_range
+                    .as_ref()
+                    .map_or_else(|| "-".into(), |t| format!("tag:{t}")),
                 (_, _, Some(sha)) => short(sha).to_string(),
                 _ => "-".into(),
             };
@@ -448,8 +557,12 @@ fn render_text(report: &OutdatedReport, declared: usize) {
             if r.transitive {
                 notes.push(format!("transitive; via {}", r.requested_by.join(", ")));
             }
-            if let (Status::TagMoved, Some(tag)) = (r.status, &r.latest_tag) {
-                notes.push(format!("newer tag: {tag}"));
+            match (r.status, &r.latest_tag) {
+                (Status::TagMoved, Some(tag)) => notes.push(format!("newer tag: {tag}")),
+                (Status::Behind, Some(tag)) if range => {
+                    notes.push(format!("newer tag outside the range: {tag}"))
+                }
+                _ => {}
             }
             for sec in r.also_satisfies.iter().filter(|s| s.status.is_outdated()) {
                 let newer = match (sec.status, &sec.latest_tag) {
@@ -495,14 +608,21 @@ fn render_text(report: &OutdatedReport, declared: usize) {
 
     for r in report.rows() {
         if r.status == Status::TagMoved {
-            if let (Some(Version::Tag(t)), Some(now)) = (&r.selector, &r.remote_commit) {
-                eprintln!(
+            match (&r.selector, &r.remote_commit, r.resolved_tag) {
+                (Some(Version::Tag(t)), Some(now), _) => eprintln!(
                     "warning: tag `{t}` of `{}` now points at {} but ai.lock pins {} — \
                      someone re-pointed the tag; review it before `spm update`",
                     r.name,
                     short(now),
                     short(r.locked)
-                );
+                ),
+                (Some(Version::Range(req)), _, Some(t)) => eprintln!(
+                    "warning: tag `{t}` (locked for `version: {req}`) of `{}` no longer \
+                     points at {} — someone re-pointed the tag; review it before `spm update`",
+                    r.name,
+                    short(r.locked)
+                ),
+                _ => {}
             }
         }
         for sec in &r.also_satisfies {
@@ -515,6 +635,27 @@ fn render_text(report: &OutdatedReport, declared: usize) {
                     short(now),
                     short(r.locked)
                 ),
+                (Some(Version::Range(req)), Status::TagMoved, _) => {
+                    if let Some(t) = &sec.resolved_tag {
+                        eprintln!(
+                            "warning: tag `{t}` (locked for `version: {req}`, also satisfied by \
+                             `{}`) no longer points at {} — someone re-pointed the tag; review \
+                             it before `spm update`",
+                            r.name,
+                            short(r.locked)
+                        )
+                    }
+                }
+                (Some(Version::Range(_)), Status::Behind, _) => {
+                    if let Some(t) = &sec.latest_in_range {
+                        eprintln!(
+                            "warning: `{sel}` (also satisfied by `{}`) has a newer tag {t} in \
+                             range; ai.lock pins {}",
+                            r.name,
+                            short(r.locked)
+                        )
+                    }
+                }
                 (_, Status::Behind, Some(now)) => eprintln!(
                     "warning: `{sel}` (also satisfied by `{}`) moved to {} but ai.lock pins {}",
                     r.name,
@@ -568,9 +709,13 @@ fn summary(report: &OutdatedReport) -> Vec<String> {
                 .map(|r| r.name)
                 .collect()
         };
+        let is_range = |sel: &Option<Version>| matches!(sel, Some(Version::Range(_)));
+        // A range that is merely behind is the expected case, not a moved ref.
+        let in_range = names(&|r| r.status == Status::Behind && is_range(&r.selector));
         let moved_status = |s: Status| matches!(s, Status::Behind | Status::TagMoved);
         let moved = names(&|r| {
-            moved_status(r.status) || r.also_satisfies.iter().any(|s| moved_status(s.status))
+            (moved_status(r.status) && !in_range.contains(&r.name))
+                || r.also_satisfies.iter().any(|s| moved_status(s.status))
         });
         if !moved.is_empty() {
             lines.push(format!(
@@ -578,11 +723,27 @@ fn summary(report: &OutdatedReport) -> Vec<String> {
                 moved.join(", ")
             ));
         }
-        let tagged = names(&|r| r.status == Status::NewerTag && !r.transitive);
+        if !in_range.is_empty() {
+            lines.push(format!(
+                "  {}: newer tag within the version range — run `spm update{g}` to move to it",
+                in_range.join(", ")
+            ));
+        }
+        let tagged =
+            names(&|r| r.status == Status::NewerTag && !r.transitive && !is_range(&r.selector));
         if !tagged.is_empty() {
             lines.push(format!(
                 "  {}: newer tag — change the tag in ai.json, then run `spm install{g}`",
                 tagged.join(", ")
+            ));
+        }
+        let widen =
+            names(&|r| r.status == Status::NewerTag && !r.transitive && is_range(&r.selector));
+        if !widen.is_empty() {
+            lines.push(format!(
+                "  {}: newer tag outside the version range — widen `version` in ai.json, \
+                 then run `spm install{g}`",
+                widen.join(", ")
             ));
         }
         for r in outdated
@@ -603,7 +764,17 @@ fn summary(report: &OutdatedReport) -> Vec<String> {
                     parents.join(", ")
                 ));
             }
-            let run = if up.via_branch { "update" } else { "install" };
+            for (name, req) in &up.in_range {
+                steps.push(format!(
+                    "publish a new {name} release within its `version: {req}` range \
+                     (one outside it needs that range widened)"
+                ));
+            }
+            let run = if up.via_branch || !up.in_range.is_empty() {
+                "update"
+            } else {
+                "install"
+            };
             steps.push(if up.local_edits.is_empty() {
                 format!("then run `spm {run}{g}`")
             } else {
@@ -625,7 +796,7 @@ fn summary(report: &OutdatedReport) -> Vec<String> {
                 lines.push(format!(
                     "  {}: newer tag {} for {} — bump it in the upstream ai.json that requests \
                      it, then move that requester onto the change (`spm update{g}` if it \
-                     tracks a branch)",
+                     tracks a branch or a `version` range)",
                     r.name,
                     sec.latest_tag.as_deref().unwrap_or("?"),
                     label_of(&sec.selector)
@@ -690,8 +861,10 @@ mod tests {
             git: "g",
             path: None,
             selector: None,
+            resolved_tag: None,
             locked: "0",
             remote_commit: None,
+            latest_in_range: None,
             latest_tag: None,
             latest_tag_commit: None,
             status,
@@ -742,6 +915,64 @@ mod tests {
                 "  deep: newer tag — bump it in the upstream ai.json of fixed; then point fixed at a \
                  version that includes it in ai.json and run `spm install -g`",
                 "incomplete: 1 dependency could not be checked (see the errors above)",
+            ]
+        );
+    }
+
+    #[test]
+    fn summary_routes_range_rows_to_update_or_a_wider_range() {
+        use crate::manifest::Version;
+        let range = || Some(Version::Range("^1.2".into()));
+        let report = OutdatedReport {
+            scope: "project",
+            skills: vec![
+                Row {
+                    selector: range(),
+                    ..row("inr", Status::Behind, &[])
+                },
+                Row {
+                    selector: range(),
+                    ..row("out", Status::NewerTag, &[])
+                },
+                row("br", Status::Behind, &[]),
+            ],
+            plugins: vec![],
+        };
+        assert_eq!(
+            summary(&report),
+            [
+                "3 dependencies outdated:",
+                "  br: run `spm update` to re-pin to the moved branch/tag",
+                "  inr: newer tag within the version range — run `spm update` to move to it",
+                "  out: newer tag outside the version range — widen `version` in ai.json, \
+                 then run `spm install`",
+            ]
+        );
+    }
+
+    #[test]
+    fn summary_ends_a_transitive_chain_at_a_range_tracking_requester() {
+        let via = ["mid".to_string()];
+        let report = OutdatedReport {
+            scope: "project",
+            skills: vec![Row {
+                upgrade: Upgrade {
+                    republish: vec![("mid".into(), vec!["top".into()])],
+                    in_range: vec![("top".into(), "^1".into())],
+                    ..Default::default()
+                },
+                ..row("leaf", Status::NewerTag, &via)
+            }],
+            plugins: vec![],
+        };
+        assert_eq!(
+            summary(&report),
+            [
+                "1 dependency outdated:",
+                "  leaf: newer tag — bump it in the upstream ai.json of mid; publish a new mid \
+                 version and bump mid in the upstream ai.json of top; publish a new top release \
+                 within its `version: ^1` range (one outside it needs that range widened); then \
+                 run `spm update`",
             ]
         );
     }

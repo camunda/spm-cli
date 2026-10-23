@@ -52,6 +52,7 @@ In CI, run `spm install --locked` (like `npm ci` / `cargo build --locked`): it i
   "skills": {
     "pdf-tools": { "git": "https://github.com/org/skills", "tag": "v1.2.0", "path": "skills/pdf" },
     "reviewer":  { "git": "https://github.com/me/reviewer", "branch": "main" },
+    "linter":    { "git": "https://github.com/org/linter", "version": "^1.2" },
     "pinned":    { "git": "https://github.com/x/y",         "commit": "a1b2c3d" }
   }
 }
@@ -84,6 +85,16 @@ Version selectors (exactly one per skill):
 | `tag`    | git tag (annotated tags deref to commit)   | resolved SHA   |
 | `branch` | branch tip at install/update time          | resolved SHA   |
 | `commit` | exact commit                               | itself         |
+| `version`| highest semver tag matching a range (`^1.2`)| resolved tag + SHA |
+
+`version` takes a [semver requirement](https://docs.rs/semver/latest/semver/struct.VersionReq.html)
+(`^1.2`, `~1.4`, `>=1.2, <2`, `1`) and locks the **highest** tag that satisfies
+it. Tags may carry one leading `v` (`v1.4.1` and `1.4.1` both count); non-semver
+tags (`latest`, `v1`) are ignored and pre-releases only match a requirement that
+names one (`~1.5.0-rc.1`). `ai.lock` records the requirement, the tag it chose
+and its commit; `spm install` keeps that pin, and `spm update` moves it to the
+newest tag still inside the range — never past it (a `^1.2` skill never jumps to
+`v2.0.0`). An exact `tag` is never treated as a range.
 
 `path` (optional) selects a subdirectory — for monorepos holding many skills.
 
@@ -200,7 +211,7 @@ For GitHub there is a shorthand: `github.com/<owner>/<repo>[@<ref>]` expands to
 spm looks the ref up on the remote and treats it as a tag or a branch (a full
 40-character SHA is taken as a commit without a lookup). It is an error if the
 ref is neither, or is both a tag and a branch (use the explicit flag), or if
-`@<ref>` is combined with `--tag`, `--branch` or `--commit`. `ai.json` always
+`@<ref>` is combined with `--tag`, `--branch`, `--commit` or `--version`. `ai.json` always
 records the expanded URL, never the shorthand. Anything not starting with
 `github.com/` is passed through untouched.
 
@@ -324,7 +335,7 @@ make install PREFIX=~/.local  # or a custom prefix
 
 ```bash
 spm init [--target amp|claude|cline|codex|copilot|cursor|gemini|windsurf ...] [-g]  # scaffold ai.json (repeatable / comma-separated)
-spm add <git> [--tag|--branch|--commit <v>] \      # add + install a skill (no selector = default branch; github.com/owner/repo@ref also works)
+spm add <git> [--tag|--branch|--commit <v>|--version "<range>"] \  # add + install a skill (no selector = default branch; github.com/owner/repo@ref also works)
         [--path <subdir>] [--name <local-name>] [--all] [-g]  # --all: add every skill under --path
         [--plugin]                                 # --plugin: add a full plugin (see "Full plugins")
 spm target add [vendor ...] [-g]                   # add target vendor(s); no arg = pick interactively

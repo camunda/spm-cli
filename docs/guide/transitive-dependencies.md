@@ -116,7 +116,7 @@ so re-running `spm install` never churns it.
 
 ## Updating: `update` vs `update <name>`
 
-Moving refs (`branch`/`tag`) resolve to a commit once and stay **pinned** in
+Moving refs (`branch`/`tag`/`version`) resolve to a commit once and stay **pinned** in
 `ai.lock` until you deliberately refresh them — the same for a transitive child
 as for a directly-declared skill.
 

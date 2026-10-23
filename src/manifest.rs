@@ -107,7 +107,8 @@ where
     d.deserialize_map(MapVisitor(kind))
 }
 
-/// A single skill dependency. Exactly one of tag/branch/commit selects the version.
+/// A single skill dependency. Exactly one of tag/branch/commit/version selects
+/// the version.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillSpec {
     pub git: String,
@@ -117,6 +118,10 @@ pub struct SkillSpec {
     pub branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub commit: Option<String>,
+    /// A semver requirement (`^1.2`, `~1.4`, `>=1.2, <2`) resolved to the
+    /// highest matching semver tag. Written as `version` in `ai.json`.
+    #[serde(rename = "version", skip_serializing_if = "Option::is_none", default)]
+    pub range: Option<String>,
     /// Optional subdirectory inside the repo (monorepo of skills).
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub path: Option<String>,
@@ -130,6 +135,9 @@ pub enum Version {
     Tag(String),
     Branch(String),
     Commit(String),
+    /// A semver requirement, resolved to the highest matching semver tag.
+    #[serde(rename = "version")]
+    Range(String),
 }
 
 impl Version {
@@ -139,6 +147,7 @@ impl Version {
             Version::Tag(t) => format!("tag:{t}"),
             Version::Branch(b) => format!("branch:{b}"),
             Version::Commit(c) => format!("commit:{c}"),
+            Version::Range(r) => format!("version:{r}"),
         }
     }
 
@@ -151,20 +160,59 @@ impl Version {
             "tag" => Some(Version::Tag(value)),
             "branch" => Some(Version::Branch(value)),
             "commit" => Some(Version::Commit(value)),
+            "version" => Some(Version::Range(value)),
             _ => None,
         }
     }
 }
 
+/// Parse a `version` selector as a semver requirement (`^1.2`, `~1.4`,
+/// `>=1.2, <2`, `1.2` = `^1.2`). The single parser behind manifest validation,
+/// resolution, lock validation and `spm outdated`, so they all agree on what a
+/// requirement means.
+pub fn parse_version_req(req: &str) -> Result<semver::VersionReq> {
+    semver::VersionReq::parse(req).map_err(|e| {
+        let hint = if req
+            .trim_start_matches(['^', '~', '=', '>', '<', ' '])
+            .starts_with(['v', 'V'])
+        {
+            " (drop the `v`: tags are matched with or without it)"
+        } else {
+            ""
+        };
+        anyhow!(
+            "invalid version requirement `{req}`: {e}{hint} — expected a semver requirement \
+             such as `^1.2`, `~1.4.0` or `>=1.2, <2`"
+        )
+    })
+}
+
+/// Parse a tag name as a semver version, allowing one leading `v` (`v1.2.0`).
+/// Floating or non-semver tags (`v1`, `latest`, `stable`) yield `None`. The
+/// single tag-to-version rule shared by range resolution and `spm outdated`.
+pub fn semver_of_tag(tag: &str) -> Option<semver::Version> {
+    semver::Version::parse(tag.strip_prefix('v').unwrap_or(tag)).ok()
+}
+
 impl SkillSpec {
-    /// Validate that exactly one version selector is set and return it.
+    /// Validate that exactly one version selector is set (and, for `version`,
+    /// that it is a valid semver requirement) and return it.
     pub fn version(&self) -> Result<Version> {
-        match (&self.tag, &self.branch, &self.commit) {
-            (Some(t), None, None) => Ok(Version::Tag(t.clone())),
-            (None, Some(b), None) => Ok(Version::Branch(b.clone())),
-            (None, None, Some(c)) => Ok(Version::Commit(c.clone())),
-            (None, None, None) => bail!("skill `{}`: set one of tag/branch/commit", self.git),
-            _ => bail!("skill `{}`: set only one of tag/branch/commit", self.git),
+        match (&self.tag, &self.branch, &self.commit, &self.range) {
+            (Some(t), None, None, None) => Ok(Version::Tag(t.clone())),
+            (None, Some(b), None, None) => Ok(Version::Branch(b.clone())),
+            (None, None, Some(c), None) => Ok(Version::Commit(c.clone())),
+            (None, None, None, Some(r)) => {
+                parse_version_req(r).with_context(|| format!("skill `{}`", self.git))?;
+                Ok(Version::Range(r.clone()))
+            }
+            (None, None, None, None) => {
+                bail!("skill `{}`: set one of tag/branch/commit/version", self.git)
+            }
+            _ => bail!(
+                "skill `{}`: set only one of tag/branch/commit/version",
+                self.git
+            ),
         }
     }
 }
@@ -348,6 +396,8 @@ impl Manifest {
         }
         for (name, spec) in &manifest.skills {
             validate_skill_name(name).with_context(|| format!("in {}", p.display()))?;
+            spec.version()
+                .with_context(|| format!("skill `{name}` in {}", p.display()))?;
             if let Some(sub) = &spec.path {
                 validate_subpath(sub)
                     .with_context(|| format!("skill `{name}` in {}", p.display()))?;
@@ -355,6 +405,8 @@ impl Manifest {
         }
         for (name, spec) in &manifest.plugins {
             validate_skill_name(name).with_context(|| format!("in {}", p.display()))?;
+            spec.version()
+                .with_context(|| format!("plugin `{name}` in {}", p.display()))?;
             if let Some(sub) = &spec.path {
                 validate_subpath(sub)
                     .with_context(|| format!("plugin `{name}` in {}", p.display()))?;
@@ -493,6 +545,10 @@ impl DependencyManifest {
                 validate_commit_selector(commit)
                     .with_context(|| format!("skill `{name}` in nested {}", p.display()))?;
             }
+            // Exactly one selector, and a `version` that parses as a semver
+            // requirement — the schema's `oneOf` for the root manifest.
+            spec.version()
+                .with_context(|| format!("skill `{name}` in nested {}", p.display()))?;
         }
         Ok(dep)
     }
@@ -508,6 +564,7 @@ mod tests {
             tag: tag.map(str::to_string),
             branch: branch.map(str::to_string),
             commit: commit.map(str::to_string),
+            range: None,
             path: None,
         }
     }
@@ -523,7 +580,7 @@ mod tests {
         let Err(err) = s.version() else {
             panic!("expected an error");
         };
-        assert!(format!("{err}").contains("set one of tag/branch/commit"));
+        assert!(format!("{err}").contains("set one of tag/branch/commit/version"));
     }
 
     #[test]
@@ -532,11 +589,64 @@ mod tests {
         let Err(err) = s.version() else {
             panic!("expected an error");
         };
-        assert!(format!("{err}").contains("set only one of tag/branch/commit"));
+        assert!(format!("{err}").contains("set only one of tag/branch/commit/version"));
 
         let sha = "a".repeat(40);
         let all_three = spec("u", Some("v1"), Some("main"), Some(sha.as_str()));
         assert!(all_three.version().is_err());
+
+        // `version` conflicts with each of the other three selectors.
+        for mut s in [
+            spec("u", Some("v1"), None, None),
+            spec("u", None, Some("main"), None),
+            spec("u", None, None, Some(sha.as_str())),
+        ] {
+            s.range = Some("^1.2".into());
+            let err = s.version().unwrap_err();
+            assert!(format!("{err}").contains("set only one"), "{err}");
+        }
+    }
+
+    #[test]
+    fn version_accepts_a_semver_range_and_rejects_an_invalid_one() {
+        let mut s = spec("u", None, None, None);
+        s.range = Some(">=1.2, <2".into());
+        assert_eq!(s.version().unwrap(), Version::Range(">=1.2, <2".into()));
+        for bad in ["", "not-a-version", "^v1.2", "1.2.3.4"] {
+            s.range = Some(bad.into());
+            let err = s.version().unwrap_err();
+            assert!(
+                format!("{err:#}").contains("invalid version requirement"),
+                "`{bad}`: {err:#}"
+            );
+        }
+        s.range = Some("^v1.2".into());
+        assert!(
+            format!("{:#}", s.version().unwrap_err()).contains("drop the `v`"),
+            "a `v`-prefixed requirement gets a targeted hint"
+        );
+    }
+
+    /// `1.2` is `^1.2` to the semver crate, which is exactly why ranges get
+    /// their own `version` field: an existing exact `"tag": "1.2"` must keep
+    /// meaning the literal tag `1.2`.
+    #[test]
+    fn tag_stays_exact_while_version_is_a_range() {
+        assert_eq!(
+            spec("u", Some("1.2"), None, None).version().unwrap(),
+            Version::Tag("1.2".into())
+        );
+        let req = parse_version_req("1.2").unwrap();
+        assert!(req.matches(&semver::Version::new(1, 9, 0)));
+    }
+
+    #[test]
+    fn semver_of_tag_strips_one_v_and_ignores_non_semver() {
+        assert_eq!(semver_of_tag("v1.2.3"), Some(semver::Version::new(1, 2, 3)));
+        assert_eq!(semver_of_tag("1.2.3"), Some(semver::Version::new(1, 2, 3)));
+        for t in ["vv1.2.3", "v1", "v1.2", "latest", "V1.2.3", "pdf-v1.2.0"] {
+            assert_eq!(semver_of_tag(t), None, "`{t}`");
+        }
     }
 
     #[test]
@@ -562,6 +672,7 @@ mod tests {
             Version::Tag("v1.2.0".into()),
             Version::Branch("feat/x:y".into()),
             Version::Commit("a".repeat(40)),
+            Version::Range(">=1.2, <2".into()),
         ] {
             assert_eq!(Version::from_label(&v.label()), Some(v));
         }
@@ -694,6 +805,14 @@ mod tests {
             (
                 r#"{"skills":{"leaf":{"git":"u","branch":"main","path":""}}}"#,
                 "`path` must be non-empty",
+            ),
+            (
+                r#"{"skills":{"leaf":{"git":"u","version":""}}}"#,
+                "invalid version requirement",
+            ),
+            (
+                r#"{"skills":{"leaf":{"git":"u","version":"^1","tag":"v1.0.0"}}}"#,
+                "set only one of",
             ),
         ] {
             let dir = base.join(needle.replace([' ', '`'], "_"));

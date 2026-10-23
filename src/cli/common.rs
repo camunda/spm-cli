@@ -10,12 +10,28 @@ use std::path::Path;
 #[derive(Args)]
 #[group(multiple = false)]
 pub(crate) struct VersionArg {
+    /// Pin an exact tag.
     #[arg(long)]
     pub(crate) tag: Option<String>,
+    /// Track a branch (re-resolved by `spm update`).
     #[arg(long)]
     pub(crate) branch: Option<String>,
+    /// Pin a full 40-character commit SHA.
     #[arg(long)]
     pub(crate) commit: Option<String>,
+    /// Semver range resolved to the highest matching tag (`v1.4.1` or `1.4.1`)
+    /// and moved within the range by `spm update`, e.g. "^1.2", "~1.4.0" or
+    /// ">=1.2, <2". Quote it with double quotes: `^`, `<`, `>` are special in
+    /// shells (cmd.exe drops a bare `^`).
+    #[arg(long = "version", value_name = "RANGE")]
+    pub(crate) range: Option<String>,
+}
+
+impl VersionArg {
+    /// Whether no selector flag was given.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.tag.is_none() && self.branch.is_none() && self.commit.is_none() && self.range.is_none()
+    }
 }
 
 /// The `-g/--global` selector shared by every scope-aware subcommand. Operates

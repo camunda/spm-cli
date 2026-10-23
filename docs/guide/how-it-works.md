@@ -24,7 +24,7 @@ ai.json ──resolve──▶ ai.lock ──fetch──▶ ~/.spm/store/<repo>@
 
 ## Resolve → fetch → project
 
-1. **Resolve.** A skill spec (`tag` / `branch` / `commit`) is resolved to an
+1. **Resolve.** A skill spec (`tag` / `branch` / `commit` / `version`) is resolved to an
    immutable commit SHA plus a store key. Annotated tags are dereferenced to
    their commit; a branch resolves to its tip at install/update time.
 2. **Fetch.** spm clones `<repo>@<sha>` into `~/.spm/store` once. Subsequent
