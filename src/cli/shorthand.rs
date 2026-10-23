@@ -5,7 +5,8 @@
 
 use super::common::VersionArg;
 use crate::git;
-use anyhow::{bail, Result};
+use crate::policy::Policy;
+use anyhow::{bail, Context, Result};
 
 const PREFIX: &str = "github.com/";
 
@@ -110,8 +111,13 @@ fn classify(url: &str, reference: &str) -> Result<VersionArg> {
 /// Non-shorthand input is returned unchanged together with the flags the user
 /// gave. For a shorthand the URL is expanded, and an `@<ref>` is resolved to a
 /// tag, branch or commit selector. Combining `@<ref>` with `--tag`, `--branch`
-/// or `--commit` is an error rather than a silent precedence rule.
-pub(super) fn expand(input: String, version: VersionArg) -> Result<(String, VersionArg)> {
+/// or `--commit` is an error rather than a silent precedence rule. The expanded
+/// URL must pass `policy` before the `@<ref>` lookup contacts the remote.
+pub(super) fn expand(
+    input: String,
+    version: VersionArg,
+    policy: &Policy,
+) -> Result<(String, VersionArg)> {
     let Some(short) = parse(&input)? else {
         return Ok((input, version));
     };
@@ -124,6 +130,9 @@ pub(super) fn expand(input: String, version: VersionArg) -> Result<(String, Vers
              drop --tag/--branch/--commit"
         );
     }
+    policy
+        .check(&short.url)
+        .with_context(|| format!("cannot add `{input}`"))?;
     let version = classify(&short.url, &reference)?;
     Ok((short.url, version))
 }
@@ -236,7 +245,7 @@ mod tests {
             branch: None,
             commit: None,
         };
-        let (url, v) = expand("https://example.com/o/r".into(), v).unwrap();
+        let (url, v) = expand("https://example.com/o/r".into(), v, &Policy::default()).unwrap();
         assert_eq!(url, "https://example.com/o/r");
         assert_eq!(v.tag.as_deref(), Some("v1"));
     }
@@ -248,7 +257,9 @@ mod tests {
             branch: Some("main".into()),
             commit: None,
         };
-        let err = expand("github.com/o/r@v1".into(), v).err().unwrap();
+        let err = expand("github.com/o/r@v1".into(), v, &Policy::default())
+            .err()
+            .unwrap();
         assert!(
             format!("{err:#}").contains("already names a ref"),
             "{err:#}"
@@ -262,7 +273,7 @@ mod tests {
             branch: None,
             commit: None,
         };
-        let (url, v) = expand("github.com/o/r".into(), v).unwrap();
+        let (url, v) = expand("github.com/o/r".into(), v, &Policy::default()).unwrap();
         assert_eq!(url, "https://github.com/o/r.git");
         assert_eq!(v.tag.as_deref(), Some("v1"));
     }

@@ -22,6 +22,12 @@
       "type": "boolean",
       "description": "Opt in to transitive skill dependencies: when true, spm reads each resolved skill's own co-located ai.json and recursively resolves the skills it declares. Default false. Read only from the root project's manifest; a dependency's nested ai.json cannot re-enable it."
     },
+    "allowedSources": {
+      "type": "array",
+      "description": "Source allowlist: every skill and plugin source (direct or transitive) must match one of these patterns, matched against the protocol-independent repo identity so HTTPS, SSH-URL and scp-style spellings are equivalent. Patterns: `host/org/repo`, `host/org/*` (`*` = one or more further path segments), `host/*`, or `file://*` (local paths and file:// URLs, otherwise denied). Hosts are case-insensitive, paths are case-sensitive, `.git` is ignored. An empty list allows nothing. Intersected with the machine policy ($SPM_HOME/policy.json or SPM_POLICY). Read only from the root project's manifest; a dependency's nested ai.json cannot set it.",
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1 }
+    },
     "skills": {
       "type": "object",
       "description": "Skill dependencies, keyed by local name.",

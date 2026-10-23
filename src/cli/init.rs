@@ -30,6 +30,7 @@ pub(super) fn init(scope: &Scope, targets: Vec<String>) -> Result<()> {
     let manifest = Manifest {
         targets,
         resolve_transitive: false,
+        allowed_sources: None,
         skills: BTreeMap::new(),
         plugins: BTreeMap::new(),
     };

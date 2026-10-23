@@ -443,6 +443,31 @@ materialized and `ai.lock` is not written. Lower severities print as warnings.
   the source. Only if they confirm they trust it, re-run with
   `SPM_ALLOW_SUSPICIOUS=1` in the environment for that one command.
 
+## Source policy
+
+A project can restrict where dependencies may come from with a top-level
+`allowedSources` array in `ai.json`, and a machine can do the same with a policy
+file (`SPM_POLICY`, else `$SPM_HOME/policy.json`, shaped
+`{ "allowedSources": [...] }`). A source must be allowed by **every** configured
+layer, so a project can narrow a machine policy but never widen it. With neither
+configured, any source is accepted.
+
+- Patterns are `host/path` with no scheme: `github.com/camunda/*` (anything
+  below, `*` only as the whole last segment), `github.com/me/one-skill` (exact),
+  `file://*` (local sources: `file://` URLs, absolute or `./`/`../` paths — a
+  bare name like `origin` could be a git remote, so it is denied). An empty
+  list allows nothing.
+- HTTPS, `ssh://` and `git@host:org/repo` spellings match the same pattern.
+- It applies to `spm add` (before `ai.json` is written), to every sync
+  (`install`, including `--locked` and cache-only installs, `update`, `remove`,
+  `target add`), to transitive sources, and to `spm outdated`. `--protocol` and
+  `--protocol-fallback` cannot bypass it.
+- Under a policy git follows no HTTP redirects, and checkout filters (e.g. Git
+  LFS) are disabled, so a repository that needs one fails to install.
+- A dependency's own `ai.json` may not declare `allowedSources`.
+- Never edit the policy (either layer) to get a dependency in on the user's
+  behalf. Tell the user which layer denied which source and let them decide.
+
 ## Troubleshooting
 
 | Symptom | Cause and fix |
@@ -453,6 +478,7 @@ materialized and `ai.lock` is not written. Lower severities print as warnings.
 | `a skill named ... already exists` | The name is taken. Pick another with `--name`, pass `--force` to re-pin it, or `spm remove <name>` first. |
 | `a plugin named ... already exists` or `... is declared as both a skill and a plugin` | Skills and plugins share one namespace. Use a different `--name`, or remove the other entry. `--force` does not convert a skill into a plugin. |
 | `skill name collision: ... is provided by more than one skill/plugin` | A plugin bundles a skill with the same name as another entry. Rename one of them. |
+| `... is not allowed: denied by the ... policy ...` | The source is outside the [source policy](#source-policy); the message names each denying layer and what it allows. Use an allowed source, or ask the user whether to extend that layer. A machine policy can't be overridden from `ai.json`. |
 | `failed the content scan: ... blocking finding(s)` | See [Content scan](#content-scan). Review the findings before deciding anything. |
 | `warning: skill ... has no SKILL.md at its root` | `--path` is wrong, or points at a container of skills. When the warning lists suggested `spm add ... --path <sub>` commands, use one of them or re-run with `--all`. Fix the entry by running `spm remove <name>` and adding it again. |
 | `ai.json does not match schema: ...` | `ai.json` is malformed. Each entry needs `git` and exactly one of `tag`, `branch`, `commit`. The message lists each violation with its JSON path. |

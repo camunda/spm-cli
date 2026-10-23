@@ -201,6 +201,9 @@ pub(super) fn outdated(
 ) -> Result<()> {
     let dir = scope.manifest_dir()?;
     let manifest = Manifest::load(&dir, scope)?;
+    // Every remote this reports on is queried through the policy gate; a denied
+    // source shows up as an error row instead of being contacted.
+    crate::policy::activate(&manifest, &dir)?;
     let lock = Lockfile::load_or_default(&dir)?;
     if let Some(name) = name {
         if !lock.skills.contains_key(name) && !lock.plugins.contains_key(name) {
@@ -314,7 +317,13 @@ fn evaluate(label: &str, git: &str, locked: &str, remotes: &mut Remotes) -> Sele
         status: Status::Error,
         error: None,
     };
-    if let Err(e) = compare(&mut out, selector.as_ref(), label, git, locked, remotes) {
+    // The source policy is judged here, for every selector kind: a commit pin
+    // never reaches the remote query (where the transport gate sits), so
+    // without this a denied commit-pinned source would report `pinned`.
+    let checked = crate::policy::gate(git)
+        .map_err(|e| format!("{e:#}"))
+        .and_then(|()| compare(&mut out, selector.as_ref(), label, git, locked, remotes));
+    if let Err(e) = checked {
         out.status = Status::Error;
         out.error = Some(e);
     }

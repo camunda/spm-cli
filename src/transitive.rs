@@ -96,6 +96,9 @@ pub struct Ctx<'a> {
     pub locked: bool,
     /// Column width for the aligned per-skill fetch output.
     pub width: usize,
+    /// The effective source policy every nested edge must pass before it is
+    /// resolved or fetched.
+    pub policy: &'a crate::policy::Policy,
 }
 
 /// Result of the walk: the flattened, deduplicated skill list to hand to the
@@ -525,6 +528,16 @@ fn visit(
                  reduce the fan-out of nested `ai.json` dependencies",
                 chain_str(&chain)
             );
+        }
+        // Source policy: refuse a nested source outside the policy before any
+        // resolution or fetch, naming the chain of requesters that led here.
+        if let Err(e) = ctx.policy.check(&spec.git) {
+            let mut chain: Vec<String> = w.stack.iter().map(|(_, n)| n.clone()).collect();
+            chain.push(declared.clone());
+            return Err(e.context(format!(
+                "nested skill `{declared}` required by `{name}` (via {})",
+                chain_str(&chain)
+            )));
         }
         spec.version()
             .with_context(|| format!("nested skill `{declared}` required by `{name}`"))?;

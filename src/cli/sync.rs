@@ -28,6 +28,33 @@ pub(super) fn sync(
     if manifest.targets.is_empty() {
         bail!("ai.json declares no targets");
     }
+    // Source policy: judge every direct source before any network access, and
+    // report all denied ones at once.
+    let policy = crate::policy::activate(&manifest, &dir)?;
+    let denied: Vec<String> = manifest
+        .skills
+        .iter()
+        .map(|(n, s)| ("skill", n, s))
+        .chain(manifest.plugins.iter().map(|(n, s)| ("plugin", n, s)))
+        .filter_map(|(kind, name, spec)| {
+            policy
+                .check(&spec.git)
+                .err()
+                .map(|e| format!("{kind} `{name}`: {e:#}"))
+        })
+        .collect();
+    if !denied.is_empty() {
+        bail!(
+            "{} dependenc{} not allowed by the source policy:\n{}",
+            denied.len(),
+            if denied.len() == 1 { "y is" } else { "ies are" },
+            denied
+                .iter()
+                .map(|d| format!("  - {d}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
     // Validate all targets up front before doing any network work.
     let vendors = manifest
         .targets
@@ -275,6 +302,7 @@ pub(super) fn sync(
             refresh: force_refresh && only.is_none(),
             locked,
             width,
+            policy: &policy,
         },
     )?;
     let mut materialized: Vec<MaterializedSkill> = expansion.materialized;

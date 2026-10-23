@@ -69,6 +69,28 @@ manifest — a dependency's nested `ai.json` cannot re-enable it. See
 model: naming, deduplication, cycles, the depth cap, and the version-conflict
 error.
 
+## `allowedSources`
+
+An optional top-level array of source patterns. When present, every skill and
+plugin — direct, transitive, or re-installed from `ai.lock` — must come from a
+repository matching one of them, or the command fails before contacting it:
+
+```json
+{
+  "targets": ["claude"],
+  "allowedSources": ["github.com/camunda/*", "github.com/my-org/approved-skill", "file://*"],
+  "skills": { "reviewer": { "git": "https://github.com/camunda/reviewer", "tag": "v1.0.0" } }
+}
+```
+
+A pattern is `host/path` with no scheme; `*` as the whole last segment matches
+any repository below that path, and `file://*` allows local sources. An empty
+list allows nothing. The project policy is intersected with the optional machine
+policy (`SPM_POLICY` / `$SPM_HOME/policy.json`), so it can narrow but never widen
+it. It is read **only** from your root manifest — a dependency's nested
+`ai.json` declaring `allowedSources` is rejected. See
+[Source Policy](/guide/source-policy) for the full syntax and enforcement points.
+
 ## `plugins`
 
 A map of local plugin name → plugin spec. A **plugin** is a Claude Code plugin

@@ -16,6 +16,12 @@ The principles behind how spm is built. For the day-to-day model, see
 cache). It is primarily used by tests. **Vendor output is always project-local**
 and is *not* affected by `SPM_HOME`.
 
+## `SPM_POLICY`
+
+`SPM_POLICY` names the machine [source policy](/guide/source-policy) file
+(default `$SPM_HOME/policy.json`). A missing file it names is an error; an empty
+value counts as unset.
+
 ## Vendor adapters
 
 Adding a target means implementing one `Vendor` trait in `src/vendor/`:

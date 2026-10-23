@@ -88,6 +88,12 @@ fn git_command(args: &[&str]) -> Command {
     // legacy 260-char MAX_PATH (deep object/checkout paths under the store).
     // The setting is a no-op on other platforms.
     cmd.args(["-c", "core.longpaths=true"]);
+    // Under a source policy, git must not follow HTTP redirects: the policy
+    // judged the URL spm handed over, and a redirect (a transferred repo, a
+    // hostile server) would land on a host or namespace it never checked.
+    if crate::policy::restricts() {
+        cmd.args(["-c", "http.followRedirects=false"]);
+    }
     cmd.args(args);
     cmd.env("GIT_TERMINAL_PROMPT", "0");
     // Pin git (and the ssh/curl helpers it spawns) to the C locale so failure
@@ -104,19 +110,68 @@ fn git_command(args: &[&str]) -> Command {
 }
 
 fn git(args: &[&str], cwd: Option<&Path>) -> Result<String> {
-    run_git(args, cwd, false)
+    run_git(&[], args, cwd, false)
 }
 
 /// Like [`git`], but tags any failure as a *remote-stage* failure so the
 /// transport fallback classifier may consider it (see
 /// [`is_connectivity_failure`]). Use only for commands that actually contact
 /// the remote — `ls-remote` and `fetch` — never for local store/config steps.
-fn git_remote(args: &[&str], cwd: Option<&Path>) -> Result<String> {
-    run_git(args, cwd, true)
+/// `url` is the remote being contacted (for `fetch`, what `origin` points at).
+fn git_remote(url: &str, args: &[&str], cwd: Option<&Path>) -> Result<String> {
+    let pin = redirect_pin(url, cwd)?;
+    let pin: Vec<&str> = pin.iter().map(String::as_str).collect();
+    run_git(&pin, args, cwd, true)
 }
 
-fn run_git(args: &[&str], cwd: Option<&Path>, remote: bool) -> Result<String> {
-    let mut cmd = git_command(args);
+/// Under a source policy, make sure git won't follow HTTP redirects (or
+/// dumb-HTTP `http-alternates`, which git gates on the same setting) for `url`.
+///
+/// The generic `-c http.followRedirects=false` from [`git_command`] loses to a
+/// URL-scoped `http.<url>.followRedirects` in the user's git config, because
+/// git applies the most specific URL match. So pin the key for this exact URL
+/// (no config entry can match it more specifically, and command-line config
+/// wins ties), then ask git for the value it will actually use and refuse
+/// unless it is `false` — that also covers a URL `-c` can't carry (one with
+/// `=`, which ends a `-c` key). Returns the extra `-c` arguments to pass.
+fn redirect_pin(url: &str, cwd: Option<&Path>) -> Result<Vec<String>> {
+    let http = url.split_once("://").is_some_and(|(scheme, _)| {
+        matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https")
+    });
+    if !http || !crate::policy::restricts() {
+        return Ok(Vec::new());
+    }
+    let mut pin = Vec::new();
+    if !url.contains('=') {
+        pin.push("-c".to_string());
+        pin.push(format!("http.{url}.followRedirects=false"));
+    }
+    let mut args: Vec<&str> = pin.iter().map(String::as_str).collect();
+    args.extend([
+        "config",
+        "--bool",
+        "--get-urlmatch",
+        "http.followRedirects",
+        url,
+    ]);
+    let mut cmd = git_command(&args);
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    let out = cmd.output().context("failed to spawn `git config`")?;
+    if !out.status.success() || String::from_utf8_lossy(&out.stdout).trim() != "false" {
+        bail!(
+            "refusing to contact {url}: a source policy is in force, but git config enables \
+             `http.followRedirects` for this URL and spm can't override it; remove that setting \
+             (see `git config --get-urlmatch http.followRedirects {url}`)"
+        );
+    }
+    Ok(pin)
+}
+
+fn run_git(pre: &[&str], args: &[&str], cwd: Option<&Path>, remote: bool) -> Result<String> {
+    let full: Vec<&str> = pre.iter().chain(args).copied().collect();
+    let mut cmd = git_command(&full);
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
@@ -280,11 +335,20 @@ fn is_connectivity_failure(err: &anyhow::Error) -> bool {
 /// or auth failure — never after a ref/path error — and always says so on
 /// stderr. Only the URL handed to git changes: callers keep recording the URL
 /// the user supplied.
+///
+/// Every URL actually handed to git — the original and any protocol rewrite —
+/// first passes the source policy ([`crate::policy::gate`]), so no remote
+/// operation can reach a denied source, whatever the caller.
 fn with_transport<T>(
     transport: Transport,
     url: &str,
     mut op: impl FnMut(&str) -> Result<T>,
 ) -> Result<T> {
+    let mut op = |u: &str| {
+        crate::policy::gate(u)?;
+        op(u)
+    };
+    crate::policy::gate(url)?;
     let first = transport
         .force
         .and_then(|p| rewrite(url, p))
@@ -352,7 +416,7 @@ pub fn ls_remote(url: &str, refspecs: &[&str]) -> Result<String> {
 fn ls_remote_once(url: &str, refspecs: &[&str]) -> Result<String> {
     let mut args = vec!["ls-remote", url];
     args.extend_from_slice(refspecs);
-    let out = git_remote(&args, None)?;
+    let out = git_remote(url, &args, None)?;
     if out.is_empty() {
         bail!("ref `{}` not found in {url}", refspecs.join(" "));
     }
@@ -387,7 +451,7 @@ pub fn remote_refs(url: &str, refspecs: &[&str]) -> Result<BTreeMap<String, Stri
     with_transport(transport(), url, |u| {
         let mut args = vec!["ls-remote", u];
         args.extend_from_slice(refspecs);
-        Ok(parse_ref_shas(&git_remote(&args, None)?))
+        Ok(parse_ref_shas(&git_remote(u, &args, None)?))
     })
 }
 
@@ -424,7 +488,7 @@ pub fn default_branch(url: &str) -> Result<String> {
 }
 
 fn default_branch_once(url: &str) -> Result<String> {
-    git_remote(&["ls-remote", "--symref", url, "HEAD"], None)
+    git_remote(url, &["ls-remote", "--symref", url, "HEAD"], None)
 }
 
 /// Extract the branch name from the `ref: refs/heads/<name>\tHEAD` line that
@@ -466,12 +530,80 @@ fn fetch_commit_once(url: &str, sha: &str, dest: &Path) -> Result<()> {
         git(&["remote", "set-url", "origin", url], Some(dest))?;
     }
 
-    if git_remote(&["fetch", "--depth", "1", "origin", sha], Some(dest)).is_err() {
-        git_remote(&["fetch", "origin"], Some(dest)).with_context(|| format!("fetching {url}"))?;
+    if git_remote(url, &["fetch", "--depth", "1", "origin", sha], Some(dest)).is_err() {
+        git_remote(url, &["fetch", "origin"], Some(dest))
+            .with_context(|| format!("fetching {url}"))?;
     }
-    git(&["checkout", "--detach", sha], Some(dest))
-        .with_context(|| format!("checking out {sha} in {}", dest.display()))?;
+    let lockdown = filter_lockdown(dest)?;
+    let pre: Vec<&str> = lockdown.iter().map(String::as_str).collect();
+    run_git(&pre, &["checkout", "--detach", sha], Some(dest), false).with_context(|| {
+        let mut msg = format!("checking out {sha} in {}", dest.display());
+        if !lockdown.is_empty() {
+            msg.push_str(
+                " (a source policy is in force, so checkout filters such as Git LFS are \
+                 disabled: what they download can't be checked against the policy)",
+            );
+        }
+        msg
+    })?;
     Ok(())
+}
+
+/// Under a source policy, disable every checkout filter driver configured for
+/// `dest` (system, global, env and repository config alike).
+///
+/// The repository picks a filter through its own `.gitattributes`, and a smudge
+/// filter can fetch content from wherever it likes — Git LFS reads its endpoint
+/// from the repository's `.lfsconfig`, and its batch API hands out arbitrary
+/// download URLs — none of which spm can check. So each driver's `smudge` and
+/// `process` commands are replaced with one that fails, and the driver is
+/// marked `required`: a checkout that would run a filter fails instead of
+/// downloading, or of silently leaving unfiltered (e.g. LFS pointer) files.
+/// Returns the `-c` arguments to pass to `git checkout`.
+fn filter_lockdown(dest: &Path) -> Result<Vec<String>> {
+    if !crate::policy::restricts() {
+        return Ok(Vec::new());
+    }
+    let out = git_command(&[
+        "config",
+        "-z",
+        "--name-only",
+        "--get-regexp",
+        r"^filter\..*\.(smudge|process)$",
+    ])
+    .current_dir(dest)
+    .output()
+    .context("failed to spawn `git config`")?;
+    // Exit 1 means no key matched: no filter driver can run.
+    if !out.status.success() && out.status.code() != Some(1) {
+        bail!(
+            "listing checkout filters in {}: {}",
+            dest.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let names = String::from_utf8_lossy(&out.stdout).into_owned();
+    let drivers: std::collections::BTreeSet<&str> = names
+        .split('\0')
+        .filter_map(|key| key.strip_prefix("filter.")?.rsplit_once('.'))
+        .map(|(driver, _)| driver)
+        .collect();
+    let mut pin = Vec::new();
+    for driver in drivers {
+        // `=` would end the `-c` key early and leave the driver untouched.
+        if driver.contains('=') {
+            bail!(
+                "refusing to check out in {}: a source policy is in force, but checkout \
+                 filter `{driver}` can't be disabled",
+                dest.display()
+            );
+        }
+        for setting in ["smudge=false", "process=false", "required=true"] {
+            pin.push("-c".to_string());
+            pin.push(format!("filter.{driver}.{setting}"));
+        }
+    }
+    Ok(pin)
 }
 
 #[cfg(test)]
