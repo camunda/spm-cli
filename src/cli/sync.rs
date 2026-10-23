@@ -678,6 +678,10 @@ impl Plan {
         }
         if let Some(links) = &self.links {
             links.save(scope)?;
+        } else if Links::path(scope)?.exists() {
+            // Unchanged links still need their ignore rule, e.g. after
+            // `.gitignore` was restored or deleted.
+            Links::ensure_ignored(scope)?;
         }
         Ok(lock.skills.len() + lock.plugins.len())
     }
@@ -790,9 +794,9 @@ fn reject_link_overlaps(
         }
         patched.extend(v.patched_files(scope)?.into_iter().map(|p| (v.name(), p)));
     }
-    for (owner, p) in patched {
-        let id = identity(&resolve(&p, &mut Vec::new())?)?;
-        outputs.push((owner, p, id, true));
+    for (owner, p) in &patched {
+        let id = identity(&resolve(p, &mut Vec::new())?)?;
+        outputs.push((owner, p.clone(), id, true));
     }
     for (name, dir, display, active) in guarded {
         let src = identity(dir)?;
@@ -802,21 +806,31 @@ fn reject_link_overlaps(
             .iter()
             .map(|r| identity(r))
             .collect::<Result<Vec<_>>>()?;
-        let hit = outputs.iter().find(|(_, _, out, through)| {
-            out.starts_with(&src)
-                || (!through && (src.starts_with(out) || route.iter().any(|r| r.starts_with(out))))
-        });
-        let Some((owner, p, ..)) = hit else {
+        let hit = outputs
+            .iter()
+            .find(|(_, _, out, through)| {
+                out.starts_with(&src)
+                    || (!through
+                        && (src.starts_with(out) || route.iter().any(|r| r.starts_with(out))))
+            })
+            .map(|(owner, p, ..)| (*owner, p.as_path(), String::new()));
+        let hit = match hit {
+            Some(h) => Some(h),
+            None => hard_linked_into(dir, &patched)?.map(|(owner, p, alias)| {
+                (owner, p, format!(" (hard-linked as `{}`)", alias.display()))
+            }),
+        };
+        let Some((owner, p, how)) = hit else {
             continue;
         };
-        let owner = if *owner == "spm" {
+        let owner = if owner == "spm" {
             "spm".to_string()
         } else {
             format!("target `{owner}`")
         };
         let clash = format!(
-            "linked directory `{display}` for `{name}` overlaps `{}`, which {owner} writes or \
-             deletes",
+            "linked directory `{display}` for `{name}` overlaps `{}`{how}, which {owner} writes \
+             or deletes",
             p.display()
         );
         let g = if scope.is_global() { " -g" } else { "" };
@@ -834,6 +848,58 @@ fn reject_link_overlaps(
         );
     }
     Ok(())
+}
+
+/// A file spm writes in place (`files`: owner, path) that is a hard link to a
+/// file inside `dir`: writing it would modify the working copy too, though no
+/// path relation shows it. Only files with more than one link are looked for,
+/// so the tree is walked only when there is something to find. Windows has no
+/// stable std API for link counts or file ids, so this is Unix-only.
+#[cfg(unix)]
+fn hard_linked_into<'a>(
+    dir: &std::path::Path,
+    files: &'a [(&'a str, PathBuf)],
+) -> Result<Option<(&'a str, &'a std::path::Path, PathBuf)>> {
+    use std::os::unix::fs::MetadataExt;
+    let linked: Vec<(u64, u64, usize)> = files
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (_, f))| {
+            std::fs::metadata(f)
+                .ok()
+                .filter(|m| m.is_file() && m.nlink() > 1)
+                .map(|m| (m.dev(), m.ino(), i))
+        })
+        .collect();
+    if linked.is_empty() {
+        return Ok(None);
+    }
+    let mut dirs = vec![dir.to_path_buf()];
+    while let Some(d) = dirs.pop() {
+        for entry in std::fs::read_dir(&d).with_context(|| format!("reading {}", d.display()))? {
+            let entry = entry?;
+            // Not following symlinks: one pointing out of the tree is not in it.
+            let m = entry.metadata()?;
+            if m.is_dir() {
+                dirs.push(entry.path());
+            } else if let Some((.., i)) = linked
+                .iter()
+                .find(|(dev, ino, _)| *dev == m.dev() && *ino == m.ino())
+            {
+                let (owner, file) = &files[*i];
+                return Ok(Some((owner, file.as_path(), entry.path())));
+            }
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(not(unix))]
+fn hard_linked_into<'a>(
+    _dir: &std::path::Path,
+    _files: &'a [(&'a str, PathBuf)],
+) -> Result<Option<(&'a str, &'a std::path::Path, PathBuf)>> {
+    Ok(None)
 }
 
 /// The checks above judge the *effective* skill set, where a linked plugin's

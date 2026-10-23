@@ -9473,12 +9473,27 @@ fn links_file_is_gitignored() {
     let links = sb.project.join(".spm/links.json");
     let doc: serde_json::Value = serde_json::from_str(&read_path(&links)).unwrap();
     assert_eq!(doc, serde_json::json!({ "links": { "greet": "../dev" } }));
-    let ignored = Command::new("git")
-        .args(["check-ignore", "-q", ".spm/links.json"])
-        .current_dir(&sb.project)
-        .status()
-        .unwrap();
-    assert!(ignored.success(), "links file must be gitignored");
+    let ignored = || {
+        Command::new("git")
+            .args(["check-ignore", "-q", ".spm/links.json"])
+            .current_dir(&sb.project)
+            .status()
+            .unwrap()
+            .success()
+    };
+    assert!(ignored(), "links file must be gitignored");
+
+    // A sync that leaves the links file as is still restores its ignore rule.
+    let gitignore = sb.project.join(".gitignore");
+    for reset in [None, Some("node_modules/\n")] {
+        match reset {
+            None => std::fs::remove_file(&gitignore).unwrap(),
+            Some(text) => std::fs::write(&gitignore, text).unwrap(),
+        }
+        assert!(!ignored());
+        sb.ok(&["install"]);
+        assert!(ignored(), "{reset:?}: ignore rule not restored");
+    }
 }
 
 #[test]
@@ -10369,4 +10384,36 @@ fn link_rejects_a_path_routed_through_target_output() {
         assert!(read_path(&wc.join("SKILL.md")).contains("WIP"), "{target}");
         assert!(!sb.project.join(".spm/links.json").exists(), "{target}");
     }
+}
+
+/// A file spm writes in place that is a hard link into the working copy would
+/// modify it as well, though no path leads there — so it is rejected too.
+#[cfg(unix)]
+#[test]
+fn link_rejects_a_working_copy_hard_linked_to_a_file_spm_writes() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--name",
+        "greet",
+    ]);
+    let dev = local_skill_checkout(&sb, "dev", "LOCAL");
+    let alias = dev.join(".gitignore");
+    let _ = std::fs::remove_file(&alias);
+    std::fs::hard_link(sb.project.join(".gitignore"), &alias).unwrap();
+    let before = std::fs::read(&alias).unwrap();
+
+    let err = fails(&sb, &["link", "greet", "../dev"]);
+    assert!(err.contains("hard-linked"), "{err}");
+    assert!(err.contains("overlaps"), "{err}");
+    assert_eq!(
+        std::fs::read(&alias).unwrap(),
+        before,
+        "working copy modified"
+    );
+    assert!(!sb.project.join(".spm/links.json").exists());
 }

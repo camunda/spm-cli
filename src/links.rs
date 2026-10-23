@@ -95,15 +95,22 @@ impl Links {
                 _ => Ok(()),
             };
         }
-        if let Scope::Project { root } = scope {
-            gitignore::ensure(root, GITIGNORE_COMMENT, GITIGNORE_ENTRY)?;
-        }
+        Self::ensure_ignored(scope)?;
         if let Some(parent) = p.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
         let text = serde_json::to_string_pretty(self)?;
         std::fs::write(&p, text + "\n").with_context(|| format!("writing {}", p.display()))
+    }
+
+    /// Make sure the project's links file is gitignored (a no-op globally, or
+    /// when the rule is already there).
+    pub fn ensure_ignored(scope: &Scope) -> Result<()> {
+        match scope {
+            Scope::Project { root } => gitignore::ensure(root, GITIGNORE_COMMENT, GITIGNORE_ENTRY),
+            Scope::Global => Ok(()),
+        }
     }
 
     /// Every skill name materialized for a scope with this lock and these
