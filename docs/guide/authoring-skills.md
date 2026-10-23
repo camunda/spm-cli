@@ -55,9 +55,9 @@ edit. `spm unlink --all` drops every link in the scope.
 ## Paths
 
 In project scope a relative directory is stored exactly as you typed it and is
-resolved against the project root (the directory holding `ai.json`), so the
-link keeps working if you run spm from a subdirectory and stays portable if
-you move the projects together. With `-g` the path is stored absolute. Forward
+resolved against the project root (the directory holding `ai.json`, where
+project-scoped commands must be run), so the link stays portable if you move
+the projects together. With `-g` the path is stored absolute. Forward
 and back slashes both work on Windows (`spm link reviewer ..\my-skills\reviewer`).
 
 ## When things go stale
