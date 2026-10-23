@@ -303,7 +303,14 @@ pub fn record_path(scope: &Scope, cwd: &Path, dir: &str) -> Result<String> {
         return Ok(dir.to_string());
     }
     let abs = std::path::absolute(cwd.join(given)).with_context(|| format!("resolving `{dir}`"))?;
-    Ok(abs.to_string_lossy().into_owned())
+    // Never lossy: a replaced byte would record (and later materialize) a
+    // different directory.
+    abs.to_str().map(str::to_string).with_context(|| {
+        format!(
+            "path {} is not valid UTF-8, which links don't support",
+            abs.display()
+        )
+    })
 }
 
 #[cfg(test)]
@@ -410,6 +417,28 @@ mod tests {
         assert!(std::fs::symlink_metadata(&file).unwrap().is_symlink());
         assert_eq!(Links::load_from(&real).unwrap(), links);
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// An absolute path that isn't valid UTF-8 is rejected, not recorded lossily
+    /// (which would point the link at a different directory).
+    #[test]
+    fn record_path_rejects_non_utf8_absolute_paths() {
+        #[cfg(unix)]
+        let cwd = {
+            use std::os::unix::ffi::OsStrExt;
+            PathBuf::from(std::ffi::OsStr::from_bytes(b"/work/\xFE"))
+        };
+        #[cfg(windows)]
+        let cwd = {
+            use std::os::windows::ffi::OsStringExt;
+            let mut w: Vec<u16> = "C:\\work\\".encode_utf16().collect();
+            w.push(0xD800);
+            PathBuf::from(std::ffi::OsString::from_wide(&w))
+        };
+        let err = record_path(&Scope::Global, &cwd, "skill").unwrap_err();
+        assert!(err.to_string().contains("not valid UTF-8"), "{err}");
+        let project = Scope::Project { root: cwd.clone() };
+        assert_eq!(record_path(&project, &cwd, "skill").unwrap(), "skill");
     }
 
     /// Roots that only differ in bytes that aren't valid UTF-8 (which a lossy
