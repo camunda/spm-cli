@@ -1,5 +1,7 @@
 // Minimal GitHub REST client (pulls + labels) over fetch: just what the update
 // action needs, dependency-free.
+
+const PER_PAGE = 100;
 export class GitHub {
   constructor({ apiUrl, token, repository }) {
     if (!/^[^/\s]+\/[^/\s]+$/.test(repository ?? "")) {
@@ -32,13 +34,19 @@ export class GitHub {
     return text ? JSON.parse(text) : null;
   }
 
-  /// Pull requests from `branch` in this repository into `base`.
-  listPulls(branch, state, base) {
+  /// All pull requests from `branch` in this repository into `base`, every
+  /// page of them.
+  async listPulls(branch, state, base) {
     const head = encodeURIComponent(`${this.owner}:${branch}`);
-    return this.request(
-      "GET",
-      `/repos/${this.repository}/pulls?state=${state}&head=${head}&base=${encodeURIComponent(base)}&per_page=100`,
-    );
+    const all = [];
+    for (let page = 1; ; page++) {
+      const batch = await this.request(
+        "GET",
+        `/repos/${this.repository}/pulls?state=${state}&head=${head}&base=${encodeURIComponent(base)}&per_page=${PER_PAGE}&page=${page}`,
+      );
+      all.push(...batch);
+      if (batch.length < PER_PAGE) return all;
+    }
   }
 
   createPull(pull) {

@@ -85,7 +85,10 @@ followed (`spm scan --within`), as the install gate does.
 
 The action checks out a branch per update, so it stops with an error, without
 touching anything, if the repository has uncommitted changes to tracked files.
-Run it on a clean checkout (untracked files are fine).
+Run it on a clean checkout (untracked files are fine). The checked-out commit
+must also be on the base branch as pushed to origin (it may be behind it), since
+each update branch starts from it: a diverged or unpushed checkout would put
+unrelated commits in every pull request, so the action refuses it.
 
 ### Blocking scan findings
 
@@ -108,7 +111,7 @@ request.
 | --- | --- | --- |
 | `token` | `github.token` | Token for the GitHub API. See below. |
 | `working-directory` | `.` | Directory holding `ai.json`/`ai.lock`. |
-| `base` | the checked-out branch | Branch the pull requests target. Required when the checkout is a detached HEAD. |
+| `base` | the checked-out branch | Branch the pull requests target. Required when the checkout is a detached HEAD. The checkout must be a commit of this branch on origin. |
 | `labels` | `dependencies` | Labels added to every update PR (comma- or newline-separated). |
 | `blocked-label` | `spm-scan-blocked` | Label for PRs with blocking findings; empty to disable. |
 | `dry-run` | `false` | Print the pull requests instead of pushing or calling the API. |

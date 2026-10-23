@@ -248,6 +248,35 @@ test("a declined (closed, unmerged) update is not re-proposed until upstream mov
   assert.match(sb.pull(2).body, new RegExp(newer));
 });
 
+test("a declined PR is found past the first page of the branch's closed PRs", async (t) => {
+  const sb = await sandbox(t);
+  const up = sb.upstream("alpha", { tag: null });
+  sb.spm("add", up.url, "--branch", "main");
+  sb.publish();
+  writeFiles(up.repo, { "a.md": "1\n" });
+  commitAll(up.repo, "one");
+  const [first] = await sb.update();
+  const declined = sb.pull(first.number);
+  declined.state = "closed";
+  // 120 older closed PRs of the same branch come first, pushing the declined
+  // one onto page two.
+  const older = Array.from({ length: 120 }, (_, i) => ({
+    ...declined,
+    number: 1000 + i,
+    body: "an older update",
+    labels: [],
+  }));
+  sb.gh.state.pulls.unshift(...older);
+  sb.gh.state.requests.length = 0;
+
+  const [again] = await sb.update();
+  assert.deepEqual([again.result, again.number], ["declined", first.number]);
+  const pages = sb.gh.state.requests
+    .filter((r) => r.method === "GET" && /state=closed/.test(r.query))
+    .map((r) => new URLSearchParams(r.query).get("page"));
+  assert.deepEqual(pages, ["1", "2"]);
+});
+
 test("a merged PR with the same commit does not count as declined", async (t) => {
   const sb = await sandbox(t);
   const up = sb.upstream("alpha", { tag: null });
@@ -465,6 +494,53 @@ test("updates of a maintenance branch get their own branch and PR against that b
   assert.notEqual(fresh.number, onMain.number);
   assert.equal(sb.pull(fresh.number).base, "main");
   assert.equal(JSON.parse(sb.remoteFile(fresh.branch, "ai.lock")).skills.alpha.commit, head);
+});
+
+test("a checkout that is not a commit of the base on origin is rejected before anything runs", async (t) => {
+  const sb = await sandbox(t);
+  const up = sb.upstream("alpha", { tag: null });
+  sb.spm("add", up.url, "--branch", "main");
+  sb.publish();
+  // `release/1.x` diverges from main.
+  git(sb.work, "checkout", "-q", "-b", "release/1.x");
+  writeFiles(sb.work, { "RELEASE.txt": "1.x only\n" });
+  git(sb.work, "add", "-A");
+  git(sb.work, "commit", "-qm", "release only");
+  git(sb.work, "push", "-q", "origin", "HEAD:refs/heads/release/1.x");
+  git(sb.work, "checkout", "-q", "main");
+  writeFiles(sb.work, { "MAIN.txt": "main only\n" });
+  sb.publish("main only");
+  writeFiles(up.repo, { "a.md": "1\n" });
+  commitAll(up.repo, "one");
+
+  const rejected = /is not a commit of `release\/1\.x` on origin/;
+  // main checked out, PRs aimed at the diverged release branch.
+  await assert.rejects(sb.update({ base: "release/1.x" }), rejected);
+  // The release branch checked out with a local commit origin doesn't have.
+  git(sb.work, "checkout", "-q", "release/1.x");
+  writeFiles(sb.work, { "LOCAL.txt": "unpushed\n" });
+  git(sb.work, "add", "-A");
+  git(sb.work, "commit", "-qm", "unpushed");
+  await assert.rejects(sb.update(), rejected);
+  // A base origin doesn't have at all.
+  await assert.rejects(sb.update({ base: "nope" }), /could not fetch the base branch `nope` from origin/);
+  assert.deepEqual(sb.gh.state.requests, []);
+  assert.equal(sb.remoteSha(sb.branch("alpha", "release/1.x")), null);
+  assert.equal(sb.remoteSha(sb.branch("alpha")), null);
+
+  // HEAD behind a base that moved on since the checkout is fine: the PR only
+  // carries the update.
+  git(sb.work, "checkout", "-q", "main");
+  const ahead = join(sb.dir, "other-clone");
+  run("git", ["clone", "-q", sb.origin, ahead]);
+  writeFiles(ahead, { "LATER.txt": "pushed later\n" });
+  git(ahead, "add", "-A");
+  git(ahead, "commit", "-qm", "later");
+  git(ahead, "push", "-q", "origin", "HEAD:refs/heads/main");
+  const [r] = await sb.update();
+  assert.equal(r.result, "created");
+  const onlyUpdate = run("git", ["--git-dir", sb.origin, "diff", "--name-only", `main...${r.branch}`]).stdout.trim();
+  assert.equal(onlyUpdate, "ai.lock");
 });
 
 test("dry-run commits locally but pushes nothing and needs no token", async (t) => {

@@ -163,13 +163,13 @@ export async function fakeGitHub(t, { repository = "acme/project", token = "test
       const head = url.searchParams.get("head");
       const st = url.searchParams.get("state");
       const base = url.searchParams.get("base");
-      return send(
-        res,
-        200,
-        state.pulls
-          .filter((p) => `${owner}:${p.head}` === head && (st === "all" || p.state === st) && (!base || p.base === base))
-          .map(view),
+      // GitHub caps `per_page` at 100 and defaults to 30.
+      const perPage = Math.min(Number(url.searchParams.get("per_page") ?? 30), 100);
+      const page = Number(url.searchParams.get("page") ?? 1);
+      const matching = state.pulls.filter(
+        (p) => `${owner}:${p.head}` === head && (st === "all" || p.state === st) && (!base || p.base === base),
       );
+      return send(res, 200, matching.slice((page - 1) * perPage, page * perPage).map(view));
     }
     if (req.method === "POST" && path === "/pulls") {
       const pushed = spawnSync("git", ["ls-remote", "--exit-code", origin, `refs/heads/${body.head}`]).status === 0;

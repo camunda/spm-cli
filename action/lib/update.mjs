@@ -94,6 +94,19 @@ export async function run(env, { cwd = process.cwd() } = {}) {
   // The project's repository-relative directory (forward slashes, `.` for the
   // root) is part of each update's identity.
   const dir = out(["rev-parse", "--show-prefix"]).replace(/\/+$/, "") || ".";
+  // Update branches are built on HEAD and proposed against `base` on origin:
+  // HEAD must be a commit of that branch, or every PR would also carry the
+  // commits that only HEAD has (a diverged or unpushed checkout). HEAD being
+  // behind a base that moved since the checkout is fine.
+  const fetched = git(["fetch", "-q", "--no-tags", "origin", `+refs/heads/${base}:refs/spm-update/base`], { allowFail: true });
+  if (fetched.status !== 0) {
+    throw new Error(`could not fetch the base branch \`${base}\` from origin:\n${fetched.stderr.trim()}`);
+  }
+  if (git(["merge-base", "--is-ancestor", baseSha, "refs/spm-update/base"], { allowFail: true }).status !== 0) {
+    throw new Error(
+      `HEAD (${baseSha.slice(0, 8)}) is not a commit of \`${base}\` on origin, so update PRs against it would carry unrelated commits: check out \`${base}\` (or set \`base\` to the checked-out branch) and push any local commits first`,
+    );
+  }
   const github = dryRun
     ? null
     : new GitHub({ apiUrl: env.GITHUB_API_URL, token, repository: env.GITHUB_REPOSITORY });
