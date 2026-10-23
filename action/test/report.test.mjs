@@ -136,6 +136,24 @@ test("diffLocks reports added, removed and re-pinned entries of both kinds", () 
   assert.deepEqual(diffLocks(null, { skills: {} }), []);
 });
 
+test("diffLocks reports an entry that changed in any field, not only its commit", () => {
+  const entry = { git: "file:///r", reference: "tag:v1", commit: SHA_A, path: "a", store: "r@a", bundled_skills: ["x"] };
+  for (const [field, value] of [
+    ["path", "b"],
+    ["git", "file:///other"],
+    ["store", "other@a"],
+    ["bundled_skills", ["x", "y"]],
+  ]) {
+    const changes = diffLocks({ plugins: { p: entry } }, { plugins: { p: { ...entry, [field]: value } } });
+    assert.deepEqual(changes.map((c) => [c.kind, c.name, c.to[field]]), [["plugin", "p", value]], field);
+  }
+  const { path, ...noPath } = entry;
+  assert.equal(diffLocks({ skills: { s: entry } }, { skills: { s: noPath } }).length, 1, "a dropped field");
+  // Field order is not a change.
+  const reordered = Object.fromEntries(Object.entries(entry).reverse());
+  assert.deepEqual(diffLocks({ skills: { s: entry } }, { skills: { s: reordered } }), []);
+});
+
 test("the PR marker round-trips and ignores foreign or broken markers", () => {
   const id = { name: "my skill", dir: "tools/ai", base: "release/1.x" };
   const parsed = parseMarker(`text\n${marker(id, SHA_A)}\n`);

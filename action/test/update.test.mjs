@@ -448,6 +448,36 @@ test("a dependency whose path is a symlink inside its repository scans clean thr
   assert.match(pr.body, /### Content scan\n\nNo findings\./);
 });
 
+test("another entry relocated by the sync (path only) is listed and scanned", async (t) => {
+  const sb = await sandbox(t);
+  const up = sb.upstream("alpha", { tag: null });
+  const repo = join(sb.dir, "upstream", "multi");
+  const url = makeRepo(repo, { "clean/SKILL.md": skillMd("beta"), "bad/SKILL.md": skillMd("beta", MALICIOUS) });
+  git(repo, "tag", "v1.0.0");
+  sb.spm("add", up.url, "--branch", "main");
+  sb.spm("add", url, "--tag", "v1.0.0", "--path", "clean", "--name", "beta");
+  // A hand edit points beta at another directory of the same commit, without
+  // re-locking: only the next sync records the new path.
+  const manifestPath = join(sb.project, "ai.json");
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  manifest.skills.beta.path = "bad";
+  writeFiles(sb.project, { "ai.json": `${JSON.stringify(manifest, null, 2)}\n` });
+  sb.publish();
+  writeFiles(up.repo, { "a.md": "1\n" });
+  commitAll(up.repo, "one");
+
+  const [r] = await sb.update();
+  assert.equal(r.name, "alpha");
+  assert.equal(r.result, "created");
+  const lock = JSON.parse(sb.remoteFile(r.branch, "ai.lock"));
+  assert.equal(lock.skills.beta.path, "bad", "the sync relocated beta");
+  assert.ok(r.blocking > 0, "the relocated content was scanned");
+  const pr = sb.pull(r.number);
+  assert.deepEqual(pr.labels, ["dependencies", "spm-scan-blocked"]);
+  assert.match(pr.body, /### Other lock changes[\s\S]*`beta`[\s\S]*path `clean`[\s\S]*path `bad`/);
+  assert.match(pr.body, /`beta\/SKILL\.md:\d+`/);
+});
+
 test("uncommitted tracked changes anywhere in the repository stop the action before any checkout", async (t) => {
   const sb = await sandbox(t, { subdir: "tools/ai" });
   const up = sb.upstream("alpha", { tag: null });

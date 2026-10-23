@@ -102,8 +102,21 @@ export function shortVersion(entry) {
   return entry.commit.slice(0, 8);
 }
 
-/// Lock entries that differ between two ai.lock documents (added, removed or
-/// re-pinned), skills and plugins alike.
+/// JSON with object keys sorted, so equal entries compare equal whatever
+/// order their fields were written in.
+function canonical(value) {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${canonical(value[k])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
+
+/// Lock entries that differ in any field between two ai.lock documents
+/// (added, removed, re-pinned or relocated), skills and plugins alike.
 export function diffLocks(before, after) {
   const changes = [];
   for (const [map, kind] of [
@@ -115,13 +128,9 @@ export function diffLocks(before, after) {
     for (const name of [...new Set([...Object.keys(a), ...Object.keys(b)])].sort()) {
       const from = a[name] ?? null;
       const to = b[name] ?? null;
-      const same =
-        from &&
-        to &&
-        from.commit === to.commit &&
-        from.reference === to.reference &&
-        (from.resolved_tag ?? null) === (to.resolved_tag ?? null);
-      if (!same) changes.push({ name, kind, from, to });
+      // Any difference counts (source, path, store, bundled skills, …), not
+      // just the commit: whatever the sync re-pinned must be shown and scanned.
+      if (!from || !to || canonical(from) !== canonical(to)) changes.push({ name, kind, from, to });
     }
   }
   return changes;
@@ -227,7 +236,8 @@ export function renderBody({ name, kind, dir = ".", base, git, path, from, to, c
   if (others.length > 0) {
     lines.push("", "### Other lock changes", "", "| Dependency | From | To |", "| --- | --- | --- |");
     for (const c of others) {
-      const side = (e) => (e ? `${code(describeSelector(e))} ${code(e.commit.slice(0, 8))}` : "_(none)_");
+      const side = (e) =>
+        e ? `${code(describeSelector(e))} ${code(e.commit.slice(0, 8))}${e.path ? ` path ${code(e.path)}` : ""}` : "_(none)_";
       lines.push(`| ${cell(c.kind)} ${code(c.name)} | ${side(c.from)} | ${side(c.to)} |`);
     }
   }
