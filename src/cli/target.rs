@@ -172,6 +172,49 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
         None,
     )?;
     for ((t, v), names) in removed.iter().zip(&removed_vendors).zip(&removed_owned) {
+        // A remaining target's record can lag behind a physical location it
+        // shares with `t` (e.g. an install that failed after `codex` wrote
+        // `.agents/skills/<name>/` but before `amp` was reached): an entry `t`
+        // wrote where a remaining target loads the same name is that target's
+        // output too, so keep it and hand its ownership over.
+        for x in &remaining {
+            let xv = vendor::for_target(x)?;
+            let mut shared = crate::owned::Owned::default();
+            for (name, is_plugin) in names
+                .skill_names()
+                .into_iter()
+                .map(|n| (n, false))
+                .chain(names.plugin_names().into_iter().map(|n| (n, true)))
+            {
+                let paths = |v: &dyn vendor::Vendor| {
+                    let one = std::slice::from_ref(&name);
+                    if is_plugin {
+                        v.plugin_paths(scope, one)
+                    } else {
+                        v.skill_paths(scope, one)
+                    }
+                };
+                let mut ours = Vec::new();
+                for p in paths(&**v)? {
+                    if std::fs::symlink_metadata(&p).is_ok() {
+                        ours.push(identity(&deletion_target(&p)?)?);
+                    }
+                }
+                for q in paths(xv.as_ref())? {
+                    let id = identity(&deletion_target(&q)?)?;
+                    if ours.contains(&id) {
+                        needed.push((x.as_str(), id, true));
+                        let set = if is_plugin {
+                            &mut shared.plugins
+                        } else {
+                            &mut shared.skills
+                        };
+                        set.insert(name.clone());
+                    }
+                }
+            }
+            owned.grant(x, &shared);
+        }
         let mut candidates = v.clean_paths(scope, &names.skill_names())?;
         candidates.extend(v.plugin_clean_paths(scope, &names.plugin_names())?);
         let mut deletable = Vec::new();

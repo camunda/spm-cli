@@ -12515,6 +12515,56 @@ fn target_remove_after_a_partially_failed_target_add_removes_what_it_wrote() {
     }
 }
 
+/// Targets sharing a physical skills dir (`codex` and `amp` both load
+/// `.agents/skills/`) share what one of them wrote there: when an install fails
+/// part-way — `codex` wrote `fresh`, `cursor` failed, `amp` was never reached —
+/// removing `codex` keeps `fresh` for `amp` and hands its ownership over, so a
+/// later `clean` still removes it.
+#[test]
+fn target_remove_after_a_partial_install_keeps_output_shared_with_a_remaining_target() {
+    let sb = Sandbox::new();
+    let base = make_repo(
+        &sb.root.join("base"),
+        &[("SKILL.md", "---\nname: base\n---\nBase.\n")],
+    );
+    let fresh = make_repo(
+        &sb.root.join("fresh"),
+        &[("SKILL.md", "---\nname: fresh\n---\nFresh.\n")],
+    );
+    sb.ok(&["init", "--target", "codex,cursor,amp"]);
+    sb.ok(&["add", &base, "--branch", "main", "--name", "base"]);
+    sb.ok(&[
+        "add",
+        &fresh,
+        "--branch",
+        "main",
+        "--name",
+        "fresh",
+        "--lock-only",
+    ]);
+    let cursor = sb.project.join(".cursor/skills");
+    std::fs::write(cursor.join("fresh"), "in the way\n").unwrap();
+    let err = fails(&sb, &["install"]);
+    assert!(err.contains("clearing") && err.contains("fresh"), "{err}");
+    let shared = sb.project.join(".agents/skills");
+    assert!(shared.join("fresh/SKILL.md").exists(), "codex wrote fresh");
+
+    let out = sb.ok(&["target", "remove", "codex"]);
+    assert!(out.contains("still used by target `amp`"), "{out}");
+    for kept in ["base", "fresh"] {
+        assert!(
+            shared.join(kept).join("SKILL.md").exists(),
+            "amp keeps {kept}"
+        );
+    }
+
+    std::fs::remove_file(cursor.join("fresh")).unwrap();
+    sb.ok(&["clean"]);
+    for gone in ["base", "fresh"] {
+        assert!(!shared.join(gone).exists(), "{gone} cleaned");
+    }
+}
+
 /// Ownership is claimed name by name as the vendor reaches each entry: when
 /// removing an earlier entry fails (`a`, which can't be deleted), a later
 /// requested name the vendor never reached — the user's own `mine` — is not

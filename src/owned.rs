@@ -184,6 +184,17 @@ impl Ownership {
         }
     }
 
+    /// Add `owned` to what spm owns in `target` (e.g. output another target
+    /// wrote into a location `target` shares). `Legacy` already assumes every
+    /// target holds the lock's whole set.
+    pub fn grant(&mut self, target: &str, owned: &Owned) {
+        if let Self::Recorded(map) = self {
+            let entry = map.entry(target.to_string()).or_default();
+            entry.skills.extend(owned.skills.iter().cloned());
+            entry.plugins.extend(owned.plugins.iter().cloned());
+        }
+    }
+
     /// Persist a record. `Legacy` is not persisted: there is nothing exact to
     /// write down.
     pub fn save(&self, scope: &Scope) -> Result<()> {
@@ -259,6 +270,32 @@ mod tests {
             })
             .unwrap_err();
         format!("{err:#}")
+    }
+
+    #[test]
+    fn grant_extends_a_recorded_target_and_leaves_legacy_alone() {
+        let extra = Owned {
+            skills: set(&["fresh"]),
+            plugins: set(&["kit"]),
+        };
+        let mut recorded = Ownership::Recorded(BTreeMap::new());
+        recorded.grant("amp", &extra);
+        recorded.grant(
+            "amp",
+            &Owned {
+                skills: set(&["base"]),
+                plugins: BTreeSet::new(),
+            },
+        );
+        let amp = recorded.for_target("amp");
+        assert_eq!(amp.skills, set(&["base", "fresh"]));
+        assert_eq!(amp.plugins, set(&["kit"]));
+        assert_eq!(recorded.for_target("codex"), Owned::default());
+
+        let mut legacy = Ownership::Legacy(Owned::from_lock(&lock_with(&["a"])));
+        let before = legacy.clone();
+        legacy.grant("amp", &extra);
+        assert_eq!(legacy, before);
     }
 
     #[test]
