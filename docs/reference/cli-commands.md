@@ -216,8 +216,8 @@ spm install                               # re-run after further edits
   `ai.json`, they fail and ask you to run `spm install` first.
 - The directory may not overlap anything a target writes or deletes (e.g.
   Codex's `.agents/skills/<name>`, or the project root, which contains the
-  output), nor be reached by a file spm edits in place (Claude's settings,
-  `.gitignore`) through a symlink — that would wipe or modify your working copy,
+  output), nor be reached by a file spm edits in place (`ai.json`, `ai.lock`,
+  `.spm/links.json`, `.gitignore`, Claude's settings) through a symlink — that would wipe or modify your working copy,
   or copy the output into itself.
 - Linking a name that is not declared in `ai.json` is an error. If you later
   `spm remove` a linked dependency, the leftover link is ignored with a warning
@@ -228,7 +228,10 @@ spm install                               # re-run after further edits
 ### `spm unlink <name>` / `spm unlink --all`
 
 Drops a link (or, with `--all`, every link in the scope) and re-materializes
-the locked version from `ai.lock`. `ai.json` and `ai.lock` are untouched.
+the locked version from `ai.lock`. `ai.json` and `ai.lock` are untouched. The
+dropped working copy stays protected: if a target's output has come to overlap
+it (e.g. through a symlink), `unlink` refuses instead of risking deleting it —
+remove the overlap and retry.
 
 ### `spm install`
 

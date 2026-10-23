@@ -571,7 +571,31 @@ fn plan(
         .map(|p| p.name.clone())
         .chain(previously_managed_plugins.iter().cloned())
         .collect();
-    reject_link_overlaps(scope, &vendors, &linked, &output_skills, &output_plugins)?;
+    // Guard the working copy of every link — active ones, and any the links
+    // file on disk still records (one being dropped by `spm unlink`, re-pointed
+    // by `spm link`, or ignored as undeclared): it is still the user's data
+    // even when spm no longer copies from it. A recorded dir that is gone has
+    // nothing left to protect.
+    let mut guarded: Vec<(&str, std::path::PathBuf, &str, bool)> = linked
+        .iter()
+        .map(|(n, l)| (n.as_str(), l.dir.clone(), l.display.as_str(), true))
+        .collect();
+    let on_disk = Links::load(scope).unwrap_or_default();
+    for name in on_disk.links.keys() {
+        if let Ok(Some(l)) = on_disk.resolve(scope, name) {
+            if !guarded.iter().any(|(_, d, ..)| *d == l.dir) {
+                guarded.push((name, l.dir, on_disk.links[name].as_str(), false));
+            }
+        }
+    }
+    reject_link_overlaps(
+        scope,
+        &dir,
+        &vendors,
+        &guarded,
+        &output_skills,
+        &output_plugins,
+    )?;
     if locked {
         // Backstop for the whole defect class: whatever the specific checks above
         // missed (a hand-edited `bundled_skills`/`requested_by`/store key, ...),
@@ -687,29 +711,36 @@ fn resolve_links(
     Ok(out)
 }
 
-/// Reject a linked directory that overlaps any location a target writes or
+/// Reject a linked working copy that overlaps any location a target writes or
 /// deletes. A source inside the output (e.g. linking Codex's own
 /// `.agents/skills/<name>`) would be wiped before it is copied — losing
 /// uncommitted edits — and output inside the source (e.g. linking the project
-/// root) would be copied into itself. Files spm edits in place (a vendor's
-/// settings, the project `.gitignore`) are followed through symlinks, since
-/// writing them would modify whatever they point at. Compared by filesystem
-/// identity, so symlinks and spelling aliases (case on a case-insensitive
-/// filesystem) match.
+/// root) would be copied into itself. Files spm edits in place (`ai.json`,
+/// `ai.lock`, the links file, the project `.gitignore`, a vendor's settings)
+/// are followed through symlinks, since writing them would modify whatever they
+/// point at. Compared by filesystem identity, so symlinks and spelling aliases
+/// (case on a case-insensitive filesystem) match.
+///
+/// `guarded` lists `(name, canonical dir, dir as recorded, still linked?)`.
 fn reject_link_overlaps(
     scope: &Scope,
+    manifest_dir: &std::path::Path,
     vendors: &[Box<dyn Vendor>],
-    linked: &BTreeMap<String, Linked>,
+    guarded: &[(&str, PathBuf, &str, bool)],
     skills: &[String],
     plugins: &[String],
 ) -> Result<()> {
     use crate::pathid::{deletion_target, identity, resolve};
-    if linked.is_empty() {
+    if guarded.is_empty() {
         return Ok(());
     }
-    // (target, path as spelled, physical identity, written through?)
+    // (owner, path as spelled, physical identity, written through?)
     let mut outputs = Vec::new();
-    let mut patched: Vec<(&str, PathBuf)> = Vec::new();
+    let mut patched: Vec<(&str, PathBuf)> = vec![
+        ("spm", Manifest::path_in(manifest_dir)),
+        ("spm", Lockfile::path_in(manifest_dir)),
+        ("spm", Links::path(scope)?),
+    ];
     if let Scope::Project { root } = scope {
         patched.push(("spm", root.join(".gitignore")));
     }
@@ -724,31 +755,41 @@ fn reject_link_overlaps(
         }
         patched.extend(v.patched_files(scope)?.into_iter().map(|p| (v.name(), p)));
     }
-    for (target, p) in patched {
+    for (owner, p) in patched {
         let id = identity(&resolve(&p, &mut Vec::new())?)?;
-        outputs.push((target, p, id, true));
+        outputs.push((owner, p, id, true));
     }
-    for (name, l) in linked {
-        let src = identity(&l.dir)?;
+    for (name, dir, display, active) in guarded {
+        let src = identity(dir)?;
         let hit = outputs.iter().find(|(_, _, out, through)| {
             out.starts_with(&src) || (!through && src.starts_with(out))
         });
-        if let Some((target, p, ..)) = hit {
-            let g = if scope.is_global() { " -g" } else { "" };
-            let owner = if *target == "spm" {
-                "spm".to_string()
-            } else {
-                format!("target `{target}`")
-            };
-            bail!(
-                "linked directory `{}` for `{name}` overlaps `{}`, which {owner} writes or \
-                 deletes — link a working copy outside spm's output with \
-                 `spm link {name} <dir>{g}`, or drop it with `{}`",
-                l.display,
-                p.display(),
-                unlink_command(scope, name)
-            );
-        }
+        let Some((owner, p, ..)) = hit else {
+            continue;
+        };
+        let owner = if *owner == "spm" {
+            "spm".to_string()
+        } else {
+            format!("target `{owner}`")
+        };
+        let clash = format!(
+            "linked directory `{display}` for `{name}` overlaps `{}`, which {owner} writes or \
+             deletes",
+            p.display()
+        );
+        let g = if scope.is_global() { " -g" } else { "" };
+        let relink = if *active {
+            format!(
+                "link `{name}` to a directory outside spm's output \
+                 (`spm link {name} <dir>{g}`), or "
+            )
+        } else {
+            String::new()
+        };
+        bail!(
+            "{clash}; refusing to sync, as that could modify or delete the working copy — \
+             {relink}remove whatever makes them overlap (e.g. a symlink) and retry"
+        );
     }
     Ok(())
 }

@@ -10065,19 +10065,34 @@ fn link_rejects_dirs_reached_by_files_spm_writes_through() {
         "greet",
     ]);
     let dev = local_skill_checkout(&sb, "dev", "LOCAL");
-    for rel in [".claude/settings.local.json", ".gitignore"] {
+    for rel in [
+        ".claude/settings.local.json",
+        ".gitignore",
+        ".spm/links.json",
+        "ai.json",
+        "ai.lock",
+    ] {
         let real = sb.project.join(rel);
         let inside = dev.join("redirected");
-        std::fs::rename(&real, &inside).unwrap();
+        let existed = real.exists();
+        if existed {
+            std::fs::rename(&real, &inside).unwrap();
+        } else {
+            std::fs::write(&inside, "{\"links\":{}}\n").unwrap();
+        }
         symlink(&inside, &real);
         let before = std::fs::read(&inside).unwrap();
         let err = fails(&sb, &["link", "greet", "../dev"]);
         assert!(err.contains("overlaps"), "{rel}: {err}");
         assert!(err.contains(rel), "{rel}: {err}");
         assert_eq!(std::fs::read(&inside).unwrap(), before, "{rel} written");
-        assert!(!sb.project.join(".spm/links.json").exists());
         std::fs::remove_file(&real).unwrap();
-        std::fs::rename(&inside, &real).unwrap();
+        if existed {
+            std::fs::rename(&inside, &real).unwrap();
+        } else {
+            std::fs::remove_file(&inside).unwrap();
+        }
+        assert!(!sb.project.join(".spm/links.json").exists());
     }
     sb.ok(&["link", "greet", "../dev"]);
 }
@@ -10161,4 +10176,42 @@ fn collisions_use_a_global_linked_plugins_effective_bundle() {
 #[test]
 fn collisions_use_a_project_linked_plugins_effective_bundle() {
     assert_linked_plugin_collisions(false);
+}
+
+/// Unlinking keeps protecting the working copy it drops: if the output came to
+/// overlap it (here `.agents/skills` symlinked onto its parent), `unlink`
+/// refuses rather than letting the vendor wipe it while restoring the locked
+/// content, and succeeds once the overlap is gone.
+#[cfg(unix)]
+#[test]
+fn unlink_still_protects_the_dropped_working_copy() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--name",
+        "greet",
+    ]);
+    let wc = sb.root.join("wc/spm-managed-skills");
+    std::fs::create_dir_all(&wc).unwrap();
+    std::fs::write(wc.join("SKILL.md"), "---\nname: greet\n---\nWIP\n").unwrap();
+    sb.ok(&["link", "greet", "../wc/spm-managed-skills"]);
+
+    let skills = sb.project.join(".agents/skills");
+    std::fs::remove_dir_all(&skills).unwrap();
+    symlink(sb.root.join("wc"), &skills);
+    assert!(fails(&sb, &["install"]).contains("overlaps"));
+    let err = fails(&sb, &["unlink", "greet"]);
+    assert!(err.contains("overlaps"), "{err}");
+    assert!(err.contains("refusing to sync"), "{err}");
+    assert!(read_path(&wc.join("SKILL.md")).contains("WIP"), "wiped");
+    assert!(sb.read(".spm/links.json").contains("greet"), "link dropped");
+
+    std::fs::remove_file(&skills).unwrap();
+    sb.ok(&["unlink", "greet"]);
+    assert!(read_path(&wc.join("SKILL.md")).contains("WIP"));
+    assert!(read_path(&skills.join("spm-managed-skills/greet/SKILL.md")).contains("Greet warmly."));
 }
