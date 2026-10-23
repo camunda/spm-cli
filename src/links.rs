@@ -21,8 +21,10 @@ use std::path::{Path, PathBuf};
 const FILE: &str = "links.json";
 /// `$SPM_HOME` subdirectory holding one links file per project.
 const PROJECT_DIR: &str = "links";
-/// `$SPM_HOME` file locked by [`StateLock`].
+/// `$SPM_HOME` file locked machine-wide by [`StateLock`].
 const LOCK_FILE: &str = "links.lock";
+/// Per-scope lock files, under `$SPM_HOME` (see [`StateLock`]).
+const LOCK_DIR: &str = "locks";
 
 /// The parsed links file.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,7 +112,10 @@ impl Links {
                 continue;
             }
             let mut links = Self::load_from(&file)?;
-            if links.links.is_empty() {
+            // A file with only ownership records (e.g. left by a plugin link
+            // that failed part-way) still needs protecting: it's the only
+            // record of what to clean up.
+            if links.links.is_empty() && links.managed.is_empty() {
                 continue;
             }
             let root = links.project.take().with_context(|| {
@@ -257,55 +262,42 @@ impl Links {
     }
 }
 
-/// A machine-wide lock over link state, held by a command from its overlap
-/// checks until its last write. Commands that may activate a link (`spm link`,
-/// `spm unlink`) take it exclusively; every other command that writes or
-/// deletes target output takes it shared. So a link can't be published into a
-/// project's output between that project's command checking for links and
-/// rebuilding the output — while several syncs still run side by side.
+/// The locks over link state and target ownership, held by a mutating
+/// command from before it reads link state until its last write or deletion:
+///
+/// - the scope's own lock, always exclusively: commands on the same project
+///   (or on the global scope) run one at a time, so none plans from ownership
+///   records (`managed`) another is about to replace;
+/// - the machine-wide lock: exclusively by commands that may activate a link
+///   (`spm link`, `spm unlink`), shared by every other one. So no link can be
+///   published into another project's output between that project's command
+///   checking for links and rewriting the output — while commands on
+///   different projects still run side by side.
+///
+/// Always taken in that order, so two commands can't deadlock. Lock files live
+/// in their own directory, never next to the links files (which may be
+/// redirected into a target's output).
 pub struct StateLock {
-    _file: std::fs::File,
+    _scope: std::fs::File,
+    _machine: std::fs::File,
     exclusive: bool,
 }
 
 impl StateLock {
-    /// Take the lock, waiting (and saying so on stderr) while another command
-    /// holds it in a conflicting mode. Take it before reading any link state.
-    pub fn acquire(exclusive: bool) -> Result<Self> {
+    /// Take both locks, waiting (and saying so on stderr) while another
+    /// command holds one in a conflicting mode. `exclusive` is for the
+    /// machine-wide lock. Take them before reading any link state.
+    pub fn acquire(scope: &Scope, exclusive: bool) -> Result<Self> {
         let home = paths::spm_home()?;
-        std::fs::create_dir_all(&home).with_context(|| format!("creating {}", home.display()))?;
-        let p = home.join(LOCK_FILE);
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&p)
-            .with_context(|| format!("opening {}", p.display()))?;
-        let attempt = if exclusive {
-            file.try_lock()
-        } else {
-            file.try_lock_shared()
-        };
-        match attempt {
-            Ok(()) => {}
-            Err(std::fs::TryLockError::WouldBlock) => {
-                eprintln!(
-                    "waiting for another spm command to finish (lock: {})...",
-                    p.display()
-                );
-                if exclusive {
-                    file.lock()
-                } else {
-                    file.lock_shared()
-                }
-                .with_context(|| format!("locking {}", p.display()))?;
-            }
-            Err(std::fs::TryLockError::Error(e)) => {
-                return Err(e).with_context(|| format!("locking {}", p.display()))
-            }
-        }
+        let stem = Links::path(scope)?
+            .file_stem()
+            .context("links file has no name")?
+            .to_owned();
+        let mut scope_lock = home.join(LOCK_DIR).join(stem);
+        scope_lock.set_extension("lock");
         Ok(Self {
-            _file: file,
+            _scope: lock(&scope_lock, true)?,
+            _machine: lock(&home.join(LOCK_FILE), exclusive)?,
             exclusive,
         })
     }
@@ -313,6 +305,43 @@ impl StateLock {
     pub fn is_exclusive(&self) -> bool {
         self.exclusive
     }
+}
+
+/// Open (creating it and its directory) and lock the file `p`.
+fn lock(p: &Path, exclusive: bool) -> Result<std::fs::File> {
+    if let Some(dir) = p.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(p)
+        .with_context(|| format!("opening {}", p.display()))?;
+    let attempt = if exclusive {
+        file.try_lock()
+    } else {
+        file.try_lock_shared()
+    };
+    match attempt {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            eprintln!(
+                "waiting for another spm command to finish (lock: {})...",
+                p.display()
+            );
+            if exclusive {
+                file.lock()
+            } else {
+                file.lock_shared()
+            }
+            .with_context(|| format!("locking {}", p.display()))?;
+        }
+        Err(std::fs::TryLockError::Error(e)) => {
+            return Err(e).with_context(|| format!("locking {}", p.display()))
+        }
+    }
+    Ok(file)
 }
 
 /// Atomically replace the destination with the staged file: links files are

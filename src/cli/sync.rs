@@ -25,7 +25,7 @@ pub(super) fn sync(
     only: Option<&str>,
     locked: bool,
 ) -> Result<usize> {
-    let state_lock = StateLock::acquire(false)?;
+    let state_lock = StateLock::acquire(scope, false)?;
     let dir = scope.manifest_dir()?;
     let manifest = Manifest::load(&dir, scope)?;
     let links = Links::load(scope)?;
@@ -126,7 +126,7 @@ pub(super) fn save_and_sync(scope: &Scope, manifest: &Manifest) -> Result<usize>
     // Validate exactly as the next `Manifest::load` will (schema, name
     // collisions across skills/plugins, ...), so an invalid edit is never saved.
     let manifest = Manifest::parse(&text, &path)?;
-    let state_lock = StateLock::acquire(false)?;
+    let state_lock = StateLock::acquire(scope, false)?;
     let plan = plan(
         scope,
         &manifest,

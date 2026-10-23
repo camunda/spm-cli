@@ -12,7 +12,7 @@ pub(super) fn clean(scope: &Scope) -> Result<()> {
     let manifest = Manifest::load(&dir, scope)?;
     // Held from reading link state until the deletions below are done (see
     // `StateLock`).
-    let _state_lock = crate::links::StateLock::acquire(false)?;
+    let _state_lock = crate::links::StateLock::acquire(scope, false)?;
     let lock = Lockfile::load_or_default(&dir)?;
     let (managed, managed_plugins) = managed_names(&lock, &Links::load(scope)?);
     let vendors = manifest

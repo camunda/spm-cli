@@ -110,7 +110,7 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
 
     // Held from reading link state until the deletions below are done (see
     // `StateLock`).
-    let _state_lock = crate::links::StateLock::acquire(false)?;
+    let _state_lock = crate::links::StateLock::acquire(scope, false)?;
     let lock = Lockfile::load_or_default(&dir)?;
     let (managed, managed_plugins) = managed_names(&lock, &crate::links::Links::load(scope)?);
     // Physical locations a remaining target still loads skills, plugins or

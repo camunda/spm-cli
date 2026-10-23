@@ -10739,10 +10739,9 @@ fn a_link_whose_parent_became_a_file_never_blocks_recovery() {
 
 /// The links file must survive the targets' cleanup: when it lies inside their
 /// output — its directory or the file itself symlinked there, or its route
-/// passing through a symlink there — every command (even once the linked
-/// source is gone)
-/// that would rebuild or delete that output refuses before any writes, rather
-/// than silently dropping the links.
+/// passing through a symlink there — every command that would rebuild or
+/// delete that output refuses before any writes (even once the linked source
+/// is gone), rather than silently dropping the links.
 #[test]
 fn commands_never_wipe_a_links_file_inside_target_output() {
     for layout in ["dir", "file", "hop"] {
@@ -10891,8 +10890,8 @@ fn links_from_other_scopes_are_guarded_too() {
     }
 }
 
-/// A running `spm <args>` that has reported it's waiting on the machine-wide
-/// links lock, and has therefore not yet checked or written anything.
+/// A running `spm <args>` that has reported it's waiting on a links lock (see
+/// `StateLock`), and has therefore not yet read link state nor written.
 struct BlockedOnStateLock {
     child: std::process::Child,
     stderr: std::io::BufReader<std::process::ChildStderr>,
@@ -10939,7 +10938,8 @@ impl BlockedOnStateLock {
 /// deleting it is atomic with respect to `link`/`unlink` in any other
 /// project or scope: they serialize on `$SPM_HOME/links.lock` (exclusive for
 /// `link`/`unlink`, shared for everything else), so no link can be published
-/// into an output between another command's check and its writes.
+/// into an output between another command's check and its writes. Commands on
+/// other projects that don't touch links still run alongside.
 #[test]
 fn link_state_changes_serialize_with_commands_that_rewrite_outputs() {
     let sb = Sandbox::new();
@@ -10970,13 +10970,20 @@ fn link_state_changes_serialize_with_commands_that_rewrite_outputs() {
     };
 
     // A reader (any other command) in flight: `link` waits for it, before
-    // recording or materializing anything. Other readers don't wait.
+    // recording or materializing anything. Another project's reader doesn't.
+    let other = sb.root.join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    let in_other = |args: &[&str]| {
+        let out = sb.command(args).current_dir(&other).output().unwrap();
+        assert!(out.status.success(), "{args:?}: {}", stderr_of(&out));
+    };
+    in_other(&["init", "--target", "copilot"]);
     let held = open_lock();
     held.lock_shared().unwrap();
     let link = BlockedOnStateLock::spawn(&sb, &["link", "greet", "../dev"]);
     assert_eq!(links_files(), 0);
     assert!(!sb.read(managed).contains("LOCAL"));
-    sb.ok(&["install"]);
+    in_other(&["install"]);
     drop(held);
     link.finish();
     assert!(sb.read(managed).contains("LOCAL"));
@@ -11143,5 +11150,122 @@ fn cleanup_waiting_on_the_links_lock_removes_skills_managed_meanwhile() {
         if args[0] == "target" {
             sb.ok(&["target", "add", "codex"]);
         }
+    }
+}
+
+/// Commands on the same project run one at a time, from before they read
+/// ownership records until their last write — so none plans from a `managed`
+/// list another is about to replace. Here a `link` of a plugin is in flight
+/// (holding its project, waiting on another project's reader) when its local
+/// tree starts bundling `b`; a second command queued on the same project must
+/// see what the `link` recorded: an install keeps `b` tracked, cleanup removes
+/// it, instead of leaving it untracked in the shared skills dir.
+#[test]
+fn commands_on_the_same_project_never_lose_ownership_records() {
+    for args in [
+        &["install"][..],
+        &["remove", "ds", "--plugin"],
+        &["clean"],
+        &["target", "remove", "codex"],
+    ] {
+        let sb = Sandbox::new();
+        sb.add_plugin();
+        sb.ok(&["init", "--target", "claude,codex"]);
+        write_manifest(
+            &sb,
+            &format!(
+                r#"{{"targets":["claude","codex"],"plugins":{{"ds":{{"git":"{}","branch":"main","path":"pkg"}}}}}}"#,
+                sb.skill_url()
+            ),
+        );
+        sb.ok(&["install"]);
+        local_skill_checkout(&sb, "dev-repo", "unused");
+        let dev = sb.root.join("dev-plugin");
+        std::fs::rename(sb.root.join("dev-repo/pkg"), &dev).unwrap();
+        sb.ok(&["link", "ds", "../dev-plugin"]);
+
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(sb.spm_home.join("links.lock"))
+            .unwrap();
+        held.lock_shared().unwrap();
+        let link = BlockedOnStateLock::spawn(&sb, &["link", "ds", "../dev-plugin"]);
+        let queued = BlockedOnStateLock::spawn(&sb, args);
+        let b = dev.join("skills/b");
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(b.join("SKILL.md"), "---\nname: b\n---\nB.\n").unwrap();
+        drop(held);
+        link.finish();
+        queued.finish();
+
+        let shared_b = sb.project.join(".agents/skills/b");
+        let links = std::fs::read_to_string(sb.project_links()).unwrap_or_default();
+        if args == ["install"] {
+            assert!(shared_b.join("SKILL.md").exists(), "{args:?}");
+            assert!(links.contains("\"b\""), "{args:?}: {links}");
+        } else {
+            assert!(!shared_b.exists(), "{args:?}: orphaned b");
+        }
+    }
+}
+
+/// A links file holding only ownership records (`managed`, no active link —
+/// e.g. left by a plugin link that failed part-way) is still the only record
+/// of skills to clean up, so it's protected machine-wide like any other: with
+/// `$SPM_HOME/links` redirected into this project's output, a command that
+/// would rebuild or delete that output refuses rather than lose another
+/// project's records.
+#[test]
+fn ownership_only_links_files_of_other_projects_are_guarded_too() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot,claude"]);
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--name",
+        "greet",
+    ]);
+    let other = sb.root.join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    let in_other = |args: &[&str]| {
+        let out = sb.command(args).current_dir(&other).output().unwrap();
+        assert!(out.status.success(), "{args:?}: {}", stderr_of(&out));
+    };
+    in_other(&["init", "--target", "claude"]);
+    in_other(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--name",
+        "greet",
+    ]);
+    local_skill_checkout(&sb, "dev", "LOCAL");
+    in_other(&["link", "greet", "../dev"]);
+    // The recovery state: no active link, a bundled skill still to clean up.
+    edit_project_links(&sb, |doc| {
+        doc["links"] = serde_json::json!({});
+        doc["managed"] = serde_json::json!(["extra"]);
+    });
+    let links_file = sb.project_links();
+    let links_dir = links_file.parent().unwrap().to_path_buf();
+    let state = sb.project.join(".agents/skills/spm-managed-skills/state");
+    std::fs::rename(&links_dir, &state).unwrap();
+    symlink(&state, &links_dir);
+    let before = read_path(&links_file);
+
+    for args in [
+        &["install"][..],
+        &["update"],
+        &["clean"],
+        &["target", "remove", "copilot"],
+    ] {
+        let err = fails(&sb, args);
+        assert!(err.contains("the links file"), "{args:?}: {err}");
+        assert_eq!(read_path(&links_file), before, "{args:?}");
     }
 }

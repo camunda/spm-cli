@@ -28,7 +28,7 @@ pub(super) fn link(scope: &Scope, cwd: &Path, name: &str, dir: &str) -> Result<(
     if !meta.is_dir() {
         bail!("`{dir}` is not a directory");
     }
-    let state_lock = StateLock::acquire(true)?;
+    let state_lock = StateLock::acquire(scope, true)?;
     let mut links = Links::load(scope)?;
     let recorded = record_path(scope, cwd, dir)?;
     links.links.insert(name.to_string(), recorded.clone());
@@ -45,7 +45,7 @@ pub(super) fn link(scope: &Scope, cwd: &Path, name: &str, dir: &str) -> Result<(
 /// `spm unlink <name>` / `spm unlink --all`: drop local overrides and
 /// re-materialize the locked versions.
 pub(super) fn unlink(scope: &Scope, name: Option<&str>, all: bool) -> Result<()> {
-    let state_lock = StateLock::acquire(true)?;
+    let state_lock = StateLock::acquire(scope, true)?;
     let mut links = Links::load(scope)?;
     let removed: Vec<String> = if all {
         std::mem::take(&mut links.links).into_keys().collect()
