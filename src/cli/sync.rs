@@ -1,3 +1,4 @@
+use crate::links::{Linked, Links};
 use crate::lockfile::{LockedSkill, Lockfile};
 use crate::manifest::{Manifest, SkillSpec};
 use crate::scope::Scope;
@@ -26,7 +27,18 @@ pub(super) fn sync(
 ) -> Result<usize> {
     let dir = scope.manifest_dir()?;
     let manifest = Manifest::load(&dir, scope)?;
-    plan(scope, &manifest, force_refresh, only, locked)?.apply(scope)
+    let links = Links::load(scope)?;
+    plan(scope, &manifest, links, force_refresh, only, locked)?.apply(scope)
+}
+
+/// Sync with an edited set of `spm link` overrides, persisting them only once
+/// the sync has been planned successfully (an unreadable or blocked linked
+/// directory leaves the links file untouched). `ai.json` and `ai.lock` are not
+/// affected by links: the lock still pins every dependency's declared source.
+pub(super) fn sync_with_links(scope: &Scope, links: Links) -> Result<usize> {
+    let dir = scope.manifest_dir()?;
+    let manifest = Manifest::load(&dir, scope)?;
+    plan(scope, &manifest, links, false, None, false)?.apply(scope)
 }
 
 /// Write an edited `manifest` to `ai.json` and [`sync`] it, without ever leaving
@@ -51,7 +63,7 @@ pub(super) fn save_and_sync(scope: &Scope, manifest: &Manifest) -> Result<usize>
     // Validate exactly as the next `Manifest::load` will (schema, name
     // collisions across skills/plugins, ...), so an invalid edit is never saved.
     let manifest = Manifest::parse(&text, &path)?;
-    let plan = plan(scope, &manifest, false, None, false)?;
+    let plan = plan(scope, &manifest, Links::load(scope)?, false, None, false)?;
     std::fs::write(&path, &text).with_context(|| format!("writing {}", path.display()))?;
     plan.apply(scope).map_err(|err| {
         anyhow!(
@@ -77,6 +89,9 @@ struct Plan {
     previously_managed: Vec<String>,
     previously_managed_plugins: Vec<String>,
     locked: bool,
+    /// The `spm link` overrides to persist after applying (with `managed`
+    /// refreshed), or `None` when the links file is already up to date.
+    links: Option<Links>,
 }
 
 /// Resolve `manifest` -> lock, populate the store, and run every check (source
@@ -85,6 +100,7 @@ struct Plan {
 fn plan(
     scope: &Scope,
     manifest: &Manifest,
+    mut links: Links,
     force_refresh: bool,
     only: Option<&str>,
     locked: bool,
@@ -126,6 +142,7 @@ fn plan(
         .iter()
         .map(|t| crate::vendor::for_target(t))
         .collect::<Result<Vec<_>>>()?;
+    let linked = resolve_links(scope, manifest, &links)?;
     if locked && !Lockfile::path_in(&dir).exists() {
         bail!(
             "--locked: {} not found\n{}",
@@ -149,6 +166,10 @@ fn plan(
     // `materialize`, so the previous set must include them too — otherwise
     // removing a plugin (or shrinking its bundled skill set) would orphan those
     // skill dirs in shared locations.
+    //
+    // Skills last materialized from a *linked* plugin's working tree are not in
+    // `ai.lock` (it records the locked commit's bundled skills), so the links
+    // file remembers them for the same purpose.
     let previously_managed: Vec<String> = prev
         .skills
         .keys()
@@ -158,6 +179,7 @@ fn plan(
                 .values()
                 .flat_map(|l| l.bundled_skills.iter().cloned()),
         )
+        .chain(links.managed.iter().cloned())
         .collect();
     let previously_managed_plugins: Vec<String> = prev.plugins.keys().cloned().collect();
 
@@ -250,6 +272,7 @@ fn plan(
         lock.skills.insert(name.clone(), locked);
     }
 
+    let mut reused_linked_plugins: BTreeSet<String> = BTreeSet::new();
     // Resolve full plugins the same way. A plugin's version reuse also depends
     // on the pinned commit being unchanged; its bundled-skill list is (re)filled
     // from the store checkout below, so we never carry a stale one forward.
@@ -271,7 +294,14 @@ fn plan(
                 "resolved",
             ),
         };
-        locked.bundled_skills.clear();
+        // A linked plugin is not fetched when its pin is reused, so its locked
+        // bundled-skill list is carried forward rather than re-enumerated from
+        // the (unfetched) checkout — keeping `ai.lock` unaffected by the link.
+        if how == "resolved" || !linked.contains_key(name) {
+            locked.bundled_skills.clear();
+        } else {
+            reused_linked_plugins.insert(name.clone());
+        }
         locked.also_satisfies.clear();
         let short = &locked.commit[..locked.commit.len().min(8)];
         let reference = locked.display_reference();
@@ -309,37 +339,74 @@ fn plan(
     if !manifest.plugins.is_empty() {
         println!("fetching plugins into store");
     }
+    let mut linked_plugin_skills: Vec<String> = Vec::new();
     for (name, locked) in &mut lock.plugins {
-        let ensured = store::ensure(locked).with_context(|| format!("fetching plugin `{name}`"))?;
-        println!(
-            "  {name:<width$}  {}",
-            if ensured.fetched { "fetched" } else { "cached" }
-        );
-        if !crate::plugin::looks_like_plugin(&ensured.path) {
+        let link = linked.get(name);
+        // A linked plugin only needs its locked checkout to record the commit's
+        // bundled skills in `ai.lock` when its pin was freshly resolved.
+        let ensured = if link.is_some() && reused_linked_plugins.contains(name) {
+            None
+        } else {
+            let ensured =
+                store::ensure(locked).with_context(|| format!("fetching plugin `{name}`"))?;
+            println!(
+                "  {name:<width$}  {}",
+                if ensured.fetched { "fetched" } else { "cached" }
+            );
+            Some(ensured)
+        };
+        let (path, root) = if let Some(l) = link {
+            println!("  {name:<width$}  linked → {}", l.display);
+            (l.dir.clone(), l.dir.clone())
+        } else if let Some(e) = &ensured {
+            (e.path.clone(), e.root.clone())
+        } else {
+            bail!("plugin `{name}` was neither linked nor fetched");
+        };
+        if !crate::plugin::looks_like_plugin(&path) {
+            let source = match link {
+                Some(l) => format!("linked → {}", l.display),
+                None => format!(
+                    "{} @ {}{}",
+                    locked.git,
+                    locked.display_reference(),
+                    locked
+                        .path
+                        .as_deref()
+                        .map(|p| format!(" under `{p}`"))
+                        .unwrap_or_default()
+                ),
+            };
             eprintln!(
-                "warning: plugin `{name}` ({} @ {}) has no `.claude-plugin/plugin.json`{} — \
-                 is it really a plugin? (only its bundled skills, if any, will be materialized)",
-                locked.git,
-                locked.display_reference(),
-                locked
-                    .path
-                    .as_deref()
-                    .map(|p| format!(" under `{p}`"))
-                    .unwrap_or_default()
+                "warning: plugin `{name}` ({source}) has no `.claude-plugin/plugin.json` — \
+                 is it really a plugin? (only its bundled skills, if any, will be materialized)"
             );
         }
-        let bundled = crate::plugin::plugin_skills(&ensured.path, &ensured.root)
+        let bundled = crate::plugin::plugin_skills(&path, &root)
             .with_context(|| format!("enumerating skills bundled in plugin `{name}`"))?;
-        locked.bundled_skills = bundled.iter().map(|s| s.name.clone()).collect();
+        match (link, ensured) {
+            (Some(_), Some(e)) => {
+                locked.bundled_skills = crate::plugin::plugin_skills(&e.path, &e.root)
+                    .with_context(|| format!("enumerating skills bundled in plugin `{name}`"))?
+                    .into_iter()
+                    .map(|s| s.name)
+                    .collect();
+            }
+            (Some(_), None) => {}
+            (None, _) => locked.bundled_skills = bundled.iter().map(|s| s.name.clone()).collect(),
+        }
+        if link.is_some() {
+            linked_plugin_skills.extend(bundled.iter().map(|s| s.name.clone()));
+        }
         // Scan the whole plugin tree (agents, scripts, hooks, bundled skills)
         // before any of it is materialized into an agent-discovered directory.
-        crate::scan::enforce(name, &ensured.path, &ensured.root)
+        crate::scan::enforce(name, &path, &root)
             .with_context(|| format!("scanning plugin `{name}`"))?;
         plugin_skills.extend(bundled);
         plugins.push(MaterializedPlugin {
             name: name.clone(),
-            path: ensured.path,
-            root: ensured.root,
+            path,
+            root,
         });
     }
 
@@ -368,6 +435,7 @@ fn plan(
             locked,
             width,
             policy: &policy,
+            links: &linked,
         },
     )?;
     let mut materialized: Vec<MaterializedSkill> = expansion.materialized;
@@ -470,6 +538,12 @@ fn plan(
             );
         }
     }
+    linked_plugin_skills.sort();
+    linked_plugin_skills.dedup();
+    links.managed = linked_plugin_skills;
+    // Only rewrite the links file when it changes (a `link`/`unlink`, or a
+    // linked plugin's bundled skills moving), never on a plain sync.
+    let links = (Links::load(scope).ok().as_ref() != Some(&links)).then_some(links);
     Ok(Plan {
         dir,
         targets: manifest.targets.clone(),
@@ -481,6 +555,7 @@ fn plan(
         previously_managed,
         previously_managed_plugins,
         locked,
+        links,
     })
 }
 
@@ -514,8 +589,44 @@ impl Plan {
         if !self.locked {
             lock.save(&self.dir)?;
         }
+        if let Some(links) = &self.links {
+            links.save(scope)?;
+        }
         Ok(lock.skills.len() + lock.plugins.len())
     }
+}
+
+/// Resolve every `spm link` override that names a declared skill or plugin to
+/// its directory. A link whose name is no longer declared is ignored with a
+/// warning (it stays in the links file until `spm unlink`); a declared one whose
+/// directory is gone is an error, so a sync never silently falls back to the
+/// locked version while the user believes a local override is active.
+fn resolve_links(
+    scope: &Scope,
+    manifest: &Manifest,
+    links: &Links,
+) -> Result<BTreeMap<String, Linked>> {
+    let mut out = BTreeMap::new();
+    for name in links.links.keys() {
+        if !manifest.skills.contains_key(name) && !manifest.plugins.contains_key(name) {
+            eprintln!(
+                "warning: ignoring link `{name}`: it is not declared in ai.json — run `{}` to \
+                 drop it",
+                unlink_command(scope, name)
+            );
+            continue;
+        }
+        if let Some(l) = links.resolve(scope, name)? {
+            out.insert(name.clone(), l);
+        }
+    }
+    Ok(out)
+}
+
+/// `spm unlink <name>`, spelled for the scope in use.
+pub(super) fn unlink_command(scope: &Scope, name: &str) -> String {
+    let g = if scope.is_global() { " -g" } else { "" };
+    format!("spm unlink {name}{g}")
 }
 
 /// The pin in `prev` if it can be reused for `spec` without re-resolving, else
@@ -586,7 +697,7 @@ fn locked_fix_hint(scope: &Scope) -> String {
 }
 
 /// `spm install`, spelled for the scope in use.
-fn install_command(scope: &Scope) -> &'static str {
+pub(super) fn install_command(scope: &Scope) -> &'static str {
     if matches!(scope, Scope::Global) {
         "spm install -g"
     } else {

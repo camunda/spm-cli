@@ -19,13 +19,14 @@ gitignored and never committed. Run `spm --help` or
 | `ai.json` | You (or `spm init`, `spm add`, `spm remove`, `spm target add`, `spm target remove`) | Yes |
 | `ai.lock` | spm, on every successful sync | Yes |
 | Materialized skills (for example `.spm/claude/`, `.agents/skills/spm-managed-skills/`) | spm | No, gitignored |
+| `.spm/links.json` (local `spm link` overrides) | `spm link`, `spm unlink` | No, gitignored |
 | Global store (`$SPM_HOME/store`, default `~/.spm/store`) | spm | No, a fetch cache shared by all projects |
 
 - Do not hand-edit `ai.lock`. Edit `ai.json` only for things the CLI cannot do,
   then run `spm install`.
 - Do not commit materialized skills. spm adds them to `.gitignore` for you.
 - By default commands work on the project in the current directory. `init`,
-  `add`, `remove`, `update`, `install`, `list`, `status`, `outdated`, `clean`,
+  `add`, `remove`, `update`, `install`, `link`, `unlink`, `list`, `status`, `outdated`, `clean`,
   `target add` and `target remove` accept `-g` or `--global` to switch to the
   user-global scope (see [Global scope](#global-scope)). `scan` works on the
   path it is given and `prune` always empties the global cache; neither accepts
@@ -48,6 +49,8 @@ gitignored and never committed. Run `spm --help` or
 | Check what is declared and pinned | `spm list --json` |
 | Check what is materialized in this checkout | `spm status --json` |
 | Drop a skill | `spm remove <name>` |
+| Try uncommitted edits to a declared skill/plugin in this project | `spm link <name> <dir>`, then `spm install` after each edit |
+| Go back to the locked version after `spm link` | `spm unlink <name>` (or `spm unlink --all`) |
 | Also use another AI tool | `spm target add <vendor>` |
 | Stop using an AI tool | `spm target remove <vendor>` |
 | Review a skill before installing it | `spm scan <path> --json` |
@@ -188,6 +191,37 @@ re-pinned child fresh), but a transitive child the root still requests by the
 **same** moving ref stays at its locked commit — the single-name update does
 **not** chase it to the branch/tag tip. Run a bare `spm update` to chase those
 too. See [Transitive dependencies](#transitive-dependencies).
+
+### `spm link`
+
+```bash
+spm link <name> <dir> [--protocol ssh|https] [--protocol-fallback] [-g]
+```
+
+Overrides an **already-declared** skill or plugin with a local directory (the
+skill dir holding `SKILL.md`, or the plugin root) and materializes its current
+content, uncommitted edits included, into every target. The override lives in
+the gitignored `.spm/links.json` (`$SPM_HOME/links.json` with `-g`, stored
+absolute); a relative `<dir>` is kept relative to the project root. `ai.json`
+and `ai.lock` are **not** modified, so never commit anything for a link. There
+is no file watching: run `spm install` after each edit. Linked content is
+copied (not symlinked), skips `.git`, may not symlink outside the directory,
+and still passes the [content scan](#content-scan). Linking an undeclared name
+is an error (`spm add` it first). If a linked directory disappears, syncs fail
+until you re-link or unlink it; a link left behind by `spm remove` is ignored
+with a warning. `--protocol`/`--protocol-fallback` behave as under
+[`spm add`](#spm-add). `spm list`/`spm status` show `linked → <dir>`.
+
+### `spm unlink`
+
+```bash
+spm unlink <name> [--protocol ssh|https] [--protocol-fallback] [-g]
+spm unlink --all [-g]
+```
+
+Drops the link (with `--all`, every link in the scope) and re-materializes
+the version pinned in `ai.lock`. Unlinking a name that is not linked is an
+error.
 
 ### `spm remove`
 
@@ -369,8 +403,9 @@ drift in a deduplicated entry's `alsoSatisfies` selectors), and
 `scan --json` still fails on a blocking finding (check `summary.blocking`). The
 document is printed before the failure, so read stdout even on a non-zero exit.
 Commits are full SHAs. `list` marks transitive skills with `"transitive": true`
-and `requestedBy`, and plugins carry `bundledSkills`; `status` reports
-cross-scope name clashes under `collisions`.
+and `requestedBy`, plugins carry `bundledSkills`, and a `spm link` override
+shows as `"linked": "<dir>"` (else `null`); `status` reports
+cross-scope name clashes under `collisions` and link overrides under `links`.
 
 ## Targets
 

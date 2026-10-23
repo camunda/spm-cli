@@ -12,6 +12,8 @@ spm target add [vendor ...] [-g]                   # add target vendor(s); no ar
 spm target remove <vendor ...> [-g]               # drop target vendor(s) + clean their output; alias: rm
 spm remove <name> [--plugin] [-g]                  # drop a skill (or a plugin with --plugin); alias: rm
 spm update [name] [-g]                             # re-resolve branches/tags to latest
+spm link <name> <dir> [-g]                         # develop a declared skill/plugin from a local dir (machine-local override)
+spm unlink <name>|--all [-g]                       # drop link override(s), restore the locked version
 spm install [-g] [--locked]                        # rebuild from ai.lock (after clone); alias: i; --locked fails if ai.lock is out of sync (CI)
 spm list [-g] [--json]                             # show skills + pinned commits; alias: ls
 spm status [-g] [--json]                           # check skills are materialized in this checkout
@@ -25,7 +27,7 @@ Four commands have short aliases that behave identically, including `-g`:
 `spm i` for `spm install`, `spm rm <name>` for `spm remove <name>`, `spm ls`
 for `spm list`, and `spm target rm` for `spm target remove`.
 
-`add`, `install`, `update`, `remove`, `target add` and `outdated` also accept `--protocol ssh|https` and
+`add`, `install`, `update`, `remove`, `link`, `unlink`, `target add` and `outdated` also accept `--protocol ssh|https` and
 `--protocol-fallback` (see [Repo URLs](#repo-urls-https-ssh)).
 
 `list`, `status`, `outdated` and `scan` accept `--json` to print a machine-readable document
@@ -33,8 +35,8 @@ instead of text (see [Machine-readable output](#machine-readable-output-json)).
 
 ## Scope: project (default) vs. global (`-g`)
 
-Scope-aware commands (`init`, `add`, `remove`, `update`, `install`, `list`,
-`status`, `outdated`, `clean`, `target add`, `target remove`) accept `-g` / `--global`;
+Scope-aware commands (`init`, `add`, `remove`, `update`, `install`, `link`,
+`unlink`, `list`, `status`, `outdated`, `clean`, `target add`, `target remove`) accept `-g` / `--global`;
 `spm prune` and `spm scan` don't (`prune` always wipes the shared global fetch cache and `scan`
 always operates on a path). Without `-g`, a scope-aware command operates on the
 **project** in the current directory. With it, it manages a **user-global** set
@@ -184,6 +186,43 @@ transitive child that root still requests by the **same** moving ref stays
 pinned. Refresh the whole graph — every transitive child — with a bare
 `spm update`. See [Transitive Skill Dependencies](/guide/transitive-dependencies).
 
+### `spm link <name> <dir>`
+
+Overrides the source of an **already-declared** skill or plugin with a local
+directory, so its current content — uncommitted edits included — is
+materialized into every target instead of the locked commit. Use it to iterate
+on a skill inside a real consuming project without committing and pushing each
+change. See [Authoring Skills](/guide/authoring-skills).
+
+```bash
+spm link reviewer ../my-skills/reviewer   # the skill dir (holding SKILL.md)
+spm link design-system ../ds/plugins/cds  # or a plugin root
+spm install                               # re-run after further edits
+```
+
+- The override is recorded in a machine-local, **gitignored** file —
+  `.spm/links.json` in the project (relative paths are kept relative to the
+  project root), or `$SPM_HOME/links.json` with `-g` (stored as an absolute
+  path). `ai.json` and `ai.lock` are **not modified**, so teammates and CI are
+  unaffected.
+- A linked entry is copied straight from the directory (skipping `.git`;
+  symlinks may not escape the directory) and still passes the
+  [content scan](/guide/how-it-works). It is not fetched into the store; with
+  `"resolveTransitive": true` its transitive dependencies still come from its
+  locked commit's nested `ai.json`.
+- Every sync (`install`, `update`, `add`, …) re-copies linked content; there is
+  no file watching.
+- Linking a name that is not declared in `ai.json` is an error. If you later
+  `spm remove` a linked dependency, the leftover link is ignored with a warning
+  until `spm unlink` drops it. If a linked directory disappears, syncs fail until
+  you re-link or unlink it.
+- `spm list` and `spm status` show active links (`linked → <dir>`).
+
+### `spm unlink <name>` / `spm unlink --all`
+
+Drops a link (or, with `--all`, every link in the scope) and re-materializes
+the locked version from `ai.lock`. `ai.json` and `ai.lock` are untouched.
+
 ### `spm install`
 
 Rebuilds the materialized skills from `ai.lock`. This is the command teammates
@@ -219,7 +258,8 @@ allowed, so it is not an offline mode. Works with `-g` too.
 
 ### `spm list`
 
-Shows declared skills and their pinned commits. `--json` prints them as a
+Shows declared skills and their pinned commits, marking any
+[`spm link`](#spm-link-name-dir) override as `linked → <dir>`. `--json` prints them as a
 [JSON document](#machine-readable-output-json) with full commit SHAs.
 
 ### `spm status`
@@ -227,6 +267,8 @@ Shows declared skills and their pinned commits. `--json` prints them as a
 Checks that declared skills are materialized in the current checkout. **Exits
 non-zero** when anything is missing or a Claude marketplace pointer is stale — so
 it works in scripts and git hooks. See [Worktrees & Fresh Clones](/guide/worktrees).
+Active [`spm link`](#spm-link-name-dir) overrides are listed up front and next to
+each linked entry (`linked → <dir>`).
 `--json` prints the report as a [JSON document](#machine-readable-output-json),
 still exiting non-zero when something is missing.
 
@@ -390,14 +432,15 @@ with `-g` for `list`, `status` and `outdated`). With it:
       "commit": "<40-hex sha>",             // null when ai.lock has no pin
       "installed": true,                    // pinned in ai.lock
       "transitive": false,
-      "requestedBy": []                     // direct requester(s) of a transitive skill
+      "requestedBy": [],                    // direct requester(s) of a transitive skill
+      "linked": null                        // `spm link` dir, when overridden locally
     }
   ],
   "plugins": [
     {
       "name": "design-system", "git": "…", "path": "plugins/cds",
       "selector": { "branch": "main" }, "resolvedTag": null, "commit": "<40-hex sha>",
-      "installed": true, "bundledSkills": ["composer"]
+      "installed": true, "bundledSkills": ["composer"], "linked": null
     }
   ]
 }
@@ -418,6 +461,9 @@ with `-g` for `list`, `status` and `outdated`). With it:
   "collisions": [                           // also locked in the other scope
     { "name": "reviewer", "otherScope": "global" }
   ],
+  "links": [                                // `spm link` overrides
+    { "name": "reviewer", "path": "../my-skills/reviewer", "declared": true }
+  ],                                        // declared: false ⇒ ignored, run `spm unlink`
   "targets": [
     {
       "target": "claude",

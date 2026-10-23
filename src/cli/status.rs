@@ -1,4 +1,5 @@
 use super::common::print_json;
+use crate::links::Links;
 use crate::lockfile::Lockfile;
 use crate::manifest::Manifest;
 use crate::paths;
@@ -28,6 +29,9 @@ struct StatusReport {
     /// Declared plugins with no `ai.lock` pin (never resolved here).
     unlocked_plugins: Vec<String>,
     collisions: Vec<Collision>,
+    /// Active `spm link` overrides (materialized from a local directory
+    /// instead of the locked commit).
+    links: Vec<LinkStatus>,
     targets: Vec<TargetStatus>,
     complete: bool,
     #[serde(skip)]
@@ -40,6 +44,18 @@ struct ExpectedSkill {
     name: String,
     /// Direct requester(s) of a transitively-resolved skill; empty otherwise.
     requested_by: Vec<String>,
+}
+
+/// One `spm link` override.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LinkStatus {
+    name: String,
+    /// The linked directory, as recorded by `spm link`.
+    path: String,
+    /// Whether `name` is still declared in `ai.json` (an undeclared link is
+    /// ignored by syncs until `spm unlink` drops it).
+    declared: bool,
 }
 
 /// A skill name materialized in both scopes (they collide by name at runtime).
@@ -61,6 +77,11 @@ struct TargetStatus {
 }
 
 impl StatusReport {
+    /// The active (declared) link for `name`, if any.
+    fn link(&self, name: &str) -> Option<&LinkStatus> {
+        self.links.iter().find(|l| l.declared && l.name == name)
+    }
+
     fn nothing_expected(&self) -> bool {
         self.expected.is_empty() && self.plugins.is_empty()
     }
@@ -100,6 +121,17 @@ fn collect(scope: &Scope) -> Result<StatusReport> {
     let dir = scope.manifest_dir()?;
     let manifest = Manifest::load(&dir, scope)?;
     let lock = Lockfile::load_or_default(&dir)?;
+    let links = Links::load(scope)?;
+    let managed_by_links = links.managed.clone();
+    let links = links
+        .links
+        .into_iter()
+        .map(|(name, path)| LinkStatus {
+            declared: manifest.skills.contains_key(&name) || manifest.plugins.contains_key(&name),
+            name,
+            path,
+        })
+        .collect();
     // Plugin-bundled skills are flattened into every vendor's skills dir just
     // like standalone skills, so they belong in `expected` — otherwise `status`
     // would flag them as stale (present on disk, not declared).
@@ -107,6 +139,8 @@ fn collect(scope: &Scope) -> Result<StatusReport> {
     for l in lock.plugins.values() {
         expected.extend(l.bundled_skills.iter().cloned());
     }
+    // Skills a linked plugin's working tree bundles beyond its locked commit.
+    expected.extend(managed_by_links);
     expected.sort();
     expected.dedup();
 
@@ -188,6 +222,7 @@ fn collect(scope: &Scope) -> Result<StatusReport> {
         plugins: declared_plugins,
         unlocked_plugins,
         collisions,
+        links,
         complete: false,
         declared_skills: manifest.skills.len(),
         targets: Vec::new(),
@@ -215,6 +250,22 @@ fn render_text(report: &StatusReport) {
             "! `{}` is also installed in the {} scope — they will collide by name",
             c.name, c.other_scope
         );
+    }
+    for l in &report.links {
+        if l.declared {
+            println!(
+                "linked: `{}` → {} (local override of the locked version)",
+                l.name, l.path
+            );
+        } else {
+            println!(
+                "! linked: `{}` → {} is not declared in ai.json and is ignored — run `spm unlink {}{}`",
+                l.name,
+                l.path,
+                l.name,
+                if report.scope == "global" { " -g" } else { "" }
+            );
+        }
     }
 
     if report.nothing_expected() {
@@ -247,7 +298,9 @@ fn render_text(report: &StatusReport) {
             );
             for e in &report.expected {
                 let missing = st.missing.contains(&e.name);
-                let via = if e.requested_by.is_empty() {
+                let via = if let Some(l) = report.link(&e.name) {
+                    format!("  (linked → {})", l.path)
+                } else if e.requested_by.is_empty() {
                     String::new()
                 } else {
                     format!("  (transitive; via {})", e.requested_by.join(", "))
@@ -274,8 +327,12 @@ fn render_text(report: &StatusReport) {
             );
             for name in &report.plugins {
                 let missing = st.missing.contains(name);
+                let linked = report
+                    .link(name)
+                    .map(|l| format!("  (linked → {})", l.path))
+                    .unwrap_or_default();
                 println!(
-                    "  {name:<width$}  {}",
+                    "  {name:<width$}  {}{linked}",
                     if missing { "MISSING" } else { "ok" }
                 );
             }

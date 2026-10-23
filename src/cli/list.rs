@@ -1,4 +1,5 @@
 use super::common::print_json;
+use crate::links::Links;
 use crate::lockfile::{LockedSkill, Lockfile};
 use crate::manifest::{Manifest, Version};
 use crate::scope::Scope;
@@ -31,6 +32,9 @@ struct SkillRow<'a> {
     installed: bool,
     transitive: bool,
     requested_by: &'a [String],
+    /// The local directory a `spm link` override materializes this skill
+    /// from instead of its locked commit; `null` when not linked.
+    linked: Option<&'a str>,
     #[serde(skip)]
     lock: Option<&'a LockedSkill>,
 }
@@ -46,6 +50,9 @@ struct PluginRow<'a> {
     commit: Option<&'a str>,
     installed: bool,
     bundled_skills: &'a [String],
+    /// The local directory a `spm link` override materializes this plugin
+    /// from instead of its locked commit; `null` when not linked.
+    linked: Option<&'a str>,
     #[serde(skip)]
     lock: Option<&'a LockedSkill>,
 }
@@ -54,7 +61,8 @@ pub(super) fn list(scope: &Scope, json: bool) -> Result<()> {
     let dir = scope.manifest_dir()?;
     let manifest = Manifest::load(&dir, scope)?;
     let lock = Lockfile::load_or_default(&dir)?;
-    let report = collect(scope, &manifest, &lock)?;
+    let links = Links::load(scope)?;
+    let report = collect(scope, &manifest, &lock, &links)?;
     if json {
         print_json(&report)
     } else {
@@ -67,7 +75,9 @@ fn collect<'a>(
     scope: &Scope,
     manifest: &'a Manifest,
     lock: &'a Lockfile,
+    links: &'a Links,
 ) -> Result<ListReport<'a>> {
+    let linked = |name: &str| links.links.get(name).map(String::as_str);
     let mut report = ListReport {
         scope: scope.label(),
         skills: Vec::new(),
@@ -88,6 +98,7 @@ fn collect<'a>(
             installed: l.is_some(),
             transitive: false,
             requested_by: &[],
+            linked: linked(name),
             lock: l,
         });
     }
@@ -107,6 +118,7 @@ fn collect<'a>(
             installed: true,
             transitive: true,
             requested_by: &l.requested_by,
+            linked: None,
             lock: Some(l),
         });
     }
@@ -121,6 +133,7 @@ fn collect<'a>(
             commit: l.map(|l| l.commit.as_str()),
             installed: l.is_some(),
             bundled_skills: l.map(|l| l.bundled_skills.as_slice()).unwrap_or(&[]),
+            linked: linked(name),
             lock: l,
         });
     }
@@ -129,6 +142,13 @@ fn collect<'a>(
 
 fn short(commit: &str) -> &str {
     &commit[..commit.len().min(8)]
+}
+
+/// `; linked → <dir>` for an entry with an active `spm link` override.
+fn link_note(linked: Option<&str>) -> String {
+    linked
+        .map(|d| format!("; linked → {d}"))
+        .unwrap_or_default()
 }
 
 fn render_text(report: &ListReport) {
@@ -141,7 +161,12 @@ fn render_text(report: &ListReport) {
             .lock
             .map(|l| format!("{} @ {}", l.display_reference(), short(&l.commit)))
             .unwrap_or_else(|| "not installed".into());
-        println!("{:<24} {}  ({pinned})", row.name, row.git);
+        println!(
+            "{:<24} {}  ({pinned}{})",
+            row.name,
+            row.git,
+            link_note(row.linked)
+        );
     }
     let mut transitive = report
         .skills
@@ -177,6 +202,11 @@ fn render_text(report: &ListReport) {
                 }
             })
             .unwrap_or_else(|| "not installed".into());
-        println!("{:<24} {}  (plugin; {pinned})", row.name, row.git);
+        println!(
+            "{:<24} {}  (plugin; {pinned}{})",
+            row.name,
+            row.git,
+            link_note(row.linked)
+        );
     }
 }
