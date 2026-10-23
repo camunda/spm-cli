@@ -9217,3 +9217,32 @@ fn outdated_warns_when_a_deduplicated_range_tag_was_repointed() {
         "{err}"
     );
 }
+
+/// A range's locked tag that disappeared is an error, like a deleted exact
+/// tag — never `behind`, which would steer `spm update` into a downgrade.
+#[test]
+fn outdated_errors_when_the_resolved_range_tag_was_deleted() {
+    let sb = Sandbox::new();
+    range_fixture(&sb);
+    sb.ok(&["init", "--target", "claude"]);
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--version",
+        "^1.2",
+        "--name",
+        "greet",
+    ]);
+    sb.git(&["tag", "-d", "v1.4.1"]);
+
+    let out = sb.spm(&["outdated", "--json"]);
+    assert!(!out.status.success(), "an error row fails the command");
+    let doc = json_doc(&out);
+    let row = outdated_row(&doc, "greet");
+    assert_eq!(row["status"], "error", "{doc}");
+    let err = row["error"].as_str().unwrap();
+    assert!(
+        err.contains("tag `v1.4.1` (locked for `version: ^1.2`) no longer exists"),
+        "{doc}"
+    );
+}

@@ -246,6 +246,7 @@ in a scheduled CI job or bot that reports drift.
 | `version` | the newest tag in the range vs the locked `resolved_tag` and commit | `behind` — run `spm update` |
 | `version` | a newer semver tag exists only outside the range | `newer tag` — widen `version` in `ai.json` |
 | `version` | the locked `resolved_tag` now resolves to a different commit | `tag moved`, plus a warning |
+| `version` | the locked `resolved_tag` no longer exists on the remote | `error` (never `behind`, which would suggest a downgrade) |
 | `commit` | none (never queried) | `pinned` |
 
 ```text

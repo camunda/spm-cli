@@ -456,12 +456,20 @@ fn compare(
             out.latest_tag_commit = Some(sha.to_string());
         }
     }
-    // The tag a range is locked to was re-pointed since it was resolved.
+    // The tag a range is locked to was re-pointed since it was resolved. A
+    // deleted one is an error (as for an exact tag): comparing tag names alone
+    // would call an older surviving match "newer" and steer into a downgrade.
     let range_tag_moved = match (selector, resolved_tag) {
-        (Some(Version::Range(_)), Some(t)) => remotes
-            .get(git)?
-            .get(&format!("refs/tags/{t}"))
-            .is_some_and(|sha| !sha.eq_ignore_ascii_case(locked)),
+        (Some(Version::Range(r)), Some(t)) => {
+            match remotes.get(git)?.get(&format!("refs/tags/{t}")) {
+                Some(sha) => !sha.eq_ignore_ascii_case(locked),
+                None => {
+                    return Err(format!(
+                        "tag `{t}` (locked for `version: {r}`) no longer exists on the remote"
+                    ))
+                }
+            }
+        }
         _ => false,
     };
     // A newer in-range tag can share the locked commit; `spm update` would
