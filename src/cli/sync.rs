@@ -807,8 +807,9 @@ fn reject_link_overlaps(
     for (name, dir, display, active) in guarded {
         let src = identity(dir)?;
         // Every location the content depends on: the recorded path's own hops,
-        // and those of each symlink inside the tree (which the copy follows),
-        // tagged with the symlink for messages.
+        // and those of each symlink inside the tree the copy follows (one that
+        // is broken, cyclic or escapes the tree is skipped by the copy and the
+        // scan alike, so it is no route), tagged with the symlink for messages.
         let mut route: Vec<(Option<PathBuf>, Vec<NodeId>)> = Vec::new();
         let mut hops = Vec::new();
         resolve(&manifest_dir.join(display), &mut hops)?;
@@ -816,6 +817,9 @@ fn reject_link_overlaps(
             route.push((None, identity(h)?));
         }
         for link in symlinks_in(dir)? {
+            if crate::fsutil::resolve_within_canonical(dir, &link).is_none() {
+                continue;
+            }
             let mut hops = Vec::new();
             resolve(&link, &mut hops)?;
             for h in &hops {

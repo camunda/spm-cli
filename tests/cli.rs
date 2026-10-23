@@ -10502,3 +10502,37 @@ fn link_rejects_a_working_copy_whose_symlinks_route_through_output() {
     assert!(read_path(&dev.join("SKILL.md")).contains("LOCAL"));
     assert!(!sb.project.join(".spm/links.json").exists());
 }
+
+/// A symlink the copy and the scan skip (here a cycle) is no route to guard:
+/// it never blocks linking, syncing, unlinking or cleaning.
+#[cfg(unix)]
+#[test]
+fn skipped_symlinks_in_a_working_copy_never_block_link_commands() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--name",
+        "greet",
+    ]);
+    let dev = local_skill_checkout(&sb, "dev", "LOCAL");
+    let installed = sb
+        .project
+        .join(".agents/skills/spm-managed-skills/greet/SKILL.md");
+
+    sb.ok(&["link", "greet", "../dev"]);
+    symlink(PathBuf::from("cycle"), dev.join("cycle"));
+    sb.ok(&["install"]);
+    assert!(read_path(&installed).contains("LOCAL"));
+    sb.ok(&["unlink", "--all"]);
+    assert!(!read_path(&installed).contains("LOCAL"));
+
+    sb.ok(&["link", "greet", "../dev"]);
+    assert!(read_path(&installed).contains("LOCAL"));
+    sb.ok(&["clean"]);
+    assert!(!installed.exists());
+    assert!(std::fs::symlink_metadata(dev.join("cycle")).is_ok());
+}
