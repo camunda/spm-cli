@@ -1,7 +1,7 @@
-use super::clean::managed_names;
-use super::sync::{save_and_sync, Apply};
+use super::sync::{owned_in, save_and_sync, Apply};
 use crate::lockfile::Lockfile;
 use crate::manifest::Manifest;
+use crate::owned::Ownership;
 use crate::pathid::{deletion_target, identity, resolve, NodeId};
 use crate::scope::Scope;
 use crate::vendor;
@@ -117,8 +117,9 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
     }
 
     let lock = Lockfile::load_or_default(&dir)?;
-    let (managed, managed_plugins) =
-        managed_names(scope, &lock, &crate::links::Links::load(scope)?)?;
+    // Each target's own spm output (see `crate::owned`).
+    let mut owned = Ownership::load(scope, &lock)?;
+    let linked = crate::links::Links::load(scope)?.managed;
     // Physical locations a remaining target still loads skills, plugins or
     // their metadata from (`content`), plus every location reaching them
     // depends on (`traversed`: symlinks, and dirs passed through before a
@@ -131,8 +132,9 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
     let mut needed: Vec<(&str, Vec<NodeId>, bool)> = Vec::new();
     for t in &remaining {
         let v = vendor::for_target(t)?;
-        let mut paths = v.skill_paths(scope, &managed)?;
-        paths.extend(v.plugin_paths(scope, &managed_plugins)?);
+        let names = owned_in(&owned, t, &linked);
+        let mut paths = v.skill_paths(scope, &names.skill_names())?;
+        paths.extend(v.plugin_paths(scope, &names.plugin_names())?);
         let (mut traversed, mut content) = (Vec::new(), Vec::new());
         let mut visited = std::collections::HashSet::new();
         for p in paths {
@@ -150,18 +152,28 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
         .iter()
         .map(|t| vendor::for_target(t))
         .collect::<Result<Vec<_>>>()?;
+    let removed_owned: Vec<_> = removed
+        .iter()
+        .map(|t| owned_in(&owned, t, &linked))
+        .collect();
     super::sync::guard_working_copies(
         scope,
         &dir,
         &removed_vendors,
         &Default::default(),
-        &managed,
-        &managed_plugins,
+        &removed_owned
+            .iter()
+            .flat_map(|n| n.skill_names())
+            .collect::<Vec<_>>(),
+        &removed_owned
+            .iter()
+            .flat_map(|n| n.plugin_names())
+            .collect::<Vec<_>>(),
         None,
     )?;
-    for v in &removed_vendors {
-        let mut candidates = v.clean_paths(scope, &managed)?;
-        candidates.extend(v.plugin_clean_paths(scope, &managed_plugins)?);
+    for ((t, v), names) in removed.iter().zip(&removed_vendors).zip(&removed_owned) {
+        let mut candidates = v.clean_paths(scope, &names.skill_names())?;
+        candidates.extend(v.plugin_clean_paths(scope, &names.plugin_names())?);
         let mut deletable = Vec::new();
         for p in candidates {
             let target = identity(&deletion_target(&p)?)?;
@@ -178,7 +190,9 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
         vendor::remove_paths(&deletable)?;
         v.deregister(scope)?;
         v.deregister_plugins(scope)?;
+        owned = owned.without(t);
     }
+    owned.save(scope)?;
 
     manifest.targets = remaining;
     manifest.save(&dir)?;

@@ -387,8 +387,8 @@ spm clean [-g]
 
 Removes the generated vendor config for this scope, including skills an
 earlier `--lock-only` change dropped from `ai.lock` but left installed (spm
-records what it installed in `.spm/owned.json`, or `$SPM_HOME/owned-global.json`
-with `-g`). `ai.json` and `ai.lock` stay, so `spm install` restores everything.
+records what it installed into each target in `.spm/owned.json`, or
+`$SPM_HOME/owned-global.json` with `-g`). `ai.json` and `ai.lock` stay, so `spm install` restores everything.
 
 ### `spm prune`
 

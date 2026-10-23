@@ -1,12 +1,14 @@
 use super::common::{confirm, human_size};
+use super::sync::owned_in;
 use crate::links::Links;
 use crate::lockfile::Lockfile;
 use crate::manifest::Manifest;
-use crate::owned::Owned;
+use crate::owned::Ownership;
 use crate::scope::Scope;
 use crate::vendor;
 use crate::{paths, store};
 use anyhow::Result;
+use std::collections::BTreeMap;
 
 pub(super) fn clean(scope: &Scope) -> Result<()> {
     let dir = scope.manifest_dir()?;
@@ -15,51 +17,46 @@ pub(super) fn clean(scope: &Scope) -> Result<()> {
     let _state_lock = crate::links::StateLock::acquire(scope, false)?;
     let manifest = Manifest::load(&dir, scope)?;
     let lock = Lockfile::load_or_default(&dir)?;
-    let (managed, managed_plugins) = managed_names(scope, &lock, &Links::load(scope)?)?;
+    let ownership = Ownership::load(scope, &lock)?;
+    let linked = Links::load(scope)?.managed;
     let vendors = manifest
         .targets
         .iter()
         .map(|t| vendor::for_target(t))
         .collect::<Result<Vec<_>>>()?;
+    let owned: Vec<_> = manifest
+        .targets
+        .iter()
+        .map(|t| owned_in(&ownership, t, &linked))
+        .collect();
     super::sync::guard_working_copies(
         scope,
         &dir,
         &vendors,
         &Default::default(),
-        &managed,
-        &managed_plugins,
+        &owned
+            .iter()
+            .flat_map(|o| o.skill_names())
+            .collect::<Vec<_>>(),
+        &owned
+            .iter()
+            .flat_map(|o| o.plugin_names())
+            .collect::<Vec<_>>(),
         None,
     )?;
-    for vendor in &vendors {
-        vendor.clean(scope, &managed)?;
-        vendor.clean_plugins(scope, &managed_plugins)?;
+    for (vendor, names) in vendors.iter().zip(&owned) {
+        vendor.clean(scope, &names.skill_names())?;
+        vendor.clean_plugins(scope, &names.plugin_names())?;
     }
-    Owned::remove(scope)?;
+    // Nothing of spm's is installed any more — recorded explicitly, so a later
+    // install does not fall back to treating the lock's names as spm's.
+    Ownership::Recorded(BTreeMap::new()).save(scope)?;
     println!(
         "cleaned generated {} config for target(s): {}",
         scope.label(),
         manifest.targets.join(", ")
     );
     Ok(())
-}
-
-/// The skill and plugin names spm currently owns: everything `ai.lock`
-/// installs, whatever the local ownership record still lists (installed before
-/// a lock-only write or a pulled `ai.lock` dropped it), and the skills last
-/// materialized from linked plugins (see [`Links::managed`]). What a vendor's
-/// `clean` / `clean_plugins` must remove.
-pub(super) fn managed_names(
-    scope: &Scope,
-    lock: &Lockfile,
-    links: &Links,
-) -> Result<(Vec<String>, Vec<String>)> {
-    let mut owned = Owned::from_lock(lock);
-    owned.extend(Owned::load(scope)?);
-    owned.skills.extend(links.managed.iter().cloned());
-    Ok((
-        owned.skills.into_iter().collect(),
-        owned.plugins.into_iter().collect(),
-    ))
 }
 
 /// `spm prune`: wipe the whole global store (`$SPM_HOME/store`, default

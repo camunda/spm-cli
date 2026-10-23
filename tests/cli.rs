@@ -12331,7 +12331,7 @@ fn install_after_lock_only_update_removes_the_skills_it_dropped() {
 }
 
 /// Same for `clean`: it removes what a lock-only update dropped from ai.lock,
-/// then forgets the ownership record.
+/// then records that spm owns nothing.
 #[test]
 fn clean_after_lock_only_update_removes_the_skills_it_dropped() {
     let sb = Sandbox::new();
@@ -12341,7 +12341,12 @@ fn clean_after_lock_only_update_removes_the_skills_it_dropped() {
         assert!(!dir.join(gone).exists(), "{gone} cleaned");
     }
     assert!(dir.join("mine/SKILL.md").exists(), "user skill kept");
-    assert!(!sb.project.join(".spm/owned.json").exists());
+    let record: serde_json::Value = serde_json::from_str(&sb.read(".spm/owned.json")).unwrap();
+    assert_eq!(
+        record,
+        serde_json::json!({"targets": {}}),
+        "nothing owned now"
+    );
 }
 
 /// The global scope keeps its own record (under SPM_HOME) for Copilot's flat
@@ -12364,9 +12369,72 @@ fn global_install_and_clean_after_lock_only_update_remove_the_skills_it_dropped(
             "{finish}: user skill kept"
         );
         assert_eq!(dir.join("new").exists(), finish == "install");
+        let record: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(sb.spm_home.join("owned-global.json")).unwrap(),
+        )
+        .unwrap();
+        let skills = &record["targets"]["copilot"]["skills"];
+        assert_eq!(skills.is_null(), finish == "clean", "{finish}: {record}");
+    }
+}
+
+/// Ownership is what spm installed, not what intermediate locks named: after
+/// successive lock-only updates (the first bundling a name the user also
+/// authored, the next renaming it away), install and clean leave the user's
+/// skill alone and still remove what was really installed.
+#[test]
+fn successive_lock_only_updates_do_not_claim_never_installed_names() {
+    for finish in ["install", "clean"] {
+        let sb = Sandbox::new();
+        let (dir, _) = lock_only_drops_installed_skills(&sb, false);
+        let kit_dir = sb.root.join("kit");
+        // Intermediate lock: `kit` bundles `mine`, a name the user authored.
+        git_in(&kit_dir, &["mv", "pkg/skills/new", "pkg/skills/mine"]);
+        git_in(&kit_dir, &["commit", "-qm", "bundle mine"]);
+        sb.ok(&["update", "kit", "--lock-only"]);
+        assert!(sb.read("ai.lock").contains("\"mine\""));
+        git_in(&kit_dir, &["mv", "pkg/skills/mine", "pkg/skills/new"]);
+        git_in(&kit_dir, &["commit", "-qm", "bundle new"]);
+        sb.ok(&["update", "kit", "--lock-only"]);
+
+        sb.ok(&[finish]);
         assert_eq!(
-            sb.spm_home.join("owned-global.json").exists(),
-            finish == "install"
+            std::fs::read_to_string(dir.join("mine/SKILL.md")).unwrap(),
+            "---\nname: mine\n---\nMine.\n",
+            "{finish}: user skill untouched"
+        );
+        assert!(
+            !dir.join("old").exists(),
+            "{finish}: installed `old` removed"
         );
     }
+}
+
+/// A target added after a lock-only update owns nothing yet: installing into it
+/// must not delete a user's same-named skill that spm only ever installed into
+/// another target (and the lock no longer requests). The original target is
+/// still purged.
+#[test]
+fn target_added_after_lock_only_update_does_not_purge_other_targets_names() {
+    let sb = Sandbox::new();
+    let (dir, _) = lock_only_drops_installed_skills(&sb, false);
+    let cursor = sb.project.join(".cursor/skills");
+    std::fs::create_dir_all(cursor.join("old")).unwrap();
+    std::fs::write(cursor.join("old/SKILL.md"), "Mine.\n").unwrap();
+
+    sb.ok(&["target", "add", "cursor"]);
+    assert_eq!(
+        std::fs::read_to_string(cursor.join("old/SKILL.md")).unwrap(),
+        "Mine.\n"
+    );
+    assert!(cursor.join("new/SKILL.md").exists());
+    assert!(!dir.join("old").exists(), "codex's own `old` purged");
+
+    // Removing a target forgets it, so its output is never claimed again.
+    sb.ok(&["target", "remove", "cursor"]);
+    assert!(!cursor.join("new").exists());
+    assert!(cursor.join("old/SKILL.md").exists());
+    let record: serde_json::Value = serde_json::from_str(&sb.read(".spm/owned.json")).unwrap();
+    assert!(record["targets"]["cursor"].is_null(), "{record}");
+    assert!(!record["targets"]["codex"].is_null(), "{record}");
 }

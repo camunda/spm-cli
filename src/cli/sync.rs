@@ -1,7 +1,7 @@
 use crate::links::{Linked, Links, StateLock};
 use crate::lockfile::{LockedSkill, Lockfile};
 use crate::manifest::{Manifest, SkillSpec};
-use crate::owned::Owned;
+use crate::owned::{Owned, Ownership};
 use crate::scope::Scope;
 use crate::vendor::{MaterializedPlugin, MaterializedSkill, Vendor};
 use crate::{resolver, store, transitive};
@@ -191,7 +191,9 @@ struct Plan {
     lock: Lockfile,
     materialized: Vec<MaterializedSkill>,
     plugins: Vec<MaterializedPlugin>,
-    previously_owned: Owned,
+    previously_owned: Ownership,
+    /// [`Links::managed`] before this sync (see [`owned_in`]).
+    previously_linked: Vec<String>,
     locked: bool,
     /// The `spm link` overrides to persist after applying (with `managed`
     /// refreshed), or `None` when the links file is already up to date.
@@ -351,21 +353,11 @@ fn plan(
     // walked (their transitive subtree is never visited).
     let mut skipped_roots: BTreeSet<String> = BTreeSet::new();
 
-    // What spm owns in the targets before this sync: everything the previous
-    // lock installs, plus whatever an install materialized that a lock-only
-    // write (or a pulled ai.lock) since dropped from the lock. Captured before
-    // the resolve loop mutates `prev`, so global/shared-dir vendors (which
-    // share a directory with the user's own skills) can purge only entries spm
-    // owned but that are no longer wanted. Plugin-bundled skills are flattened
-    // into the same shared skills dirs, so they count as skills here.
-    let mut previously_owned = Owned::from_lock(&prev);
-    previously_owned.extend(Owned::load(scope)?);
-    // Skills last materialized from a *linked* plugin's working tree are not in
-    // `ai.lock` (it records the locked commit's bundled skills), so the links
-    // file remembers them for the same purpose.
-    previously_owned
-        .skills
-        .extend(links.managed.iter().cloned());
+    // What spm owns in each target before this sync (see `crate::owned`):
+    // global/shared-dir vendors share a directory with the user's own skills,
+    // so they purge only entries spm put there that are no longer wanted.
+    let previously_owned = Ownership::load(scope, &prev)?;
+    let previously_linked = links.managed.clone();
 
     // Stable, path-independent project id: reuse the locked one, else mint & persist.
     let id = if prev.id.is_empty() {
@@ -733,12 +725,22 @@ fn plan(
     let output_skills: Vec<String> = materialized
         .iter()
         .map(|m| m.name.clone())
-        .chain(previously_owned.skills.iter().cloned())
+        .chain(
+            manifest
+                .targets
+                .iter()
+                .flat_map(|t| owned_in(&previously_owned, t, &previously_linked).skills),
+        )
         .collect();
     let output_plugins: Vec<String> = plugins
         .iter()
         .map(|p| p.name.clone())
-        .chain(previously_owned.plugins.iter().cloned())
+        .chain(
+            manifest
+                .targets
+                .iter()
+                .flat_map(|t| previously_owned.for_target(t).plugins),
+        )
         .collect();
     guard_working_copies(
         scope,
@@ -797,6 +799,7 @@ fn plan(
         materialized,
         plugins,
         previously_owned,
+        previously_linked,
         locked,
         links,
         _snapshots: snapshots,
@@ -811,9 +814,9 @@ impl Plan {
     fn apply(self, scope: &Scope) -> Result<usize> {
         let lock = &self.lock;
         if self.apply == Apply::LockOnly {
-            // Nothing is installed or removed now, so whatever the targets
-            // hold stays owned until the next install or clean deals with it.
-            self.previously_owned.save(scope)?;
+            // Nothing is installed or removed now: the targets keep what they
+            // hold, and the next install or clean must still know it is spm's.
+            self.previously_owned.freeze(scope, &self.targets)?;
             lock.save(&self.dir)?;
             println!(
                 "wrote ai.lock only; run `{}` to install into the targets",
@@ -839,22 +842,14 @@ impl Plan {
                 pending.save(scope)?;
             }
         }
-        let previously_managed: Vec<String> =
-            self.previously_owned.skills.iter().cloned().collect();
-        let previously_managed_plugins: Vec<String> =
-            self.previously_owned.plugins.iter().cloned().collect();
-        for vendor in &self.vendors {
-            vendor.materialize(scope, &lock.id, &self.materialized, &previously_managed)?;
-            vendor.materialize_plugins(
-                scope,
-                &lock.id,
-                &self.plugins,
-                &previously_managed_plugins,
-            )?;
+        for (target, vendor) in self.targets.iter().zip(&self.vendors) {
+            let owned = owned_in(&self.previously_owned, target, &self.previously_linked);
+            vendor.materialize(scope, &lock.id, &self.materialized, &owned.skill_names())?;
+            vendor.materialize_plugins(scope, &lock.id, &self.plugins, &owned.plugin_names())?;
         }
-        // Every vendor now holds exactly `lock`'s set: anything else spm owned
-        // was purged above.
-        Owned::from_lock(lock).save(scope)?;
+        // Every target now holds exactly `lock`'s set: anything else spm put
+        // there was purged above.
+        Ownership::save_installed(scope, &self.targets, lock)?;
         // Only persist `ai.lock` once every fallible step (resolution, fetching,
         // collision checks, and vendor materialization) has succeeded —
         // otherwise a failed `install` could leave behind a lockfile pointing at
@@ -868,6 +863,15 @@ impl Plan {
         }
         Ok(lock.skills.len() + lock.plugins.len())
     }
+}
+
+/// What spm owns in `target` before writing it: its ownership record plus the
+/// skills last materialized from linked plugins (see [`Links::managed`]), which
+/// `ai.lock` — and so the record — does not list, and which every target got.
+pub(super) fn owned_in(ownership: &Ownership, target: &str, linked_managed: &[String]) -> Owned {
+    let mut owned = ownership.for_target(target);
+    owned.skills.extend(linked_managed.iter().cloned());
+    owned
 }
 
 /// Resolve every `spm link` override that names a declared skill or plugin to

@@ -134,10 +134,12 @@ the new lock. The lock is the same one the command writes without
 
 Skills the new lock drops (say, a plugin's renamed bundled skill or a transitive
 pin that went away) stay installed until then, and spm still owns them: it keeps
-a machine-local record of what it last installed (`.spm/owned.json` in a
-project, `$SPM_HOME/owned-global.json` with `-g`; never committed), so the next
-`spm install` or `spm clean` removes them from shared skills dirs without
-touching your own skills. The same applies when a pulled `ai.lock` drops them.
+a machine-local record of what it last installed into each target
+(`.spm/owned.json` in a project, `$SPM_HOME/owned-global.json` with `-g`; never
+committed), so the next `spm install` or `spm clean` removes exactly those from
+shared skills dirs without touching your own skills. Only an install or clean
+updates the record, so names a lock merely passed through — or a target added
+since — are never claimed. The same applies when a pulled `ai.lock` drops them.
 
 With `resolveTransitive` on, every other skill is still read (from the store, or
 fetched when missing) for its nested `ai.json`, which decides the transitive
@@ -437,8 +439,8 @@ then exits non-zero regardless of `--exit-code`. Accepts `-g`, `--json` (see
 
 ### `spm clean`
 
-Removes generated vendor config from the project: everything `ai.lock` installs
-plus anything spm installed earlier that the lock has since dropped (see
+Removes generated vendor config from the project: whatever spm last installed
+into each target, including anything the lock has since dropped (see
 [Writing only the lock](#writing-only-the-lock-lock-only)).
 
 ### `spm prune [--yes]`

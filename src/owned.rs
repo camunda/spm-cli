@@ -1,18 +1,21 @@
-//! What spm last materialized into a scope's targets, recorded locally and
-//! independently of `ai.lock`.
+//! What spm last materialized into each target of a scope, recorded locally
+//! and independently of `ai.lock`.
 //!
 //! Shared-dir and global vendors write into directories that also hold the
-//! user's own skills, so they may only remove entries spm owns. `ai.lock`
-//! cannot be the sole record of that: it describes what *should* be installed
-//! and can change without an install — `spm update --lock-only`, or a `git
-//! pull` bringing a teammate's lock. A skill dropped by such a change would
-//! otherwise be orphaned in the target, as neither the next `install` nor
-//! `clean` would know spm put it there. Install and clean therefore treat
-//! `ai.lock` ∪ this record as owned.
+//! user's own skills, so they may only remove entries spm put there. `ai.lock`
+//! cannot be the record of that: it describes what *should* be installed and
+//! can change without an install — `spm update --lock-only`, or a `git pull`
+//! bringing a teammate's lock. A skill dropped by such a change would be
+//! orphaned in the target; and a name the lock only passed through (or one a
+//! newly added target never received) must not be "cleaned up" from a dir
+//! where it is the user's own. So install, clean and `target remove` purge
+//! exactly what this record says spm installed into each target, and only an
+//! install (or clean) rewrites it.
 //!
 //! The record is machine-local state, never committed: in a project it lives
 //! in `.spm/owned.json` (the `.spm/` dir ignores itself), globally in
-//! `$SPM_HOME/owned-global.json`.
+//! `$SPM_HOME/owned-global.json`. Installs made before it existed have no
+//! record; then the lock stands in for it, as it always did.
 
 use crate::lockfile::Lockfile;
 use crate::manifest::validate_skill_name;
@@ -20,14 +23,14 @@ use crate::paths;
 use crate::scope::Scope;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 const PROJECT_DIR: &str = ".spm";
 const PROJECT_FILE: &str = "owned.json";
 const GLOBAL_FILE: &str = "owned-global.json";
 
-/// Skill and plugin names spm materialized and has not cleaned up since.
+/// Skill and plugin names spm installed into one target.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Owned {
@@ -56,11 +59,33 @@ impl Owned {
         }
     }
 
-    pub fn extend(&mut self, other: Owned) {
-        self.skills.extend(other.skills);
-        self.plugins.extend(other.plugins);
+    pub fn skill_names(&self) -> Vec<String> {
+        self.skills.iter().cloned().collect()
     }
 
+    pub fn plugin_names(&self) -> Vec<String> {
+        self.plugins.iter().cloned().collect()
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Record {
+    targets: BTreeMap<String, Owned>,
+}
+
+/// What spm owns in each target of a scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ownership {
+    /// Per target, exactly what spm last installed there. A target without an
+    /// entry holds nothing of spm's.
+    Recorded(BTreeMap<String, Owned>),
+    /// No record yet (installed by an spm that kept none): assume every target
+    /// holds what this lock installs.
+    Legacy(Owned),
+}
+
+impl Ownership {
     fn path(scope: &Scope) -> Result<PathBuf> {
         Ok(match scope {
             Scope::Project { root } => root.join(PROJECT_DIR).join(PROJECT_FILE),
@@ -68,29 +93,70 @@ impl Owned {
         })
     }
 
-    /// The recorded set, or empty when nothing was recorded yet.
-    pub fn load(scope: &Scope) -> Result<Self> {
+    /// The recorded ownership, or `lock`'s set when nothing was recorded yet.
+    pub fn load(scope: &Scope, lock: &Lockfile) -> Result<Self> {
         let p = Self::path(scope)?;
         if !p.exists() {
-            return Ok(Self::default());
+            return Ok(Self::Legacy(Owned::from_lock(lock)));
         }
         let text =
             std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))?;
-        let owned: Self =
+        let record: Record =
             serde_json::from_str(&text).with_context(|| format!("parsing {}", p.display()))?;
         // The names are joined onto target dirs that get deleted, so a
         // tampered record must not be able to point outside them.
-        for name in owned.skills.iter().chain(&owned.plugins) {
-            validate_skill_name(name).with_context(|| format!("in {}", p.display()))?;
+        for owned in record.targets.values() {
+            for name in owned.skills.iter().chain(&owned.plugins) {
+                validate_skill_name(name).with_context(|| format!("in {}", p.display()))?;
+            }
         }
-        Ok(owned)
+        Ok(Self::Recorded(record.targets))
     }
 
-    /// Persist the set; an empty set removes the record instead.
-    pub fn save(&self, scope: &Scope) -> Result<()> {
-        if self.skills.is_empty() && self.plugins.is_empty() {
-            return Self::remove(scope);
+    /// What spm owns in `target`.
+    pub fn for_target(&self, target: &str) -> Owned {
+        match self {
+            Self::Recorded(map) => map.get(target).cloned().unwrap_or_default(),
+            Self::Legacy(owned) => owned.clone(),
         }
+    }
+
+    /// Record that every one of `targets` now holds exactly `lock`'s set.
+    pub fn save_installed(scope: &Scope, targets: &[String], lock: &Lockfile) -> Result<()> {
+        let owned = Owned::from_lock(lock);
+        Self::Recorded(targets.iter().map(|t| (t.clone(), owned.clone())).collect()).save(scope)
+    }
+
+    /// Before the lock changes without an install, pin down what the targets
+    /// hold: a legacy assumption ("whatever the lock installs") is written out
+    /// for `targets`, while an existing record is already exact and is kept.
+    pub fn freeze(&self, scope: &Scope, targets: &[String]) -> Result<()> {
+        match self {
+            Self::Recorded(_) => Ok(()),
+            Self::Legacy(owned) => {
+                Self::Recorded(targets.iter().map(|t| (t.clone(), owned.clone())).collect())
+                    .save(scope)
+            }
+        }
+    }
+
+    /// Forget `target` (its spm output was removed).
+    pub fn without(self, target: &str) -> Self {
+        match self {
+            Self::Recorded(mut map) => {
+                map.remove(target);
+                Self::Recorded(map)
+            }
+            legacy => legacy,
+        }
+    }
+
+    /// Persist a record. `Legacy` is not persisted: there is nothing exact to
+    /// write down.
+    pub fn save(&self, scope: &Scope) -> Result<()> {
+        let Self::Recorded(targets) = self else {
+            return Ok(());
+        };
         let p = Self::path(scope)?;
         let dir = p.parent().expect("record path has a parent");
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -101,19 +167,11 @@ impl Owned {
                     .with_context(|| format!("writing {}", ignore.display()))?;
             }
         }
-        let text = serde_json::to_string_pretty(self)?;
+        let record = Record {
+            targets: targets.clone(),
+        };
+        let text = serde_json::to_string_pretty(&record)?;
         std::fs::write(&p, text + "\n").with_context(|| format!("writing {}", p.display()))
-    }
-
-    /// Forget the record (after a `clean`, nothing is owned any more).
-    pub fn remove(scope: &Scope) -> Result<()> {
-        let p = Self::path(scope)?;
-        match std::fs::remove_file(&p) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                Err(e).with_context(|| format!("removing {}", p.display()))
-            }
-            _ => Ok(()),
-        }
     }
 }
 
@@ -135,22 +193,48 @@ mod tests {
         names.iter().map(|s| s.to_string()).collect()
     }
 
+    fn lock_with(skills: &[&str]) -> Lockfile {
+        let mut lock = Lockfile::default();
+        for name in skills {
+            let commit = "a".repeat(40);
+            lock.skills.insert(
+                name.to_string(),
+                serde_json::from_value(serde_json::json!({
+                    "git": "https://example.com/r.git",
+                    "reference": "branch:main",
+                    "commit": commit,
+                    "store": crate::lockfile::store_key("https://example.com/r.git", &commit),
+                }))
+                .unwrap(),
+            );
+        }
+        lock
+    }
+
     #[test]
-    fn round_trips_and_ignores_itself_in_a_project() {
+    fn records_per_target_and_ignores_itself_in_a_project() {
         let root = scratch("roundtrip");
         let scope = Scope::Project { root: root.clone() };
-        assert_eq!(Owned::load(&scope).unwrap(), Owned::default());
-        let owned = Owned {
-            skills: set(&["a", "b"]),
-            plugins: set(&["kit"]),
-        };
-        owned.save(&scope).unwrap();
-        assert_eq!(Owned::load(&scope).unwrap(), owned);
+        let legacy = Ownership::load(&scope, &lock_with(&["a"])).unwrap();
+        assert_eq!(legacy.for_target("codex").skills, set(&["a"]));
+        // A legacy assumption is written out once; afterwards it is exact and
+        // no later lock (lock-only writes) changes it.
+        legacy.freeze(&scope, &["codex".to_string()]).unwrap();
+        let recorded = Ownership::load(&scope, &lock_with(&["b"])).unwrap();
+        assert_eq!(recorded.for_target("codex").skills, set(&["a"]));
+        assert_eq!(recorded.for_target("cursor"), Owned::default());
+        recorded.freeze(&scope, &["cursor".to_string()]).unwrap();
+        assert_eq!(Ownership::load(&scope, &lock_with(&[])).unwrap(), recorded);
+
+        Ownership::save_installed(&scope, &["codex".to_string()], &lock_with(&["b"])).unwrap();
+        let installed = Ownership::load(&scope, &lock_with(&[])).unwrap();
+        assert_eq!(installed.for_target("codex").skills, set(&["b"]));
+        // An explicitly empty record stays exact rather than falling back to the lock.
+        installed.without("codex").save(&scope).unwrap();
+        let empty = Ownership::load(&scope, &lock_with(&["b"])).unwrap();
+        assert_eq!(empty, Ownership::Recorded(BTreeMap::new()));
         let ignore = std::fs::read_to_string(root.join(".spm").join(".gitignore")).unwrap();
         assert!(ignore.lines().any(|l| l == "*"), "{ignore}");
-        Owned::default().save(&scope).unwrap();
-        assert!(!root.join(".spm").join("owned.json").exists());
-        Owned::remove(&scope).unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -159,21 +243,24 @@ mod tests {
         let root = scratch("hostile");
         let scope = Scope::Project { root: root.clone() };
         std::fs::create_dir_all(root.join(".spm")).unwrap();
-        for bad in ["..", "../x", "a\\\\b", ""] {
+        for owned in [
+            r#"{"skills":[".."]}"#,
+            r#"{"skills":["../x"]}"#,
+            r#"{"skills":["a\\b"]}"#,
+            r#"{"skills":[""]}"#,
+            r#"{"plugins":["../kit"]}"#,
+        ] {
             std::fs::write(
                 root.join(".spm").join("owned.json"),
-                format!(r#"{{"skills":["{bad}"]}}"#),
+                format!(r#"{{"targets":{{"codex":{owned}}}}}"#),
             )
             .unwrap();
-            let err = format!("{:#}", Owned::load(&scope).unwrap_err());
-            assert!(err.contains("invalid skill name"), "{bad}: {err}");
+            let err = format!(
+                "{:#}",
+                Ownership::load(&scope, &Lockfile::default()).unwrap_err()
+            );
+            assert!(err.contains("invalid skill name"), "{owned}: {err}");
         }
-        std::fs::write(
-            root.join(".spm").join("owned.json"),
-            r#"{"plugins":["../kit"]}"#,
-        )
-        .unwrap();
-        assert!(Owned::load(&scope).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 }
