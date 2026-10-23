@@ -396,7 +396,8 @@ critical severity. See [Content scan](#content-scan).
 Symlinks are followed only when they resolve inside the scanned path. Pass
 `--within <dir>` (a directory containing the path, such as the repository root
 of a plugin kept in a subdirectory) to follow symlinks anywhere inside `<dir>`,
-the same boundary the install gate uses.
+the same boundary the install gate uses. The path may then itself be a symlink
+that resolves inside `<dir>`.
 
 ### Machine-readable output (`--json`)
 

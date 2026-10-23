@@ -74,7 +74,10 @@ gets separate branches and pull requests:
 
 Transitive dependencies are updated through the skill that requests them, not on
 their own. Re-runs are idempotent: an unchanged update is not re-pushed, and a
-dependency that moved again updates its existing pull request.
+dependency that moved again updates its existing pull request. Each update syncs the
+whole project, so a dependency whose pinned commit can't be fetched also stops
+the updates of the others until it's fixed or removed
+([#126](https://github.com/camunda/spm-cli/issues/126)).
 
 The pull request body shows the old and new version and commit, a compare link
 (for GitHub-hosted sources), any other `ai.lock` entries that changed with it

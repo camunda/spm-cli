@@ -181,11 +181,14 @@ async function updateOne(row, ctx) {
     if (plan.action === "retag") {
       const spec = manifest?.[kind === "plugin" ? "plugins" : "skills"]?.[name];
       if (!spec) throw new Error(`${kind} \`${name}\` is not declared in ai.json`);
-      args = ["add", spec.git, "--tag", plan.tag, "--name", name, "--force"];
-      if (spec.path) args.push("--path", spec.path);
+      // Values are attached with `=` and positionals follow `--`, so a name
+      // (or URL, tag, path) starting with `-` is never parsed as a flag.
+      args = ["add", `--tag=${plan.tag}`, `--name=${name}`, "--force"];
+      if (spec.path) args.push(`--path=${spec.path}`);
       if (kind === "plugin") args.push("--plugin");
+      args.push("--", spec.git);
     } else {
-      args = ["update", name];
+      args = ["update", "--", name];
     }
     const sync = exec("spm", args, { cwd: wd, env: spmEnv });
     log.info(sync.stdout.trim());

@@ -362,6 +362,30 @@ test("plugins are re-tagged with their path kept", async (t) => {
   assert.match(sb.pull(r.number).body, /Source: `.*` \(path `pkg`\)/);
 });
 
+test("dependency names starting with a dash reach spm as names, not flags", async (t) => {
+  const sb = await sandbox(t);
+  const tagged = sb.upstream("lead");
+  const tracked = sb.upstream("glob", { tag: null });
+  sb.spm("add", tagged.url, "--tag", "v1.0.0", "--name=-lead");
+  sb.spm("add", tracked.url, "--branch", "main", "--name=--global");
+  sb.publish();
+  writeFiles(tagged.repo, { "a.md": "1\n" });
+  commitAll(tagged.repo, "1.1");
+  git(tagged.repo, "tag", "v1.1.0");
+  writeFiles(tracked.repo, { "a.md": "1\n" });
+  const head = commitAll(tracked.repo, "one");
+
+  const results = await sb.update();
+  assert.deepEqual(results.map((r) => [r.name, r.result]), [
+    ["--global", "created"],
+    ["-lead", "created"],
+  ]);
+  const byName = Object.fromEntries(results.map((r) => [r.name, r]));
+  assert.equal(JSON.parse(sb.remoteFile(byName["-lead"].branch, "ai.json")).skills["-lead"].tag, "v1.1.0");
+  assert.equal(JSON.parse(sb.remoteFile(byName["--global"].branch, "ai.lock")).skills["--global"].commit, head);
+  assertCleanCheckout(sb);
+});
+
 test("a project in a subdirectory commits only its own spm files", async (t) => {
   const sb = await sandbox(t, { subdir: "tools/ai" });
   const up = sb.upstream("alpha", { tag: null });
@@ -402,6 +426,26 @@ test("a plugin's symlinks into the rest of its repository are scanned like the i
   const pr = sb.pull(r.number);
   assert.deepEqual(pr.labels, ["dependencies", "spm-scan-blocked"]);
   assert.match(pr.body, /`kit\/agents\/dev\.md:\d+`/);
+});
+
+test("a dependency whose path is a symlink inside its repository scans clean through it", { skip: process.platform === "win32" && "symlinks need privileges on Windows" }, async (t) => {
+  const sb = await sandbox(t);
+  const repo = join(sb.dir, "upstream", "linked");
+  const url = makeRepo(repo, { "skills/alpha/SKILL.md": skillMd("alpha") });
+  symlinkSync("skills/alpha", join(repo, "current"));
+  commitAll(repo, "link current");
+  git(repo, "tag", "v1.0.0");
+  sb.spm("add", url, "--tag", "v1.0.0", "--path", "current", "--name", "alpha");
+  sb.publish();
+  writeFiles(repo, { "skills/alpha/SKILL.md": skillMd("alpha", "Clean update.\n") });
+  commitAll(repo, "update");
+  git(repo, "tag", "v1.1.0");
+
+  const [r] = await sb.update();
+  assert.deepEqual([r.result, r.blocking], ["created", 0]);
+  const pr = sb.pull(r.number);
+  assert.deepEqual(pr.labels, ["dependencies"]);
+  assert.match(pr.body, /### Content scan\n\nNo findings\./);
 });
 
 test("uncommitted tracked changes anywhere in the repository stop the action before any checkout", async (t) => {

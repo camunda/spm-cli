@@ -196,8 +196,9 @@ enum Command {
         #[arg(default_value = ".")]
         path: String,
         /// Follow symlinks that resolve anywhere inside DIR (which must contain
-        /// the path), as the install gate does with a dependency's checkout
-        /// root. By default only symlinks resolving inside the path are followed.
+        /// the path, itself possibly a symlink into DIR), as the install gate
+        /// does with a dependency's checkout root. By default only symlinks
+        /// resolving inside the path are followed.
         #[arg(long, value_name = "DIR")]
         within: Option<String>,
         #[command(flatten)]

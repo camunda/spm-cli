@@ -130,6 +130,10 @@ jobs:
           (cd "$root/project" && SPM_HOME="$root/home" spm init --target copilot && SPM_HOME="$root/home" spm add "$url" --branch main)
           g -C "$root/project" add -A
           g -C "$root/project" commit -qm "add demo"
+          # The action builds update branches on the base as pushed to origin.
+          g init -q --bare -b main "$root/origin.git"
+          g -C "$root/project" remote add origin "$root/origin.git"
+          g -C "$root/project" push -q origin main
           echo two >> "$root/skill/SKILL.md"
           g -C "$root/skill" commit -qam two
           echo "dir=$root/project" >> "$GITHUB_OUTPUT"

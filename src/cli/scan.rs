@@ -34,7 +34,9 @@ struct Summary {
 /// With `within`, symlinks are bounded by that directory instead of by `path`
 /// itself — the same [`crate::scan::scan_within`] call the install gate makes
 /// with a dependency's checkout root, so a scan of a plugin subdir sees exactly
-/// what installing it would materialize.
+/// what installing it would materialize. Like the install gate (which scans
+/// the canonical content path `store::ensure` returns), `path` itself may be a
+/// symlink as long as it resolves inside the boundary.
 pub(super) fn scan_cmd(path: &Path, within: Option<&Path>, json: bool) -> Result<()> {
     if !path.exists() {
         bail!("path does not exist: {}", path.display());
@@ -45,14 +47,15 @@ pub(super) fn scan_cmd(path: &Path, within: Option<&Path>, json: bool) -> Result
             let canon = |p: &Path| {
                 std::fs::canonicalize(p).with_context(|| format!("resolving {}", p.display()))
             };
-            if !crate::fsutil::contains(&canon(boundary)?, &canon(path)?) {
+            let (boundary_canon, path_canon) = (canon(boundary)?, canon(path)?);
+            if !crate::fsutil::contains(&boundary_canon, &path_canon) {
                 bail!(
                     "{} is not inside --within {}",
                     path.display(),
                     boundary.display()
                 );
             }
-            crate::scan::scan_within(path, boundary)?
+            crate::scan::scan_within(&path_canon, &boundary_canon)?
         }
     };
     let blocking = findings.iter().filter(|f| f.severity.blocks()).count();

@@ -413,7 +413,8 @@ CI gate on skill sources.
 
 Symlinks are followed only when they resolve inside the scanned path. With
 `--within <dir>`, a symlink is followed when it resolves anywhere inside `<dir>`,
-which must contain the path. That is the boundary the install gate uses for a
+which must contain the path (the path may itself be a symlink resolving inside
+`<dir>`). That is the boundary the install gate uses for a
 dependency at a repository subdirectory (its checkout root), so
 `spm scan <checkout>/plugins/kit --within <checkout>` sees exactly what
 installing that plugin would materialize.
