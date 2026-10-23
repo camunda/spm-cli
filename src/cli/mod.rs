@@ -66,6 +66,11 @@ enum Command {
         /// Applies to both a single add and --all.
         #[arg(long)]
         force: bool,
+        /// Only write ai.json and ai.lock: fetch and scan just the new entry,
+        /// keep every other ai.lock entry as is (without fetching it) and
+        /// install nothing into the targets (run `spm install` for that).
+        #[arg(long)]
+        lock_only: bool,
         #[command(flatten)]
         scope: ScopeArg,
         #[command(flatten)]
@@ -123,6 +128,11 @@ enum Command {
     Update {
         /// Skill or plugin to update; omit to update all.
         name: Option<String>,
+        /// Only write ai.lock: fetch and scan just what is re-resolved, keep
+        /// every other ai.lock entry as is (without fetching it) and install
+        /// nothing into the targets (run `spm install` for that).
+        #[arg(long)]
+        lock_only: bool,
         #[command(flatten)]
         scope: ScopeArg,
         #[command(flatten)]
@@ -248,6 +258,7 @@ pub fn run() -> Result<()> {
             all,
             plugin,
             force,
+            lock_only,
             scope,
             transport,
         } => {
@@ -262,6 +273,7 @@ pub fn run() -> Result<()> {
                     all,
                     plugin,
                     force,
+                    apply: sync::Apply::from_lock_only(lock_only),
                 },
             )
         }
@@ -307,11 +319,16 @@ pub fn run() -> Result<()> {
         }
         Command::Update {
             name,
+            lock_only,
             scope,
             transport,
         } => {
             transport.apply();
-            update::update(&scope.resolve(&cwd), name)
+            update::update(
+                &scope.resolve(&cwd),
+                name,
+                sync::Apply::from_lock_only(lock_only),
+            )
         }
         Command::Install {
             locked,
@@ -320,7 +337,7 @@ pub fn run() -> Result<()> {
         } => {
             transport.apply();
             let scope = scope.resolve(&cwd);
-            let n = sync::sync(&scope, false, None, locked)?;
+            let n = sync::sync(&scope, false, None, locked, sync::Apply::Install)?;
             let noun = if n == 1 { "dependency" } else { "dependencies" };
             println!("installed {n} {noun}");
             Ok(())

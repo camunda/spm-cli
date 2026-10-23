@@ -1,5 +1,5 @@
 use super::clean::managed_names;
-use super::sync::save_and_sync;
+use super::sync::{save_and_sync, Apply};
 use crate::lockfile::Lockfile;
 use crate::manifest::Manifest;
 use crate::pathid::{deletion_target, identity, resolve, NodeId};
@@ -61,7 +61,7 @@ pub(super) fn target_add(scope: &Scope, vendors: Vec<String>) -> Result<()> {
     }
 
     // Materialize existing skills into the newly-added vendor(s).
-    save_and_sync(scope, state_lock, &manifest)?;
+    save_and_sync(scope, state_lock, &manifest, Apply::Install)?;
     println!("added target(s): {}", added.join(", "));
     Ok(())
 }

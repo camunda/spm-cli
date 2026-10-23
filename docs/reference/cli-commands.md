@@ -6,12 +6,12 @@ the authoritative, version-specific usage.
 ```bash
 spm init [--target amp|claude|cline|codex|copilot|cursor|gemini|windsurf ...] [-g]  # scaffold ai.json (repeatable / comma-separated)
 spm add <git> [--tag|--branch|--commit <v>|--version "<range>"] \  # add + install a skill (no selector = default branch; github.com/owner/repo@ref also works)
-        [--path <subdir>] [--name <local-name>] [--all] [--force] [-g]  # --all: add every skill under --path
+        [--path <subdir>] [--name <local-name>] [--all] [--force] [--lock-only] [-g]  # --all: add every skill under --path
         [--plugin]                                 # --plugin: add a full plugin instead of a skill
 spm target add [vendor ...] [-g]                   # add target vendor(s); no arg = pick interactively
 spm target remove <vendor ...> [-g]               # drop target vendor(s) + clean their output; alias: rm
 spm remove <name> [--plugin] [-g]                  # drop a skill (or a plugin with --plugin); alias: rm
-spm update [name] [-g]                             # re-resolve branches/tags to latest
+spm update [name] [--lock-only] [-g]               # re-resolve branches/tags to latest; --lock-only: write ai.lock only
 spm link <name> <dir> [-g]                         # develop a declared skill/plugin from a local dir (machine-local override)
 spm unlink <name>|--all [-g]                       # drop link override(s), restore the locked version
 spm install [-g] [--locked]                        # rebuild from ai.lock (after clone); alias: i; --locked fails if ai.lock is out of sync (CI)
@@ -117,6 +117,30 @@ keeps the new entry (so spm still owns any output already written) and the
 error tells you to run `spm install` once the cause is fixed. `spm remove` and
 `spm target add` behave the same way.
 
+#### Writing only the lock (`--lock-only`)
+
+`spm add --lock-only` and `spm update --lock-only` write `ai.json`/`ai.lock`
+without installing anything, like npm's `--package-lock-only`. Only the entries
+the command re-resolves (the added or updated dependency; everything for a bare
+`spm update`) are fetched into the store and scanned. Every other `ai.lock`
+entry is kept exactly as it is — its commit, a plugin's `bundled_skills`, and
+the transitive pins below it — without contacting its remote, so an unrelated
+dependency whose remote is unreachable does not block the change. An entry
+whose `ai.json` request no longer matches its pin is still re-resolved, as in
+any sync. Nothing is written into the targets: run `spm install` to materialize
+the new lock. The lock is the same one the command writes without
+`--lock-only`. [`spm link`](#spm-link-name-dir) overrides never affect
+`ai.lock`, so they are ignored (a missing linked directory does not block it).
+
+With `resolveTransitive` on, every other skill is still read (from the store, or
+fetched when missing) for its nested `ai.json`, which decides the transitive
+pins; only plugins and the targets are skipped.
+
+```bash
+spm update reviewer --lock-only
+spm add https://github.com/org/repo --tag v2.0.0 --name reviewer --force --lock-only
+```
+
 #### Adding a full plugin (`--plugin`)
 
 Beyond individual skills, spm can install a **Claude Code plugin** — one that
@@ -185,6 +209,9 @@ child, and re-resolving a child whose pin the new manifest changed), but a
 transitive child that root still requests by the **same** moving ref stays
 pinned. Refresh the whole graph — every transitive child — with a bare
 `spm update`. See [Transitive Skill Dependencies](/guide/transitive-dependencies).
+
+`--lock-only` rewrites `ai.lock` without installing, fetching only what it
+re-resolves — see [Writing only the lock](#writing-only-the-lock-lock-only).
 
 ### `spm link <name> <dir>`
 

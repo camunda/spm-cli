@@ -1,7 +1,7 @@
 use super::common::default_name;
 use super::common::VersionArg;
 use super::shorthand;
-use super::sync::save_and_sync;
+use super::sync::{save_and_sync, Apply};
 use crate::links::StateLock;
 use crate::manifest::{Manifest, SkillSpec};
 use crate::scope::Scope;
@@ -18,6 +18,7 @@ pub(super) struct AddRequest {
     pub(super) all: bool,
     pub(super) plugin: bool,
     pub(super) force: bool,
+    pub(super) apply: Apply,
 }
 
 pub(super) fn add(scope: &Scope, req: AddRequest) -> Result<()> {
@@ -29,6 +30,7 @@ pub(super) fn add(scope: &Scope, req: AddRequest) -> Result<()> {
         all,
         plugin,
         force,
+        apply,
     } = req;
     let dir = scope.manifest_dir()?;
     // Held from reading `ai.json` to the last write (see `StateLock`).
@@ -52,7 +54,9 @@ pub(super) fn add(scope: &Scope, req: AddRequest) -> Result<()> {
         crate::manifest::validate_subpath(sub)?;
     }
     if all {
-        add_all(scope, state_lock, &mut manifest, git, version, path, force)?;
+        let subs = add_all(scope, &mut manifest, git, version, path, force)?;
+        save_and_sync(scope, state_lock, &manifest, apply)?;
+        println!("added {} skill(s): {}", subs.len(), subs.join(", "));
     } else {
         let name = name.unwrap_or_else(|| {
             // Prefer the `--path` basename, but fall back to the git URL when the
@@ -123,7 +127,7 @@ pub(super) fn add(scope: &Scope, req: AddRequest) -> Result<()> {
         } else {
             manifest.skills.insert(name.clone(), spec);
         }
-        save_and_sync(scope, state_lock, &manifest)?;
+        save_and_sync(scope, state_lock, &manifest, apply)?;
         println!("added {kind} {name}");
     }
     Ok(())
@@ -149,15 +153,15 @@ fn with_default_branch(git: &str, mut version: VersionArg) -> Result<VersionArg>
 /// per-sub-skill `spm add … --path <sub> --name <sub>` commands that the
 /// container warning suggests — so it enumerates sub-skills through the same
 /// `skillcheck::child_skills` source of truth, guaranteeing the two never drift.
+/// Returns the added names; the caller saves and syncs the edited `manifest`.
 fn add_all(
     scope: &Scope,
-    state_lock: StateLock,
     manifest: &mut Manifest,
     git: String,
     version: VersionArg,
     path: Option<String>,
     force: bool,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let dir = scope.manifest_dir()?;
     let version = with_default_branch(&git, version)?;
     // Version selector is validated once for the container; every derived entry
@@ -213,7 +217,5 @@ fn add_all(
             },
         );
     }
-    save_and_sync(scope, state_lock, manifest)?;
-    println!("added {} skill(s): {}", subs.len(), subs.join(", "));
-    Ok(())
+    Ok(subs)
 }

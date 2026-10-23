@@ -8,6 +8,29 @@ use anyhow::{anyhow, bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
+/// What a sync writes once everything is resolved and checked.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Apply {
+    /// Materialize into every target, then write `ai.lock`.
+    Install,
+    /// `--lock-only`: write `ai.lock` only. Only the entries this run
+    /// (re)resolves are fetched and scanned; every entry reused from `ai.lock`
+    /// is carried over as is, without touching its remote or the store (with
+    /// `resolveTransitive` on, skills are still walked to read their nested
+    /// `ai.json`). Nothing is materialized.
+    LockOnly,
+}
+
+impl Apply {
+    pub(super) fn from_lock_only(lock_only: bool) -> Self {
+        if lock_only {
+            Apply::LockOnly
+        } else {
+            Apply::Install
+        }
+    }
+}
+
 /// Core pipeline shared by add/remove/update/install:
 /// resolve manifest -> ai.lock -> populate store -> materialize vendor config.
 ///
@@ -24,6 +47,7 @@ pub(super) fn sync(
     force_refresh: bool,
     only: Option<&str>,
     locked: bool,
+    apply: Apply,
 ) -> Result<usize> {
     let state_lock = StateLock::acquire(scope, false)?;
     let dir = scope.manifest_dir()?;
@@ -32,7 +56,7 @@ pub(super) fn sync(
     let mode = if locked {
         LockMode::Locked
     } else {
-        LockMode::Write
+        LockMode::Write(apply)
     };
     plan(
         scope,
@@ -71,8 +95,9 @@ pub(super) fn sync_with_links(scope: &Scope, state_lock: StateLock, links: Links
 /// How a sync may treat `ai.lock`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LockMode {
-    /// Re-resolve what changed or is unpinned, then write `ai.lock`.
-    Write,
+    /// Re-resolve what changed or is unpinned, then write `ai.lock` — and,
+    /// unless [`Apply::LockOnly`], materialize into the targets.
+    Write(Apply),
     /// `spm install --locked`: install exactly `ai.lock`, never write it.
     Locked,
     /// `spm link`/`spm unlink`: like [`LockMode::Locked`] — they promise to
@@ -126,6 +151,7 @@ pub(super) fn save_and_sync(
     scope: &Scope,
     state_lock: StateLock,
     manifest: &Manifest,
+    apply: Apply,
 ) -> Result<usize> {
     let dir = scope.manifest_dir()?;
     let path = Manifest::path_in(&dir);
@@ -140,7 +166,7 @@ pub(super) fn save_and_sync(
         Links::load(scope)?,
         false,
         None,
-        LockMode::Write,
+        LockMode::Write(apply),
     )?;
     std::fs::write(&path, &text).with_context(|| format!("writing {}", path.display()))?;
     plan.apply(scope).map_err(|err| {
@@ -172,6 +198,7 @@ struct Plan {
     links: Option<Links>,
     _snapshots: Option<Snapshots>,
     _state_lock: StateLock,
+    apply: Apply,
 }
 
 /// Private copies of the linked directories, made with the same safe-copy
@@ -254,7 +281,11 @@ fn plan(
     if mode == LockMode::Links && !state_lock.is_exclusive() {
         bail!("internal error: editing links requires the exclusive links lock");
     }
-    let locked = mode != LockMode::Write;
+    let (locked, apply) = match mode {
+        LockMode::Write(apply) => (false, apply),
+        LockMode::Locked | LockMode::Links => (true, Apply::Install),
+    };
+    let lock_only = apply == Apply::LockOnly;
     let dir = scope.manifest_dir()?;
     if manifest.targets.is_empty() {
         bail!("ai.json declares no targets");
@@ -262,7 +293,13 @@ fn plan(
     // Source policy: judge every direct source before any network access, and
     // report all denied ones at once.
     let policy = crate::policy::activate(manifest, &dir)?;
-    let mut linked = resolve_links(scope, manifest, &links)?;
+    // `ai.lock` never depends on links, and a lock-only sync writes nothing
+    // else, so it ignores them (a missing linked directory can't block it).
+    let mut linked = if lock_only {
+        BTreeMap::new()
+    } else {
+        resolve_links(scope, manifest, &links)?
+    };
     let denied: Vec<String> = manifest
         .skills
         .iter()
@@ -374,6 +411,9 @@ fn plan(
         );
     }
 
+    // Direct entries (re)resolved by this run rather than reused from ai.lock:
+    // the only ones a lock-only sync fetches.
+    let mut fresh: BTreeSet<String> = BTreeSet::new();
     for (name, spec) in &manifest.skills {
         spec.version()?; // validates selectors
         let refresh = force_refresh && only.is_none_or(|o| o == name);
@@ -423,6 +463,9 @@ fn plan(
                 locked.also_satisfies = evidence;
             }
         }
+        if how == "resolved" {
+            fresh.insert(name.clone());
+        }
         let short = &locked.commit[..locked.commit.len().min(8)];
         let reference = locked.display_reference();
         println!("  {name:<width$}  {reference} @ {short}  ({how})");
@@ -451,12 +494,17 @@ fn plan(
                 "resolved",
             ),
         };
-        // A linked plugin is not fetched when its pin is reused, so its locked
-        // bundled-skill list is carried forward rather than re-enumerated from
-        // the (unfetched) checkout — keeping `ai.lock` unaffected by the link.
-        if how == "resolved" || !linked.contains_key(name) {
+        if how == "resolved" {
+            fresh.insert(name.clone());
+        }
+        // A reused pin is the same commit, so its bundled skills are too. They
+        // are carried forward rather than re-enumerated from a checkout when
+        // that checkout is not used: by a lock-only sync (which does not fetch
+        // the plugin again) or for a linked plugin (keeping `ai.lock`
+        // unaffected by the link).
+        if how == "resolved" || !(lock_only || linked.contains_key(name)) {
             locked.bundled_skills.clear();
-        } else {
+        } else if linked.contains_key(name) {
             reused_linked_plugins.insert(name.clone());
         }
         locked.also_satisfies.clear();
@@ -502,6 +550,10 @@ fn plan(
     }
     let mut linked_plugin_skills: Vec<String> = Vec::new();
     for (name, locked) in &mut lock.plugins {
+        if lock_only && !fresh.contains(name) {
+            println!("  {name:<width$}  unchanged (lock only, not fetched)");
+            continue;
+        }
         let link = linked.get(name);
         // A linked plugin only needs its locked checkout to record the commit's
         // bundled skills in `ai.lock` when its pin was freshly resolved.
@@ -579,8 +631,23 @@ fn plan(
     if !manifest.skills.is_empty() {
         println!("fetching skills into store");
     }
+    // Lock-only without transitive resolution: a reused skill is a leaf whose
+    // pin is carried over as is, so only the (re)resolved ones are walked. With
+    // it on, every skill is walked: its nested `ai.json` shapes the lock.
+    let walked: BTreeMap<String, LockedSkill> = if lock_only && !manifest.resolve_transitive {
+        for name in lock.skills.keys().filter(|n| !fresh.contains(*n)) {
+            println!("  {name:<width$}  unchanged (lock only, not fetched)");
+        }
+        lock.skills
+            .iter()
+            .filter(|(n, _)| fresh.contains(*n))
+            .map(|(n, l)| (n.clone(), l.clone()))
+            .collect()
+    } else {
+        lock.skills.clone()
+    };
     let expansion = transitive::expand(
-        &lock.skills,
+        &walked,
         &transitive::Ctx {
             prev: &prev.skills,
             resolve_transitive: manifest.resolve_transitive,
@@ -648,7 +715,9 @@ fn plan(
     // even skills-only targets get them. A bundled skill name that collides with
     // a standalone skill (or another plugin's skill) is a hard error: silently
     // overwriting a skill's content by manifest-key ordering is exactly the kind
-    // of drift AGENTS.md's "no drift surfaces" rule forbids.
+    // of drift AGENTS.md's "no drift surfaces" rule forbids. A lock-only sync
+    // materializes nothing and fetches just some plugins, so the names it
+    // carries over unfetched are checked from the lock below.
     for s in plugin_skills {
         if materialized.iter().any(|m| m.name == s.name) {
             bail!(
@@ -743,6 +812,7 @@ fn plan(
         links,
         _snapshots: snapshots,
         _state_lock: state_lock,
+        apply,
     })
 }
 
@@ -751,6 +821,14 @@ impl Plan {
     /// persist `ai.lock`. Returns the number of locked skills + plugins.
     fn apply(self, scope: &Scope) -> Result<usize> {
         let lock = &self.lock;
+        if self.apply == Apply::LockOnly {
+            lock.save(&self.dir)?;
+            println!(
+                "wrote ai.lock only; run `{}` to install into the targets",
+                install_command(scope)
+            );
+            return Ok(lock.skills.len() + lock.plugins.len());
+        }
         if self.declares_any {
             println!("materializing: {}", self.targets.join(", "));
         }

@@ -336,12 +336,12 @@ make install PREFIX=~/.local  # or a custom prefix
 ```bash
 spm init [--target amp|claude|cline|codex|copilot|cursor|gemini|windsurf ...] [-g]  # scaffold ai.json (repeatable / comma-separated)
 spm add <git> [--tag|--branch|--commit <v>|--version "<range>"] \  # add + install a skill (no selector = default branch; github.com/owner/repo@ref also works)
-        [--path <subdir>] [--name <local-name>] [--all] [-g]  # --all: add every skill under --path
+        [--path <subdir>] [--name <local-name>] [--all] [--lock-only] [-g]  # --all: add every skill under --path
         [--plugin]                                 # --plugin: add a full plugin (see "Full plugins")
 spm target add [vendor ...] [-g]                   # add target vendor(s); no arg = pick interactively
 spm target remove <vendor ...> [-g]               # drop target vendor(s) + clean their output; alias: rm
 spm remove <name> [--plugin] [-g]                  # drop a skill (or a plugin with --plugin); alias: rm
-spm update [name] [-g]                              # re-resolve branches/tags to latest
+spm update [name] [--lock-only] [-g]                # re-resolve branches/tags to latest; --lock-only: write ai.lock only
 spm link <name> <dir> [-g]                         # develop a declared skill/plugin from a local dir (machine-local override)
 spm unlink <name>|--all [-g]                       # drop link override(s), restore the locked version
 spm install [-g] [--locked]                        # rebuild from ai.lock (after clone); alias: i; --locked fails if ai.lock is out of sync (CI)
