@@ -95,7 +95,8 @@ remote before trying it as a path, a local path must be unambiguous under a
 policy: a `file://` URL, an absolute path, or one starting with `./`/`../`.
 A URL spm can't reduce to an identity (an
 unknown scheme, a `transport::address` helper, a `?`/`#` inside the URL
-authority, a path with `..`, `%`-escapes or other ambiguous characters) is **denied** under any policy.
+authority, a path with `..`, `%`-escapes or other ambiguous characters, leading
+or trailing whitespace) is **denied** under any policy.
 
 ## What is enforced, and when
 
@@ -115,9 +116,10 @@ is written:
 - `--protocol` and `--protocol-fallback` can't bypass the policy: the URL you
   wrote **and** every rewritten URL actually contacted must be allowed.
 - While a policy is in force git does not follow HTTP redirects
-  (`http.followRedirects=false`), so an allowed URL can't redirect to a host or
-  namespace the policy never judged. Without a policy, redirects behave as
-  before.
+  (`http.followRedirects=false`, overriding your git config), so an allowed URL
+  can't redirect to a host or namespace the policy never judged. The same
+  setting stops git from following a dumb-HTTP server's
+  `objects/info/http-alternates`. Without a policy, both behave as before.
 
 Git's own URL rewriting in your git config (`url.<base>.insteadOf`) is machine
 configuration, trusted like the policy file itself; spm judges the URL as written

@@ -7243,6 +7243,8 @@ fn policy_denied_add_fails_before_git_and_leaves_manifest_untouched() {
         // git decodes SSH URLs before splitting the host off: this is
         // `evil.test`, with the rest as its path.
         &["add", "ssh://evil.test%2Fgit@example.test/org/skill.git"],
+        // For SSH a trailing space is part of the repository path git uses.
+        &["add", "git@example.test:org/skill.git ", "--branch", "main"],
         // The shorthand's ref lookup would need git: the expanded URL is
         // checked first.
         &["add", "github.com/attacker/skill@v1"],
@@ -7942,14 +7944,17 @@ fn policy_remote_alias_is_not_a_local_source() {
     sb.ok(&["add", &abs, "--branch", "main", "--name", "greet"]);
 }
 
-/// A one-shot HTTP server on 127.0.0.1 that answers every request under
-/// `/allowed/` with a 301 to the same path under `/denied/`, and 404s
-/// everything else. Returns the port and the request paths it has seen.
-fn redirecting_http_server() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+/// A minimal HTTP/1.1 server on 127.0.0.1 for hermetic transport tests: each
+/// request path (query string included) goes to `respond(port, path)`, which
+/// returns the status line, extra headers and body. Returns the port and every
+/// request path seen.
+type Seen = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+type Response = (&'static str, Vec<String>, Vec<u8>);
+fn http_server(respond: impl Fn(u16, &str) -> Response + Send + 'static) -> (u16, Seen) {
     use std::io::{BufRead, BufReader, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
-    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen: Seen = Default::default();
     let log = seen.clone();
     std::thread::spawn(move || {
         for stream in listener.incoming() {
@@ -7969,18 +7974,55 @@ fn redirecting_http_server() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String
             }
             let path = request.split_whitespace().nth(1).unwrap_or("").to_string();
             log.lock().unwrap().push(path.clone());
-            let response = match path.strip_prefix("/allowed/") {
-                Some(rest) => format!(
-                    "HTTP/1.1 301 Moved Permanently\r\nLocation: http://127.0.0.1:{port}/denied/{rest}\r\n\
-                     Content-Length: 0\r\nConnection: close\r\n\r\n"
-                ),
-                None => "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                    .to_string(),
-            };
-            let _ = stream.write_all(response.as_bytes());
+            let (status, headers, body) = respond(port, &path);
+            let mut head = format!("HTTP/1.1 {status}\r\n");
+            for h in headers {
+                head.push_str(&h);
+                head.push_str("\r\n");
+            }
+            head.push_str(&format!(
+                "Content-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            ));
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(&body);
         }
     });
     (port, seen)
+}
+
+/// Answers every request under `/allowed/` with a 301 to the same path under
+/// `/denied/`, and 404s everything else.
+fn redirecting_http_server() -> (u16, Seen) {
+    http_server(|port, path| match path.strip_prefix("/allowed/") {
+        Some(rest) => (
+            "301 Moved Permanently",
+            vec![format!("Location: http://127.0.0.1:{port}/denied/{rest}")],
+            Vec::new(),
+        ),
+        None => ("404 Not Found", Vec::new(), Vec::new()),
+    })
+}
+
+/// A dumb-HTTP static file server rooted at `root` (query strings ignored).
+fn static_http_server(root: PathBuf) -> (u16, Seen) {
+    http_server(move |_, path| {
+        let rel = path.split('?').next().unwrap_or("").trim_start_matches('/');
+        match std::fs::read(root.join(rel)) {
+            Ok(body) if !rel.is_empty() => ("200 OK", Vec::new(), body),
+            _ => ("404 Not Found", Vec::new(), Vec::new()),
+        }
+    })
+}
+
+/// The proxy-free command for a `127.0.0.1` HTTP test server.
+fn local_http_command(sb: &Sandbox, args: &[&str]) -> Command {
+    let mut cmd = sb.command(args);
+    cmd.env("NO_PROXY", "*").env("no_proxy", "*");
+    for var in ["http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"] {
+        cmd.env_remove(var);
+    }
+    cmd
 }
 
 /// Under a policy git must not follow an HTTP redirect from an allowed URL to
@@ -7991,13 +8033,7 @@ fn policy_blocks_http_redirects_to_unchecked_destinations() {
     let (port, seen) = redirecting_http_server();
     let url = format!("http://127.0.0.1:{port}/allowed/skill.git");
     let run = |sb: &Sandbox| {
-        sb.command(&["add", &url, "--branch", "main"])
-            .env("NO_PROXY", "*")
-            .env("no_proxy", "*")
-            .env_remove("http_proxy")
-            .env_remove("HTTP_PROXY")
-            .env_remove("all_proxy")
-            .env_remove("ALL_PROXY")
+        local_http_command(sb, &["add", &url, "--branch", "main"])
             .output()
             .unwrap()
     };
@@ -8031,4 +8067,116 @@ fn policy_blocks_http_redirects_to_unchecked_destinations() {
     let out = run(&sb);
     assert!(!out.status.success(), "the redirect target is a 404");
     assert!(denied_hits() > 0, "{}", stderr_of(&out));
+}
+
+/// Dumb-HTTP `objects/info/http-alternates` are another way for a server to
+/// send git elsewhere. git treats them like redirects, so under a policy
+/// (`http.followRedirects=false`, which overrides user config) an allowed
+/// repository can't pull objects from a denied alternate — even when the
+/// user's own git config says `http.followRedirects=true`.
+#[test]
+fn policy_blocks_dumb_http_alternates_to_unchecked_destinations() {
+    let sb = Sandbox::new();
+    let srv = sb.root.join("srv");
+    let allowed = srv.join("allowed/repo.git");
+    let denied = srv.join("denied/repo.git");
+    git_in(
+        &sb.root,
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            "--no-local",
+            sb.skill_repo.to_str().unwrap(),
+            allowed.to_str().unwrap(),
+        ],
+    );
+    // Unpack so objects are loose files the dumb walker requests one by one.
+    for pack in std::fs::read_dir(allowed.join("objects/pack")).unwrap() {
+        let pack = pack.unwrap().path();
+        if pack.extension().is_some_and(|e| e == "pack") {
+            let moved = sb.root.join("p.pack");
+            std::fs::rename(&pack, &moved).unwrap();
+            std::fs::remove_file(pack.with_extension("idx")).unwrap();
+            // `--git-dir` keeps this working under `safe.bareRepository=explicit`.
+            let out = Command::new("git")
+                .arg("--git-dir")
+                .arg(&allowed)
+                .args(["unpack-objects", "-q"])
+                .stdin(std::fs::File::open(&moved).unwrap())
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+    let out = Command::new("git")
+        .arg("--git-dir")
+        .arg(&allowed)
+        .arg("update-server-info")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Every object lives only behind the alternate, on a denied path.
+    std::fs::create_dir_all(&denied).unwrap();
+    std::fs::rename(allowed.join("objects"), denied.join("objects")).unwrap();
+    std::fs::create_dir_all(allowed.join("objects/info")).unwrap();
+    std::fs::copy(
+        denied.join("objects/info/packs"),
+        allowed.join("objects/info/packs"),
+    )
+    .unwrap();
+
+    let (port, seen) = static_http_server(srv);
+    std::fs::write(
+        allowed.join("objects/info/http-alternates"),
+        format!("http://127.0.0.1:{port}/denied/repo.git/objects\n"),
+    )
+    .unwrap();
+    let url = format!("http://127.0.0.1:{port}/allowed/repo.git");
+    let run = |sb: &Sandbox| {
+        local_http_command(sb, &["add", &url, "--branch", "main", "--name", "greet"])
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "http.followRedirects")
+            .env("GIT_CONFIG_VALUE_0", "true")
+            .output()
+            .unwrap()
+    };
+    let denied_hits = || {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|p| p.starts_with("/denied/"))
+            .count()
+    };
+
+    // Sanity: with no policy the alternate is followed and the add succeeds.
+    sb.ok(&["init", "--target", "claude"]);
+    let out = run(&sb);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(denied_hits() > 0);
+
+    // Under a policy allowing only `/allowed/*`, the alternate is never used.
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    set_project_policy(&sb, &[&format!("127.0.0.1:{port}/allowed/*")]);
+    seen.lock().unwrap().clear();
+    let out = run(&sb);
+    assert!(!out.status.success());
+    assert!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .any(|p| p.starts_with("/allowed/")),
+        "{}",
+        stderr_of(&out)
+    );
+    assert_eq!(denied_hits(), 0, "{}", stderr_of(&out));
 }

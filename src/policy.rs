@@ -51,7 +51,13 @@ impl Source {
     /// can never be judged differently. Everything else is parsed strictly and
     /// fails closed to [`Source::Opaque`].
     fn classify(git: &str) -> Source {
-        let s = git.trim();
+        // Whitespace around the value is passed to git verbatim (for SSH a
+        // trailing space is part of the repository path), so it can't be
+        // trimmed for matching: judge exactly what git will see, or nothing.
+        let s = git;
+        if s.trim() != s {
+            return Source::Opaque;
+        }
         if let Some(identity) = crate::git::remote_identity(s) {
             return match identity
                 .strip_prefix("https://")
@@ -503,9 +509,25 @@ mod tests {
             "deploy@github.com:camunda/skills",
             "ssh://user:secret@github.com/camunda/skills",
             "git://github.com/camunda/skills",
-            "  https://github.com/camunda/skills  ",
         ] {
             assert_eq!(Source::classify(url), want, "{url}");
+        }
+    }
+
+    /// Surrounding whitespace is part of what git is handed (for SSH a trailing
+    /// space names a different repository), so it is never trimmed away.
+    #[test]
+    fn padded_sources_are_opaque() {
+        let exact = policy(&["git.example/team/approved", "file://*"]);
+        for url in [
+            "  https://github.com/camunda/skills  ",
+            "git@git.example:team/approved.git ",
+            " git@git.example:team/approved.git",
+            "https://git.example/team/approved\t",
+            "/tmp/repo\n",
+        ] {
+            assert_eq!(Source::classify(url), Source::Opaque, "{url:?}");
+            assert!(exact.check(url).is_err(), "{url:?}");
         }
     }
 
