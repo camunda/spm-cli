@@ -90,8 +90,9 @@ enum Command {
     },
     /// Develop a declared skill or plugin from a local directory: materialize
     /// its current content (uncommitted edits included) instead of the locked
-    /// commit. The override is machine-local (`.spm/links.json`, gitignored; or
-    /// `$SPM_HOME/links.json` with -g) — ai.json and ai.lock are not modified.
+    /// commit. The override is machine-local, kept under `$SPM_HOME` and never
+    /// in the checkout (`links/<project>-<hash>.json`, or `links.json` with -g)
+    /// — ai.json and ai.lock are not modified.
     /// Re-run `spm install` to pick up further edits.
     Link {
         /// Name of the skill or plugin, as declared in ai.json.

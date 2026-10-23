@@ -19,7 +19,7 @@ gitignored and never committed. Run `spm --help` or
 | `ai.json` | You (or `spm init`, `spm add`, `spm remove`, `spm target add`, `spm target remove`) | Yes |
 | `ai.lock` | spm, on every successful sync | Yes |
 | Materialized skills (for example `.spm/claude/`, `.agents/skills/spm-managed-skills/`) | spm | No, gitignored |
-| `.spm/links.json` (local `spm link` overrides) | `spm link`, `spm unlink` | No, gitignored |
+| `$SPM_HOME/links/<project>-<hash>.json` (local `spm link` overrides; `$SPM_HOME/links.json` with `-g`) | `spm link`, `spm unlink` | No, outside the checkout |
 | Global store (`$SPM_HOME/store`, default `~/.spm/store`) | spm | No, a fetch cache shared by all projects |
 
 - Do not hand-edit `ai.lock`. Edit `ai.json` only for things the CLI cannot do,
@@ -201,8 +201,8 @@ spm link <name> <dir> [--protocol ssh|https] [--protocol-fallback] [-g]
 Overrides an **already-declared** skill or plugin with a local directory (the
 skill dir holding `SKILL.md`, or the plugin root) and materializes its current
 content, uncommitted edits included, into every target. The override lives in
-the gitignored `.spm/links.json` (`$SPM_HOME/links.json` with `-g`, stored
-absolute); a relative `<dir>` is kept relative to the project root. `ai.json`
+`$SPM_HOME/links/<project>-<hash>.json`, outside the checkout (`$SPM_HOME/links.json`
+with `-g`, stored absolute; a repository-supplied `.spm/links.json` is ignored); a relative `<dir>` is kept relative to the project root. `ai.json`
 and `ai.lock` are **not** modified, so never commit anything for a link. There
 is no file watching: run `spm install` after each edit. Linked content is
 copied (not symlinked), skips `.git`, may not symlink outside the directory,

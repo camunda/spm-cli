@@ -3,26 +3,24 @@
 //! A link points an *already-declared* skill or plugin at a local directory, so
 //! its current working-tree content (uncommitted edits included) is
 //! materialized instead of the commit pinned in `ai.lock`. Links are machine
-//! state, never shared: they live in a gitignored, spm-owned file — the
-//! project's `.spm/links.json`, or `$SPM_HOME/links.json` for the global scope
-//! — and `ai.json`/`ai.lock` are never touched by them, so teammates and CI are
-//! unaffected.
+//! state, never shared: they live in an spm-owned file under `$SPM_HOME`, never
+//! in the checkout — `$SPM_HOME/links/<project>-<hash>.json` per project, or
+//! `$SPM_HOME/links.json` for the global scope — and `ai.json`/`ai.lock` are
+//! never touched by them, so teammates and CI are unaffected. Keeping them out
+//! of the checkout means a repository can never supply (or commit) one: only
+//! running `spm link` on this machine activates a local source.
 
 use crate::manifest::validate_skill_name;
+use crate::paths;
 use crate::scope::Scope;
-use crate::{gitignore, paths};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 const FILE: &str = "links.json";
-/// Project-scope dir holding the links file (shared with Claude's output, and
-/// gitignored as a whole).
-const PROJECT_DIR: &str = ".spm";
-const GITIGNORE_ENTRY: &str = ".spm/";
-const GITIGNORE_COMMENT: &str =
-    "# spm local state (`spm link` overrides, generated output) — machine-specific, not committed.";
+/// `$SPM_HOME` subdirectory holding one links file per project.
+const PROJECT_DIR: &str = "links";
 
 /// The parsed links file.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,9 +51,15 @@ pub struct Linked {
 impl Links {
     /// Where this scope's links file lives.
     pub fn path(scope: &Scope) -> Result<PathBuf> {
+        let home = paths::spm_home()?;
         Ok(match scope {
-            Scope::Project { root } => root.join(PROJECT_DIR).join(FILE),
-            Scope::Global => paths::spm_home()?.join(FILE),
+            Scope::Project { root } => {
+                let canon = root
+                    .canonicalize()
+                    .with_context(|| format!("resolving project root {}", root.display()))?;
+                home.join(PROJECT_DIR).join(project_file_name(&canon))
+            }
+            Scope::Global => home.join(FILE),
         })
     }
 
@@ -66,8 +70,11 @@ impl Links {
 
     /// Load the links file; a missing file means no links.
     pub fn load(scope: &Scope) -> Result<Self> {
-        let p = Self::path(scope)?;
-        let text = match std::fs::read_to_string(&p) {
+        Self::load_from(&Self::path(scope)?)
+    }
+
+    fn load_from(p: &Path) -> Result<Self> {
+        let text = match std::fs::read_to_string(p) {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
             Err(e) => return Err(e).with_context(|| format!("reading {}", p.display())),
@@ -82,35 +89,26 @@ impl Links {
         Ok(links)
     }
 
-    /// Persist the links file, deleting it once it holds nothing. In the project
-    /// scope the file's directory is gitignored first, so a link can never be
-    /// committed by accident.
+    /// Persist the links file, deleting it once it holds nothing.
     pub fn save(&self, scope: &Scope) -> Result<()> {
-        let p = Self::path(scope)?;
+        self.save_to(&Self::path(scope)?)
+    }
+
+    fn save_to(&self, p: &Path) -> Result<()> {
         if self.links.is_empty() && self.managed.is_empty() {
-            return match std::fs::remove_file(&p) {
+            return match std::fs::remove_file(p) {
                 Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
                     Err(e).with_context(|| format!("removing {}", p.display()))
                 }
                 _ => Ok(()),
             };
         }
-        Self::ensure_ignored(scope)?;
         if let Some(parent) = p.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
         let text = serde_json::to_string_pretty(self)?;
-        std::fs::write(&p, text + "\n").with_context(|| format!("writing {}", p.display()))
-    }
-
-    /// Make sure the project's links file is gitignored (a no-op globally, or
-    /// when the rule is already there).
-    pub fn ensure_ignored(scope: &Scope) -> Result<()> {
-        match scope {
-            Scope::Project { root } => gitignore::ensure(root, GITIGNORE_COMMENT, GITIGNORE_ENTRY),
-            Scope::Global => Ok(()),
-        }
+        std::fs::write(p, text + "\n").with_context(|| format!("writing {}", p.display()))
     }
 
     /// Every skill name materialized for a scope with this lock and these
@@ -153,6 +151,33 @@ impl Links {
     }
 }
 
+/// The links file name for a project: its directory name (for humans browsing
+/// `$SPM_HOME/links`) plus a stable hash of its canonical root (for
+/// uniqueness). FNV-1a is used because, unlike std's `DefaultHasher`, its output
+/// is fixed across Rust releases, so an upgrade never orphans a project's links.
+fn project_file_name(canon_root: &Path) -> String {
+    let label: String = canon_root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(40)
+        .collect();
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in canon_root.to_string_lossy().bytes() {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{label}-{hash:016x}.json")
+}
+
 /// How `spm link` records `dir` (given relative to `cwd`): kept as typed when
 /// relative in the project scope (where `cwd` is the project root), so a moved
 /// or re-cloned project keeps working; otherwise made absolute, since the
@@ -184,14 +209,13 @@ mod tests {
     #[test]
     fn rejects_unsafe_names_in_hand_edited_file() {
         let root = tmp("unsafe");
-        let scope = Scope::Project { root: root.clone() };
-        std::fs::create_dir_all(root.join(PROJECT_DIR)).unwrap();
+        let file = root.join(FILE);
         for body in [
             r#"{"links":{"../x":"d"}}"#,
             r#"{"links":{},"managed":["a/b"]}"#,
         ] {
-            std::fs::write(root.join(PROJECT_DIR).join(FILE), body).unwrap();
-            assert!(Links::load(&scope).is_err(), "{body}");
+            std::fs::write(&file, body).unwrap();
+            assert!(Links::load_from(&file).is_err(), "{body}");
         }
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -199,17 +223,26 @@ mod tests {
     #[test]
     fn empty_save_deletes_the_file() {
         let root = tmp("empty");
-        let scope = Scope::Project { root: root.clone() };
+        let file = root.join(PROJECT_DIR).join(FILE);
         let mut links = Links::default();
         links.links.insert("a".into(), "dir".into());
-        links.save(&scope).unwrap();
-        assert!(Links::path(&scope).unwrap().is_file());
-        assert_eq!(Links::load(&scope).unwrap(), links);
-        Links::default().save(&scope).unwrap();
-        assert!(!Links::path(&scope).unwrap().exists());
+        links.save_to(&file).unwrap();
+        assert!(file.is_file());
+        assert_eq!(Links::load_from(&file).unwrap(), links);
+        Links::default().save_to(&file).unwrap();
+        assert!(!file.exists());
         // Saving an empty set with no file is a no-op, not an error.
-        Links::default().save(&scope).unwrap();
+        Links::default().save_to(&file).unwrap();
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn project_file_name_is_stable_unique_and_safe() {
+        let a = project_file_name(Path::new("/work/my app"));
+        // Pinned (standard FNV-1a 64): a changed hash would orphan every existing project's links.
+        assert_eq!(a, "my_app-c0a1125f1079eaa1.json");
+        assert_ne!(a, project_file_name(Path::new("/other/my app")));
+        assert!(!project_file_name(Path::new("/x/a\\b..c")).contains(['/', '\\']));
     }
 
     #[test]

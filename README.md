@@ -371,8 +371,8 @@ spm install                               # re-copy the latest local content
 spm unlink reviewer                       # back to the version pinned in ai.lock
 ```
 
-The override lives in the gitignored `.spm/links.json` (`$SPM_HOME/links.json`
-with `-g`); `ai.json` and `ai.lock` are never modified, so teammates and CI are
+The override lives under `$SPM_HOME`, never in the checkout (so a repository
+can't ship one); `ai.json` and `ai.lock` are never modified, so teammates and CI are
 unaffected. Linked content still goes through the content scan, and `spm list` /
 `spm status` show active links. See [Authoring Skills](docs/guide/authoring-skills.md).
 

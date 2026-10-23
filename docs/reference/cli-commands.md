@@ -200,10 +200,11 @@ spm link design-system ../ds/plugins/cds  # or a plugin root
 spm install                               # re-run after further edits
 ```
 
-- The override is recorded in a machine-local, **gitignored** file —
-  `.spm/links.json` in the project (relative paths are kept relative to the
-  project root), or `$SPM_HOME/links.json` with `-g` (stored as an absolute
-  path). `ai.json` and `ai.lock` are **not modified**, so teammates and CI are
+- The override is recorded in a machine-local file under `$SPM_HOME`, never in
+  the checkout — `$SPM_HOME/links/<project>-<hash>.json`, keyed by the
+  project's path (relative paths are kept relative to the project root), or
+  `$SPM_HOME/links.json` with `-g` (stored as an absolute path). A repository
+  can't supply link state: a committed `.spm/links.json` is ignored. `ai.json` and `ai.lock` are **not modified**, so teammates and CI are
   unaffected.
 - A linked entry is copied straight from the directory (skipping `.git`;
   symlinks may not escape the directory) and still passes the
@@ -217,7 +218,7 @@ spm install                               # re-run after further edits
 - The directory may not overlap anything a target writes or deletes (e.g.
   Codex's `.agents/skills/<name>`, or the project root, which contains the
   output), nor be reached by a file spm edits in place (`ai.json`, `ai.lock`,
-  `.spm/links.json`, `.gitignore`, Claude's settings) through a symlink or a hard link (detected on Unix) — that would wipe or modify your working copy,
+  the links file, `.gitignore`, Claude's settings) through a symlink or a hard link (detected on Unix) — that would wipe or modify your working copy,
   or copy the output into itself. The path as given counts too: one that
   passes through a symlink inside the output (e.g. `.agents/skills/<name>`
   replaced by a symlink to your clone) is rejected, as syncing would replace it;

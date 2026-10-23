@@ -346,6 +346,21 @@ impl Sandbox {
         String::from_utf8_lossy(&out.stdout).into_owned()
     }
 
+    /// The project's links file under `$SPM_HOME/links/` (a path that doesn't
+    /// exist when there is none). Found rather than derived, so the tests never
+    /// duplicate how spm names it.
+    fn project_links(&self) -> PathBuf {
+        let dir = self.spm_home.join("links");
+        let files: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .map(|rd| rd.map(|e| e.unwrap().path()).collect())
+            .unwrap_or_default();
+        assert!(files.len() <= 1, "one project per sandbox: {files:?}");
+        files
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| dir.join("missing.json"))
+    }
+
     fn read(&self, rel: &str) -> String {
         std::fs::read_to_string(self.project.join(rel)).unwrap()
     }
@@ -9454,15 +9469,16 @@ fn link_materializes_uncommitted_local_content_into_every_target() {
     );
     assert_eq!(snapshot(&sb, "ai.lock").unwrap(), lock, "ai.lock changed");
     assert!(
-        !sb.project.join(".spm/links.json").exists(),
+        !sb.project_links().exists(),
         "an empty links file is removed"
     );
 }
 
-/// The links file is machine-local: it is gitignored (verified with git
-/// itself) even when no target gitignores `.spm/` on its own.
+/// The links file is machine state outside the checkout: `spm link` writes
+/// nothing into the project (no `.spm/`, no `.gitignore` rule), so a link can
+/// never be committed, and the file is named after the project for humans.
 #[test]
-fn links_file_is_gitignored() {
+fn links_file_lives_outside_the_checkout() {
     let sb = Sandbox::new();
     git_in(&sb.project, &["init", "-q", "-b", "main"]);
     sb.ok(&["init", "--target", "copilot"]);
@@ -9474,34 +9490,74 @@ fn links_file_is_gitignored() {
         "--name",
         "greet",
     ]);
-    assert!(!sb.read(".gitignore").contains(".spm/"));
+    let gitignore = sb.read(".gitignore");
+    git_in(&sb.project, &["add", "-A"]);
+    git_in(&sb.project, &["commit", "-q", "-m", "init"]);
     local_skill_checkout(&sb, "dev", "LOCAL");
     sb.ok(&["link", "greet", "../dev"]);
 
-    let links = sb.project.join(".spm/links.json");
+    let links = sb.project_links();
+    assert!(links.starts_with(sb.spm_home.join("links")), "{links:?}");
+    let name = links.file_name().unwrap().to_string_lossy().into_owned();
+    assert!(name.starts_with("project-"), "{name}");
     let doc: serde_json::Value = serde_json::from_str(&read_path(&links)).unwrap();
     assert_eq!(doc, serde_json::json!({ "links": { "greet": "../dev" } }));
-    let ignored = || {
-        Command::new("git")
-            .args(["check-ignore", "-q", ".spm/links.json"])
-            .current_dir(&sb.project)
-            .status()
-            .unwrap()
-            .success()
-    };
-    assert!(ignored(), "links file must be gitignored");
+    assert!(!sb.project.join(".spm").exists());
+    assert_eq!(sb.read(".gitignore"), gitignore);
+    let status = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&sb.project)
+        .output()
+        .unwrap();
+    assert!(status.stdout.is_empty(), "{status:?}");
+}
 
-    // A sync that leaves the links file as is still restores its ignore rule.
-    let gitignore = sb.project.join(".gitignore");
-    for reset in [None, Some("node_modules/\n")] {
-        match reset {
-            None => std::fs::remove_file(&gitignore).unwrap(),
-            Some(text) => std::fs::write(&gitignore, text).unwrap(),
-        }
-        assert!(!ignored());
-        sb.ok(&["install"]);
-        assert!(ignored(), "{reset:?}: ignore rule not restored");
+/// Link state can't come from a repository: a checkout carrying its own
+/// `.spm/links.json` (committed upstream, so present in every fresh clone)
+/// never activates a local source — installs keep using the locked commit and
+/// never read, scan or copy the directory it names.
+#[test]
+fn a_links_file_inside_the_checkout_never_activates_a_local_source() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--name",
+        "greet",
+    ]);
+    // Upstream commits `.spm/links.json` and pushes; a teammate clones it.
+    git_in(&sb.project, &["init", "-q", "-b", "main"]);
+    local_skill_checkout(&sb, "dev", "PLANTED");
+    std::fs::create_dir_all(sb.project.join(".spm")).unwrap();
+    std::fs::write(
+        sb.project.join(".spm/links.json"),
+        r#"{"links":{"greet":"../dev"}}"#,
+    )
+    .unwrap();
+    git_in(&sb.project, &["add", "-A"]);
+    git_in(&sb.project, &["add", "-f", ".spm/links.json"]);
+    git_in(&sb.project, &["commit", "-q", "-m", "share links"]);
+    let clone = sb.root.join("clone");
+    git_in(
+        &sb.root,
+        &["clone", "-q", sb.project.to_str().unwrap(), "clone"],
+    );
+    std::fs::remove_dir_all(&sb.project).unwrap();
+    std::fs::rename(&clone, &sb.project).unwrap();
+    assert!(sb.project.join(".spm/links.json").is_file());
+
+    for args in [&["install", "--locked"][..], &["install"], &["update"]] {
+        sb.ok(args);
+        let md = sb.read(".agents/skills/spm-managed-skills/greet/SKILL.md");
+        assert!(md.contains("Greet warmly."), "{args:?}: {md}");
+        assert!(!md.contains("PLANTED"), "{args:?}: {md}");
     }
+    let list = sb.ok(&["list"]);
+    assert!(!list.contains("../dev"), "{list}");
+    assert!(!sb.project_links().exists());
 }
 
 #[test]
@@ -9563,7 +9619,7 @@ fn linked_content_is_gated_by_the_content_scan() {
     std::fs::write(dev.join("SKILL.md"), evil).unwrap();
     let err = fails(&sb, &["link", "greet", "../dev"]);
     assert!(err.contains("failed the content scan"), "{err}");
-    assert!(!sb.project.join(".spm/links.json").exists());
+    assert!(!sb.project_links().exists());
     assert!(read_path(&skill).contains("Greet warmly."));
 
     std::fs::write(dev.join("SKILL.md"), "---\nname: greet\n---\nfine\n").unwrap();
@@ -9671,7 +9727,7 @@ fn link_to_a_removed_dependency_is_ignored_and_flagged() {
     let doc = json_doc(&sb.spm(&["status", "--json"]));
     assert_eq!(doc["links"][0]["declared"], false, "{doc}");
     sb.ok(&["unlink", "greet"]);
-    assert!(!sb.project.join(".spm/links.json").exists());
+    assert!(!sb.project_links().exists());
 }
 
 /// A link whose directory disappeared fails the sync loudly (rather than
@@ -9729,14 +9785,14 @@ fn relink_absolute_path_and_unlink_all() {
     let skills = sb.project.join(".agents/skills/spm-managed-skills");
     assert!(read_path(&skills.join("greet/SKILL.md")).contains("SECOND"));
     assert!(read_path(&skills.join("other/SKILL.md")).contains("FIRST"));
-    let doc: serde_json::Value = serde_json::from_str(&sb.read(".spm/links.json")).unwrap();
+    let doc: serde_json::Value = serde_json::from_str(&read_path(&sb.project_links())).unwrap();
     assert_eq!(doc["links"]["greet"], dev2_str, "{doc}");
 
     let out = sb.ok(&["unlink", "--all"]);
     assert!(out.contains("unlinked greet, other"), "{out}");
     assert!(read_path(&skills.join("greet/SKILL.md")).contains("Greet warmly."));
     assert!(read_path(&skills.join("other/SKILL.md")).contains("Greet warmly."));
-    assert!(!sb.project.join(".spm/links.json").exists());
+    assert!(!sb.project_links().exists());
 }
 
 /// `install --locked` accepts links (they never change what `ai.lock` pins)
@@ -9844,7 +9900,7 @@ fn link_plugin_materializes_local_tree_and_cleans_extra_bundled_skills() {
     assert!(shared.join("composer/SKILL.md").exists());
     assert!(!read_path(&agent).contains("LOCAL AGENT"));
     assert_eq!(snapshot(&sb, "ai.lock").unwrap(), lock, "ai.lock changed");
-    assert!(!sb.project.join(".spm/links.json").exists());
+    assert!(!sb.project_links().exists());
 
     // `clean` also removes a linked plugin's extra skill.
     sb.ok(&["link", "ds", "../dev-plugin"]);
@@ -9983,7 +10039,7 @@ fn link_rejects_dirs_overlapping_target_output() {
     // Output inside the source: the project root itself.
     let err = fails(&sb, &["link", "greet", "."]);
     assert!(err.contains("overlaps"), "{err}");
-    assert!(!sb.project.join(".spm/links.json").exists());
+    assert!(!sb.project_links().exists());
     let nested = sb
         .project
         .join(".agents/skills/spm-managed-skills/greet/.agents");
@@ -10061,14 +10117,14 @@ fn link_keeps_lock_bytes_and_refuses_an_out_of_sync_lock() {
     assert!(err.contains("never write ai.lock"), "{err}");
     assert!(err.contains("run `spm install` first"), "{err}");
     assert_eq!(read_path(&lock_path), odd, "ai.lock changed");
-    assert!(!sb.project.join(".spm/links.json").exists());
+    assert!(!sb.project_links().exists());
 
     // Missing lock: same guidance, nothing written.
     std::fs::remove_file(&lock_path).unwrap();
     let err = fails(&sb, &["link", "greet", "../dev"]);
     assert!(err.contains("run `spm install` first"), "{err}");
     assert!(!lock_path.exists());
-    assert!(!sb.project.join(".spm/links.json").exists());
+    assert!(!sb.project_links().exists());
 }
 
 /// Files spm edits in place (Claude's settings, `.gitignore`) are written
@@ -10087,14 +10143,26 @@ fn link_rejects_dirs_reached_by_files_spm_writes_through() {
         "greet",
     ]);
     let dev = local_skill_checkout(&sb, "dev", "LOCAL");
-    for rel in [
+    // Learn where the (out-of-checkout) links file goes; unlinking deletes it.
+    local_skill_checkout(&sb, "probe", "PROBE");
+    sb.ok(&["link", "greet", "../probe"]);
+    let links_file = sb.project_links();
+    sb.ok(&["unlink", "greet"]);
+    let mut files: Vec<(PathBuf, String)> = [
         ".claude/settings.local.json",
         ".gitignore",
-        ".spm/links.json",
         "ai.json",
         "ai.lock",
-    ] {
-        let real = sb.project.join(rel);
+    ]
+    .iter()
+    .map(|rel| {
+        let shown = rel.replace('/', std::path::MAIN_SEPARATOR_STR);
+        (sb.project.join(rel), shown)
+    })
+    .collect();
+    files.push((links_file.clone(), links_file.display().to_string()));
+    for (real, shown) in files {
+        let rel = &shown;
         let inside = dev.join("redirected");
         let existed = real.exists();
         if existed {
@@ -10106,8 +10174,7 @@ fn link_rejects_dirs_reached_by_files_spm_writes_through() {
         let before = std::fs::read(&inside).unwrap();
         let err = fails(&sb, &["link", "greet", "../dev"]);
         assert!(err.contains("overlaps"), "{rel}: {err}");
-        let shown = rel.replace('/', std::path::MAIN_SEPARATOR_STR);
-        assert!(err.contains(&shown), "{rel}: {err}");
+        assert!(err.contains(rel.as_str()), "{rel}: {err}");
         assert_eq!(std::fs::read(&inside).unwrap(), before, "{rel} written");
         remove_symlink(&real);
         if existed {
@@ -10115,7 +10182,7 @@ fn link_rejects_dirs_reached_by_files_spm_writes_through() {
         } else {
             std::fs::remove_file(&inside).unwrap();
         }
-        assert!(!sb.project.join(".spm/links.json").exists());
+        assert!(!sb.project_links().exists());
     }
     sb.ok(&["link", "greet", "../dev"]);
 }
@@ -10229,7 +10296,10 @@ fn unlink_still_protects_the_dropped_working_copy() {
     assert!(err.contains("overlaps"), "{err}");
     assert!(err.contains("refusing to continue"), "{err}");
     assert!(read_path(&wc.join("SKILL.md")).contains("WIP"), "wiped");
-    assert!(sb.read(".spm/links.json").contains("greet"), "link dropped");
+    assert!(
+        read_path(&sb.project_links()).contains("greet"),
+        "link dropped"
+    );
 
     remove_symlink(&skills);
     sb.ok(&["unlink", "greet"]);
@@ -10387,7 +10457,7 @@ fn link_rejects_a_path_routed_through_target_output() {
             "{target}: the route to the working copy was replaced"
         );
         assert!(read_path(&wc.join("SKILL.md")).contains("WIP"), "{target}");
-        assert!(!sb.project.join(".spm/links.json").exists(), "{target}");
+        assert!(!sb.project_links().exists(), "{target}");
     }
 }
 
@@ -10420,7 +10490,7 @@ fn link_rejects_a_working_copy_hard_linked_to_a_file_spm_writes() {
         before,
         "working copy modified"
     );
-    assert!(!sb.project.join(".spm/links.json").exists());
+    assert!(!sb.project_links().exists());
 }
 
 /// A link's effective source is a local directory, so it needs `file://*`
@@ -10460,7 +10530,7 @@ fn links_need_a_policy_that_allows_local_sources() {
     );
     let (ok, err) = run(&["link", "ds", "../dev-plugin"]);
     assert!(!ok && err.contains("link `ds`"), "{err}");
-    assert!(!sb.read(".spm/links.json").contains("ds"));
+    assert!(!read_path(&sb.project_links()).contains("ds"));
     assert!(
         run(&["unlink", "greet"]).0,
         "unlinking needs no local source"
@@ -10504,7 +10574,7 @@ fn link_rejects_a_working_copy_whose_symlinks_route_through_output() {
         "output was changed"
     );
     assert!(read_path(&dev.join("SKILL.md")).contains("LOCAL"));
-    assert!(!sb.project.join(".spm/links.json").exists());
+    assert!(!sb.project_links().exists());
 }
 
 /// A symlink the copy and the scan skip (here a cycle) is no route to guard:
@@ -10597,18 +10667,20 @@ fn unlink_never_deletes_a_links_file_entry_inside_the_working_copy() {
 
     let state = sb.root.join("state");
     std::fs::create_dir_all(&state).unwrap();
-    let spm_dir = sb.project.join(".spm");
-    std::fs::rename(spm_dir.join("links.json"), state.join("links.json")).unwrap();
+    let links_file = sb.project_links();
+    let file_name = links_file.file_name().unwrap();
+    let spm_dir = links_file.parent().unwrap().to_path_buf();
+    std::fs::rename(&links_file, state.join("links.json")).unwrap();
     std::fs::remove_dir_all(&spm_dir).unwrap();
     let meta = dev.join("meta");
     std::fs::create_dir_all(&meta).unwrap();
-    symlink(state.join("links.json"), meta.join("links.json"));
+    symlink(state.join("links.json"), meta.join(file_name));
     symlink(meta.clone(), &spm_dir);
 
     let err = fails(&sb, &["unlink", "greet"]);
     assert!(err.contains("overlaps"), "{err}");
     assert!(
-        std::fs::symlink_metadata(meta.join("links.json"))
+        std::fs::symlink_metadata(meta.join(file_name))
             .unwrap()
             .file_type()
             .is_symlink(),

@@ -684,10 +684,6 @@ impl Plan {
         }
         if let Some(links) = &self.links {
             links.save(scope)?;
-        } else if Links::path(scope)?.exists() {
-            // Unchanged links still need their ignore rule, e.g. after
-            // `.gitignore` was restored or deleted.
-            Links::ensure_ignored(scope)?;
         }
         Ok(lock.skills.len() + lock.plugins.len())
     }

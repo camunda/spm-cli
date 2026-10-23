@@ -31,8 +31,12 @@ edit. `spm unlink --all` drops every link in the scope.
 
 ## What a link changes — and what it doesn't
 
-- **Machine-local.** The override is stored in `.spm/links.json` in the
-  project, which spm gitignores, or in `$SPM_HOME/links.json` with `-g`.
+- **Machine-local.** The override is stored under `$SPM_HOME`, never in the
+  checkout: `$SPM_HOME/links/<project>-<hash>.json` (keyed by the project's
+  path), or `$SPM_HOME/links.json` with `-g`. A repository therefore can't ship
+  link state — a `.spm/links.json` committed to a repo is ignored — so only
+  running `spm link` on your machine activates a local source. Moving the
+  project leaves its links behind; re-run `spm link` there.
 - **`ai.json` and `ai.lock` stay byte-identical.** The lock keeps pinning the
   declared git source, so teammates, CI and `spm install --locked` are
   unaffected and your diff stays clean. `link`/`unlink` never write `ai.lock`,
