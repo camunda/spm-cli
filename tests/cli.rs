@@ -8231,3 +8231,76 @@ fn policy_blocks_dumb_http_alternates_to_unchecked_destinations() {
         assert_eq!(denied_hits(), 0, "{key}: {}", stderr_of(&out));
     }
 }
+
+/// A checkout filter selected by the repository's own `.gitattributes` (Git
+/// LFS: endpoint from `.lfsconfig`, download URLs from its batch API) fetches
+/// content spm can't check against the policy. Under a policy every configured
+/// filter driver is disabled and required, so the checkout fails: the filter
+/// never runs, and no unfiltered (pointer) file is materialized as a skill.
+#[test]
+fn policy_disables_checkout_filters() {
+    // The driver is named `fakelfs` so the fixture commit never runs a real
+    // `lfs` filter from the developer's own git config.
+    let fixture = |sb: &Sandbox| {
+        std::fs::create_dir_all(sb.skill_repo.join("assets")).unwrap();
+        std::fs::write(sb.skill_repo.join("assets/logo.txt"), "pointer\n").unwrap();
+        std::fs::write(
+            sb.skill_repo.join(".gitattributes"),
+            "assets/** filter=fakelfs\n",
+        )
+        .unwrap();
+        sb.git(&["add", "-A"]);
+        sb.git(&["commit", "-qm", "filtered asset"]);
+    };
+    // The fake driver records that it ran (where git-lfs would download).
+    let run = |sb: &Sandbox, setting: &str| {
+        let marker = sb.root.join("filter-ran");
+        let marker_sh = marker.to_str().unwrap().replace('\\', "/");
+        let mut cmd = sb.command(&[
+            "add",
+            &sb.skill_url(),
+            "--branch",
+            "main",
+            "--name",
+            "greet",
+        ]);
+        with_user_git_config(
+            &mut cmd,
+            &format!("filter.fakelfs.{setting}"),
+            &format!("echo ran >> '{marker_sh}'; cat"),
+        );
+        (cmd.output().unwrap(), marker)
+    };
+    let installed = |sb: &Sandbox| {
+        sb.project
+            .join(".agents/skills/spm-managed-skills/greet")
+            .exists()
+    };
+
+    // No policy: unchanged, the filter runs and the skill is installed.
+    let sb = Sandbox::new();
+    fixture(&sb);
+    sb.ok(&["init", "--target", "copilot"]);
+    let (out, marker) = run(&sb, "smudge");
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(marker.exists());
+    assert!(installed(&sb));
+
+    // Under a policy that allows the repository, neither a smudge nor a
+    // long-running process filter runs, and nothing is materialized.
+    for setting in ["smudge", "process"] {
+        let sb = Sandbox::new();
+        fixture(&sb);
+        sb.ok(&["init", "--target", "copilot"]);
+        set_project_policy(&sb, &["file://*"]);
+        let (out, marker) = run(&sb, setting);
+        assert!(!out.status.success(), "{setting}");
+        let err = stderr_of(&out);
+        assert!(
+            err.contains("checkout filters such as Git LFS"),
+            "{setting}: {err}"
+        );
+        assert!(!marker.exists(), "{setting}: the filter ran");
+        assert!(!installed(&sb), "{setting}");
+    }
+}

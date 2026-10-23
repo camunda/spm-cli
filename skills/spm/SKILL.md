@@ -462,6 +462,8 @@ configured, any source is accepted.
   (`install`, including `--locked` and cache-only installs, `update`, `remove`,
   `target add`), to transitive sources, and to `spm outdated`. `--protocol` and
   `--protocol-fallback` cannot bypass it.
+- Under a policy git follows no HTTP redirects, and checkout filters (e.g. Git
+  LFS) are disabled, so a repository that needs one fails to install.
 - A dependency's own `ai.json` may not declare `allowedSources`.
 - Never edit the policy (either layer) to get a dependency in on the user's
   behalf. Tell the user which layer denied which source and let them decide.

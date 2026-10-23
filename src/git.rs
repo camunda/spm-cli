@@ -534,9 +534,76 @@ fn fetch_commit_once(url: &str, sha: &str, dest: &Path) -> Result<()> {
         git_remote(url, &["fetch", "origin"], Some(dest))
             .with_context(|| format!("fetching {url}"))?;
     }
-    git(&["checkout", "--detach", sha], Some(dest))
-        .with_context(|| format!("checking out {sha} in {}", dest.display()))?;
+    let lockdown = filter_lockdown(dest)?;
+    let pre: Vec<&str> = lockdown.iter().map(String::as_str).collect();
+    run_git(&pre, &["checkout", "--detach", sha], Some(dest), false).with_context(|| {
+        let mut msg = format!("checking out {sha} in {}", dest.display());
+        if !lockdown.is_empty() {
+            msg.push_str(
+                " (a source policy is in force, so checkout filters such as Git LFS are \
+                 disabled: what they download can't be checked against the policy)",
+            );
+        }
+        msg
+    })?;
     Ok(())
+}
+
+/// Under a source policy, disable every checkout filter driver configured for
+/// `dest` (system, global, env and repository config alike).
+///
+/// The repository picks a filter through its own `.gitattributes`, and a smudge
+/// filter can fetch content from wherever it likes — Git LFS reads its endpoint
+/// from the repository's `.lfsconfig`, and its batch API hands out arbitrary
+/// download URLs — none of which spm can check. So each driver's `smudge` and
+/// `process` commands are replaced with one that fails, and the driver is
+/// marked `required`: a checkout that would run a filter fails instead of
+/// downloading, or of silently leaving unfiltered (e.g. LFS pointer) files.
+/// Returns the `-c` arguments to pass to `git checkout`.
+fn filter_lockdown(dest: &Path) -> Result<Vec<String>> {
+    if !crate::policy::restricts() {
+        return Ok(Vec::new());
+    }
+    let out = git_command(&[
+        "config",
+        "-z",
+        "--name-only",
+        "--get-regexp",
+        r"^filter\..*\.(smudge|process)$",
+    ])
+    .current_dir(dest)
+    .output()
+    .context("failed to spawn `git config`")?;
+    // Exit 1 means no key matched: no filter driver can run.
+    if !out.status.success() && out.status.code() != Some(1) {
+        bail!(
+            "listing checkout filters in {}: {}",
+            dest.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let names = String::from_utf8_lossy(&out.stdout).into_owned();
+    let drivers: std::collections::BTreeSet<&str> = names
+        .split('\0')
+        .filter_map(|key| key.strip_prefix("filter.")?.rsplit_once('.'))
+        .map(|(driver, _)| driver)
+        .collect();
+    let mut pin = Vec::new();
+    for driver in drivers {
+        // `=` would end the `-c` key early and leave the driver untouched.
+        if driver.contains('=') {
+            bail!(
+                "refusing to check out in {}: a source policy is in force, but checkout \
+                 filter `{driver}` can't be disabled",
+                dest.display()
+            );
+        }
+        for setting in ["smudge=false", "process=false", "required=true"] {
+            pin.push("-c".to_string());
+            pin.push(format!("filter.{driver}.{setting}"));
+        }
+    }
+    Ok(pin)
 }
 
 #[cfg(test)]

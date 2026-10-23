@@ -123,6 +123,14 @@ is written:
   `http.<url>.followRedirects` entries — and checks the value git will actually
   use; if it still can't turn redirects off for a URL, it refuses to contact it.
   Without a policy, redirects and alternates behave as before.
+- While a policy is in force, checkout filters are disabled. A repository
+  selects a filter driver through its own `.gitattributes`, and a smudge filter
+  such as Git LFS downloads content from wherever the repository's `.lfsconfig`
+  or the LFS server points it, which spm can't check. Every configured filter
+  driver is therefore made to fail and marked required: installing a repository
+  that uses one fails, instead of downloading unchecked content or silently
+  installing LFS pointer files as skills. Repositories that select no filter
+  are unaffected.
 
 Git's own URL rewriting in your git config (`url.<base>.insteadOf`) is machine
 configuration, trusted like the policy file itself; spm judges the URL as written
