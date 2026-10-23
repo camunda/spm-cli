@@ -95,6 +95,11 @@ struct Row<'a> {
     upgrade: Upgrade,
     /// The other selectors this deduplicated entry satisfies, each checked.
     also_satisfies: Vec<SelectorCheck>,
+    /// For a direct dependency whose `ai.json` request (git, selector or
+    /// path) no longer matches its pin: what changed. The row still describes
+    /// the pin, which the next `spm install` re-resolves, so nothing here says
+    /// how to update the request as declared now.
+    drift: Option<String>,
     error: Option<String>,
 }
 
@@ -228,28 +233,35 @@ pub(super) fn outdated(
         }
     }
     let wanted = |n: &str| name.is_none_or(|want| want == n);
+    // The same comparison `spm install` uses to decide whether a pin can be
+    // reused for its `ai.json` request.
+    let drift = |l: &LockedSkill, spec: Option<&crate::manifest::SkillSpec>| {
+        spec.map(|s| l.drift_from(s))
+            .transpose()
+            .map(Option::flatten)
+    };
     let mut remotes = Remotes::default();
+    let mut skills = Vec::new();
+    for (n, l) in lock.skills.iter().filter(|(n, _)| wanted(n)) {
+        let spec = manifest.skills.get(n);
+        let transitive = !l.requested_by.is_empty() && spec.is_none();
+        let mut row = check(n, l, false, transitive, &mut remotes);
+        if transitive {
+            row.upgrade = Upgrade::plan(&l.requested_by, &lock, &manifest);
+        }
+        row.drift = drift(l, spec)?;
+        skills.push(row);
+    }
+    let mut plugins = Vec::new();
+    for (n, l) in lock.plugins.iter().filter(|(n, _)| wanted(n)) {
+        let mut row = check(n, l, true, false, &mut remotes);
+        row.drift = drift(l, manifest.plugins.get(n))?;
+        plugins.push(row);
+    }
     let report = OutdatedReport {
         scope: scope.label(),
-        skills: lock
-            .skills
-            .iter()
-            .filter(|(n, _)| wanted(n))
-            .map(|(n, l)| {
-                let transitive = !l.requested_by.is_empty() && !manifest.skills.contains_key(n);
-                let mut row = check(n, l, false, transitive, &mut remotes);
-                if transitive {
-                    row.upgrade = Upgrade::plan(&l.requested_by, &lock, &manifest);
-                }
-                row
-            })
-            .collect(),
-        plugins: lock
-            .plugins
-            .iter()
-            .filter(|(n, _)| wanted(n))
-            .map(|(n, l)| check(n, l, true, false, &mut remotes))
-            .collect(),
+        skills,
+        plugins,
     };
     if json {
         print_json(&report)?;
@@ -304,6 +316,7 @@ fn check<'a>(
         requested_by: &l.requested_by,
         upgrade: Upgrade::default(),
         also_satisfies: Vec::new(),
+        drift: None,
         error: None,
     };
     let primary = evaluate(
@@ -557,6 +570,9 @@ fn render_text(report: &OutdatedReport, declared: usize) {
             if r.transitive {
                 notes.push(format!("transitive; via {}", r.requested_by.join(", ")));
             }
+            if r.drift.is_some() {
+                notes.push("ai.json changed".to_string());
+            }
             match (r.status, &r.latest_tag) {
                 (Status::TagMoved, Some(tag)) => notes.push(format!("newer tag: {tag}")),
                 (Status::Behind, Some(tag)) if range => {
@@ -607,6 +623,14 @@ fn render_text(report: &OutdatedReport, declared: usize) {
     }
 
     for r in report.rows() {
+        if let Some(changes) = &r.drift {
+            eprintln!(
+                "warning: `{}` in ai.json no longer matches ai.lock ({changes}); this reports the \
+                 locked pin — run `spm install{}` to re-lock it first",
+                r.name,
+                scope_flag(report.scope)
+            );
+        }
         if r.status == Status::TagMoved {
             match (&r.selector, &r.remote_commit, r.resolved_tag) {
                 (Some(Version::Tag(t)), Some(now), _) => eprintln!(
@@ -678,15 +702,20 @@ fn render_text(report: &OutdatedReport, declared: usize) {
     }
 }
 
+/// The scope flag suggested commands carry: ` -g` in global scope.
+fn scope_flag(scope: &str) -> &'static str {
+    if scope == Scope::Global.label() {
+        " -g"
+    } else {
+        ""
+    }
+}
+
 /// The closing summary: what is outdated and how to apply each kind of
 /// change. Moved refs are refreshed by `spm update`, but a newer tag is a
 /// different selector, which only an edit to the declaring `ai.json` adopts.
 fn summary(report: &OutdatedReport) -> Vec<String> {
-    let g = if report.scope == Scope::Global.label() {
-        " -g"
-    } else {
-        ""
-    };
+    let g = scope_flag(report.scope);
     let errors = report.rows().filter(|r| r.has_error()).count();
     let outdated: Vec<&Row> = report.rows().filter(|r| r.outdated).collect();
     let mut lines = Vec::new();
@@ -873,6 +902,7 @@ mod tests {
             requested_by,
             upgrade: Default::default(),
             also_satisfies: Vec::new(),
+            drift: None,
             error: (status == Status::Error).then(|| "unreachable".to_string()),
         }
     }

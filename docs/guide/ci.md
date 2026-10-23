@@ -67,7 +67,7 @@ gets separate branches and pull requests:
 | Declared as | Proposed change |
 | --- | --- |
 | `"tag": "v1.0.0"` and a newer tag exists | `tag` re-pinned to the newest tag (as `spm add --tag … --force` does). |
-| `"tag"` re-pointed upstream | `ai.lock` moved to the tag's new commit, with a warning in the PR. |
+| `"tag"` re-pointed upstream | `ai.lock` moved to the tag's new commit, with a warning in the PR (also when the tag a `version` range is locked to was re-pointed). |
 | `"branch": "main"` | `ai.lock` moved to the branch's new head (`spm update <name>`). |
 | `"version": "^1"` | `ai.lock` moved to the highest tag in range. A newer tag **outside** the range is reported in the run summary but not proposed — widen the range by hand. |
 | `"commit"` | Never outdated. |
@@ -81,7 +81,10 @@ the updates of the others until it's fixed or removed
 
 The pull request body shows the old and new version and commit, a compare link
 (for GitHub-hosted sources), any other `ai.lock` entries that changed with it
-(new transitive dependencies), and the `spm scan` findings for the new code.
+(new transitive dependencies, or entries whose source or path moved), and the
+`spm scan` findings for the new code and every other changed entry. The scan
+summary comes before the list of other changes, so a long list can't push the
+blocking-findings warning out of the size-capped body.
 The scan covers what `spm install` would materialize: for a dependency kept in
 a subdirectory of its repository, symlinks to elsewhere in that repository are
 followed (`spm scan --within`), as the install gate does.
@@ -92,6 +95,13 @@ Run it on a clean checkout (untracked files are fine). The checked-out commit
 must also be on the base branch as pushed to origin (it may be behind it), since
 each update branch starts from it: a diverged or unpushed checkout would put
 unrelated commits in every pull request, so the action refuses it.
+
+Updates are planned from `ai.lock` (what `spm outdated` reports), so the
+committed `ai.lock` must match `ai.json`. A dependency whose `ai.json` entry was
+edited without re-locking (say `tag` changed to a `version` range) is not
+updated: the run fails for it with `ai.json no longer matches ai.lock`, since
+re-pinning the old selector would overwrite your edit. Run `spm install` and
+commit `ai.lock`.
 
 ### Blocking scan findings
 

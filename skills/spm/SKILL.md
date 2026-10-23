@@ -330,7 +330,10 @@ marked `transitive; via <requester>`, and the fix belongs in that requester's
 own `ai.json`, not this one. With a name, only that entry is checked.
 A deduplicated entry shared through different selectors has every selector
 checked the same way (including newer semver tags); drift in a secondary one
-shows as `also <selector>: <status>`.
+shows as `also <selector>: <status>`. It reports the pins in `ai.lock`: a direct
+entry whose `ai.json` request changed since (selector, `git` or `path`) is
+marked `ai.json changed`, with a warning (`drift` in `--json`); run
+`spm install` to re-lock before acting on that row.
 
 It exits 0 even when things are outdated; `--exit-code` makes it exit non-zero
 when anything is outdated. Any `error` row always makes it exit non-zero.

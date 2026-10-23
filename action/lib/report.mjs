@@ -12,8 +12,18 @@ const FINDINGS_LIMIT = 50;
 /// - `update`: a moved branch/tag or a newer tag inside a `version` range —
 ///   re-resolve the selector (`spm update <name>`);
 /// - `skip`: nothing this project's ai.json can do, with the reason.
+/// - `reject`: ai.json changed since ai.lock was written, so the row (which
+///   describes the lock) can't be planned from; the reason says how to fix it.
 export function planFor(row) {
   if (!row.outdated) return { action: "skip", reason: "up to date" };
+  // The row describes the pin in ai.lock; ai.json now asks for something else,
+  // so whatever this planned would act on a request nobody makes any more.
+  if (row.drift) {
+    return {
+      action: "reject",
+      reason: `ai.json no longer matches ai.lock (${row.drift}): run \`spm install\` and commit ai.lock first`,
+    };
+  }
   if (row.transitive) {
     return {
       action: "skip",
@@ -90,6 +100,15 @@ export function describeSelector(entry) {
   if (kind === "commit") return `commit ${value.slice(0, 8)}`;
   if (kind === "version" && entry.resolved_tag) return `version ${value} → ${entry.resolved_tag}`;
   return `${kind} ${value}`;
+}
+
+/// The tag an entry is locked to: the tag selector itself, or the tag a
+/// `version` range resolved to; `null` for branches and commits.
+function lockedTag(entry) {
+  const { kind, value } = splitReference(entry.reference);
+  if (kind === "tag") return value;
+  if (kind === "version") return entry.resolved_tag ?? null;
+  return null;
 }
 
 /// The short "to" version in a PR title: the tag when there is one, else the
@@ -226,12 +245,16 @@ export function renderBody({ name, kind, dir = ".", base, git, path, from, to, c
     `Source: ${code(git)}${path ? ` (path ${code(path)})` : ""}`,
   ];
   if (link) lines.push("", `Upstream changes: ${link}`);
-  if (from && splitReference(from.reference).kind === "tag" && from.reference === to.reference) {
+  const tag = from && lockedTag(from);
+  if (tag && tag === lockedTag(to) && from.commit !== to.commit) {
     lines.push(
       "",
-      `> [!WARNING]\n> The tag ${code(splitReference(to.reference).value)} was **re-pointed** upstream: it now names a different commit than the one locked. Make sure the move is legitimate before merging.`,
+      `> [!WARNING]\n> The tag ${code(tag)} was **re-pointed** upstream: it now names a different commit than the one locked. Make sure the move is legitimate before merging.`,
     );
   }
+  // The scan goes before the optional lock-change table, so the size cap
+  // can only ever cut details, never the blocking-findings warning.
+  lines.push("", ...renderScans(scans));
   const others = changes.filter((c) => !(c.name === name && c.kind === kind));
   if (others.length > 0) {
     lines.push("", "### Other lock changes", "", "| Dependency | From | To |", "| --- | --- | --- |");
@@ -241,7 +264,6 @@ export function renderBody({ name, kind, dir = ".", base, git, path, from, to, c
       lines.push(`| ${cell(c.kind)} ${code(c.name)} | ${side(c.from)} | ${side(c.to)} |`);
     }
   }
-  lines.push("", ...renderScans(scans));
   lines.push(
     "",
     "---",

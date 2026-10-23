@@ -633,6 +633,35 @@ test("dry-run commits locally but pushes nothing and needs no token", async (t) 
   assertCleanCheckout(sb);
 });
 
+test("an outdated entry whose ai.json request changed since ai.lock is rejected, not re-pinned", async (t) => {
+  const sb = await sandbox(t);
+  const ranged = sb.upstream("ranged");
+  const ok = sb.upstream("ok", { tag: null });
+  sb.spm("add", ranged.url, "--tag", "v1.0.0");
+  sb.spm("add", ok.url, "--branch", "main");
+  // Hand edit to a range without re-locking: ai.lock still pins tag v1.0.0.
+  const manifestPath = join(sb.project, "ai.json");
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  delete manifest.skills.ranged.tag;
+  manifest.skills.ranged.version = "^1";
+  writeFiles(sb.project, { "ai.json": `${JSON.stringify(manifest, null, 2)}\n` });
+  sb.publish();
+  writeFiles(ranged.repo, { "a.md": "2\n" });
+  commitAll(ranged.repo, "two");
+  git(ranged.repo, "tag", "v2.0.0");
+  writeFiles(ok.repo, { "a.md": "1\n" });
+  commitAll(ok.repo, "one");
+
+  await assert.rejects(
+    sb.update(),
+    /1 problem\(s\):\nranged: ai\.json no longer matches ai\.lock \(`tag:v1\.0\.0` -> `version:\^1`\): run `spm install` and commit ai\.lock first/,
+  );
+  assert.equal(sb.remoteSha(sb.branch("ranged")), null, "the out-of-range v2.0.0 is never proposed");
+  assert.deepEqual(sb.gh.state.pulls.map((p) => p.head), [sb.branch("ok")]);
+  assert.match(readFileSync(join(sb.dir, "summary"), "utf8"), /\| skill `ranged` \| failed \| ai\.json no longer matches/);
+  assertCleanCheckout(sb);
+});
+
 test("a dependency whose remote can't be reached fails the run without blocking the others", async (t) => {
   const sb = await sandbox(t);
   const gone = sb.upstream("gone", { tag: null });

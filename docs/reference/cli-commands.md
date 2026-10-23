@@ -369,6 +369,12 @@ will not adopt it:
   leaf: newer tag — bump it in the upstream ai.json of middle; publish a new middle version and bump middle in the upstream ai.json of root; then run `spm update`
   ```
 
+`outdated` reports the pins in `ai.lock`. When a direct dependency's `ai.json`
+entry no longer matches its pin (its `git`, selector or `path` was edited
+without re-locking), its row is marked `(ai.json changed)` and a warning says
+what changed: run `spm install` to re-lock it first, since the row's status
+describes the old request.
+
 In global scope the suggested commands carry `-g`. If any row errored, the
 summary says the check is incomplete instead of claiming everything is up to
 date.
@@ -557,6 +563,9 @@ with `-g` for `list`, `status` and `outdated`). With it:
                                             // any alsoSatisfies entry
       "transitive": false,
       "requestedBy": [],                    // direct requester(s) of a transitive skill
+      "drift": null,                        // for a direct entry whose ai.json request no
+                                            // longer matches this pin: what changed, e.g.
+                                            // "`tag:v1.0.0` -> `version:^1`"
       "alsoSatisfies": [                    // other selectors this deduplicated entry
         {                                   // satisfies (ai.lock `also_satisfies`)
           "selector": { "branch": "main" },

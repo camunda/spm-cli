@@ -57,6 +57,17 @@ test("planFor: skips what this project's ai.json can't adopt", () => {
   assert.match(range.reason, /v2\.0\.0 is outside the version range `\^1`/);
 });
 
+test("planFor: rejects a row whose ai.json request changed since ai.lock was written", () => {
+  for (const fields of [{ latestTag: "v2.0.0" }, { selector: { branch: "main" }, status: "behind" }]) {
+    const plan = planFor(row({ ...fields, drift: "`tag:v1.0.0` -> `version:^1`" }));
+    assert.equal(plan.action, "reject");
+    assert.match(plan.reason, /ai\.json no longer matches ai\.lock \(`tag:v1\.0\.0` -> `version:\^1`\): run `spm install`/);
+  }
+  // Nothing to plan anyway.
+  assert.equal(planFor(row({ outdated: false, drift: "x" })).action, "skip");
+  assert.deepEqual(planFor(row({ latestTag: "v2.0.0", drift: null })), { action: "retag", tag: "v2.0.0" });
+});
+
 test("branchFor gives every update identity its own valid branch", () => {
   const id = (name, dir = ".", base = "main") => ({ name, dir, base });
   assert.match(branchFor(id("my-skill_1.2")), /^spm\/update\/my-skill_1\.2-[0-9a-f]{12}$/);
@@ -245,6 +256,46 @@ test("the PR body notes non-blocking findings and an empty scan set", () => {
 test("the PR body warns when a pinned tag was re-pointed upstream", () => {
   const body = renderBody({ ...base, to: { reference: "tag:v1.0.0", commit: SHA_B } });
   assert.match(body, /> \[!WARNING\]\n> The tag `v1\.0\.0` was \*\*re-pointed\*\* upstream/);
+});
+
+test("the PR body warns when the tag a version range is locked to was re-pointed", () => {
+  const range = (tag, commit) => ({ reference: "version:^1", resolved_tag: tag, commit });
+  const warn = /> \[!WARNING\]\n> The tag `v1\.0\.0` was \*\*re-pointed\*\* upstream/;
+  assert.match(renderBody({ ...base, from: range("v1.0.0", SHA_A), to: range("v1.0.0", SHA_B) }), warn);
+  // A newer tag in the range, or the same commit, is no re-pointing.
+  assert.doesNotMatch(renderBody({ ...base, from: range("v1.0.0", SHA_A), to: range("v1.1.0", SHA_B) }), /re-pointed/);
+  assert.doesNotMatch(renderBody({ ...base, from: range("v1.0.0", SHA_A), to: range("v1.0.0", SHA_A) }), /re-pointed/);
+  const tag = { reference: "tag:v1.0.0", commit: SHA_A };
+  assert.doesNotMatch(renderBody({ ...base, from: tag, to: tag }), /re-pointed/);
+  // Branches have no tag to re-point.
+  const br = (commit) => ({ reference: "branch:main", commit });
+  assert.doesNotMatch(renderBody({ ...base, from: br(SHA_A), to: br(SHA_B) }), /re-pointed/);
+});
+
+test("the size cap cuts lock-change details, never the blocking scan summary", () => {
+  const changes = Array.from({ length: 400 }, (_, i) => ({
+    name: `transitive-${"n".repeat(150)}-${i}`,
+    kind: "skill",
+    from: null,
+    to: { reference: "tag:v1.0.0", commit: SHA_B, path: `skills/${"p".repeat(150)}` },
+  }));
+  const body = renderBody({
+    ...base,
+    changes,
+    scans: [
+      {
+        name: "s",
+        summary: { total: 1, blocking: 1 },
+        findings: [{ rule: "r", category: "c", severity: "critical", blocking: true, path: "SKILL.md", line: 1, detail: "d" }],
+      },
+    ],
+  });
+  assert.ok(body.length <= 60000, `${body.length}`);
+  assert.match(body, /_\(truncated\)_/, "the lock changes alone exceed the limit");
+  assert.match(body, /> \[!CAUTION\]\n> \*\*1 blocking\*\* finding\(s\)/);
+  assert.match(body, /\| \*\*critical\*\* \| `r` \|/);
+  assert.ok(body.indexOf("### Content scan") < body.indexOf("### Other lock changes"));
+  assert.deepEqual(parseMarker(body), { name: "s", dir: ".", base: "main", commit: SHA_B });
 });
 
 test("the PR body caps the findings table and its total size, keeping the marker", () => {

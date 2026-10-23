@@ -172,6 +172,11 @@ async function updateOne(row, ctx) {
     log.notice(`${kind} ${name}: skipped — ${plan.reason}`);
     return { name, kind, result: "skipped", reason: plan.reason };
   }
+  if (plan.action === "reject") {
+    log.error(`${kind} ${name}: ${plan.reason}`);
+    problems.push(`${name}: ${plan.reason}`);
+    return { name, kind, result: "failed", reason: plan.reason };
+  }
   const id = { name, dir, base };
   const branch = branchFor(id);
   log.group(`${kind} ${name} → ${branch}`);
