@@ -1,10 +1,11 @@
 use crate::lockfile::{LockedSkill, Lockfile};
 use crate::manifest::{Manifest, SkillSpec};
 use crate::scope::Scope;
-use crate::vendor::{MaterializedPlugin, MaterializedSkill};
+use crate::vendor::{MaterializedPlugin, MaterializedSkill, Vendor};
 use crate::{resolver, store, transitive};
 use anyhow::{anyhow, bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 /// Core pipeline shared by add/remove/update/install:
 /// resolve manifest -> ai.lock -> populate store -> materialize vendor config.
@@ -25,12 +26,76 @@ pub(super) fn sync(
 ) -> Result<usize> {
     let dir = scope.manifest_dir()?;
     let manifest = Manifest::load(&dir, scope)?;
+    plan(scope, &manifest, force_refresh, only, locked)?.apply(scope)
+}
+
+/// Write an edited `manifest` to `ai.json` and [`sync`] it, without ever leaving
+/// a failed change half-recorded.
+///
+/// Every command that edits `ai.json` and then syncs (`add`, `add --all`,
+/// `remove`, `target add`) must go through here. The edited manifest is
+/// validated and [`plan`]ned *in memory* first; `ai.json` is only written once
+/// resolution, fetching, the content scan and collision checks have all passed.
+/// So any of those failures (an unreachable source, a bad ref, a blocked scan,
+/// ...) leaves `ai.json` byte-for-byte untouched and the same command can simply
+/// be retried.
+///
+/// If [`Plan::apply`] then fails, some targets may already hold the new output,
+/// so `ai.json` deliberately *keeps* the change: it is what records that spm
+/// owns that output (shared skill dirs are cleaned by declared/locked name
+/// only), and the next `spm install` finishes the job.
+pub(super) fn save_and_sync(scope: &Scope, manifest: &Manifest) -> Result<usize> {
+    let dir = scope.manifest_dir()?;
+    let path = Manifest::path_in(&dir);
+    let text = manifest.to_text()?;
+    // Validate exactly as the next `Manifest::load` will (schema, name
+    // collisions across skills/plugins, ...), so an invalid edit is never saved.
+    let manifest = Manifest::parse(&text, &path)?;
+    let plan = plan(scope, &manifest, false, None, false)?;
+    std::fs::write(&path, &text).with_context(|| format!("writing {}", path.display()))?;
+    plan.apply(scope).map_err(|err| {
+        anyhow!(
+            "{err:#}\nhint: {} keeps this change because some targets may already have been \
+             updated; fix the cause and run `{}` to finish applying it",
+            path.display(),
+            install_command(scope)
+        )
+    })
+}
+
+/// The outcome of [`plan`]: everything resolved, fetched into the store and
+/// checked, ready to be written into the targets by [`Plan::apply`].
+struct Plan {
+    dir: PathBuf,
+    targets: Vec<String>,
+    /// Whether any skill or plugin is declared (else nothing is announced).
+    declares_any: bool,
+    vendors: Vec<Box<dyn Vendor>>,
+    lock: Lockfile,
+    materialized: Vec<MaterializedSkill>,
+    plugins: Vec<MaterializedPlugin>,
+    previously_managed: Vec<String>,
+    previously_managed_plugins: Vec<String>,
+    locked: bool,
+}
+
+/// Resolve `manifest` -> lock, populate the store, and run every check (source
+/// policy, content scan, collisions, `--locked` drift). Writes nothing outside
+/// the global store: no target output, no `ai.json`, no `ai.lock`.
+fn plan(
+    scope: &Scope,
+    manifest: &Manifest,
+    force_refresh: bool,
+    only: Option<&str>,
+    locked: bool,
+) -> Result<Plan> {
+    let dir = scope.manifest_dir()?;
     if manifest.targets.is_empty() {
         bail!("ai.json declares no targets");
     }
     // Source policy: judge every direct source before any network access, and
     // report all denied ones at once.
-    let policy = crate::policy::activate(&manifest, &dir)?;
+    let policy = crate::policy::activate(manifest, &dir)?;
     let denied: Vec<String> = manifest
         .skills
         .iter()
@@ -405,56 +470,51 @@ pub(super) fn sync(
             );
         }
     }
-    // Same resolved skills + plugins projected into every configured vendor.
-    if !manifest.skills.is_empty() || !manifest.plugins.is_empty() {
-        println!("materializing: {}", manifest.targets.join(", "));
-    }
-    for vendor in &vendors {
-        vendor.materialize(scope, &lock.id, &materialized, &previously_managed)?;
-        vendor.materialize_plugins(scope, &lock.id, &plugins, &previously_managed_plugins)?;
-    }
-    // Only persist `ai.lock` once every fallible step (resolution, fetching,
-    // collision checks, and vendor materialization) has succeeded — otherwise
-    // a failed `install` could leave behind a lockfile pointing at state that
-    // was never actually materialized. `--locked` never writes it: it already
-    // matches (checked above).
-    if !locked {
-        lock.save(&dir)?;
-    }
-    Ok(lock.skills.len() + lock.plugins.len())
+    Ok(Plan {
+        dir,
+        targets: manifest.targets.clone(),
+        declares_any: !manifest.skills.is_empty() || !manifest.plugins.is_empty(),
+        vendors,
+        lock,
+        materialized,
+        plugins,
+        previously_managed,
+        previously_managed_plugins,
+        locked,
+    })
 }
 
-/// Persist an edited `manifest` as `ai.json` and [`sync`] it — transactionally.
-///
-/// Every command that edits `ai.json` and then syncs (`add`, `add --all`,
-/// `remove`, `target add`) must go through here: if the sync fails (unreachable
-/// source, unknown ref, content-scan block, ...) the exact previous `ai.json`
-/// bytes are written back, so a failed command leaves the manifest untouched and
-/// retrying it is not rejected as a duplicate. The original bytes (not a
-/// re-serialization) are restored, preserving hand formatting and CRLF line
-/// endings. `ai.lock` needs no rollback: `sync` only writes it after every
-/// fallible step has succeeded.
-pub(super) fn save_and_sync(scope: &Scope, manifest: &Manifest) -> Result<usize> {
-    let dir = scope.manifest_dir()?;
-    let path = Manifest::path_in(&dir);
-    let original = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
-    manifest.save(&dir)?;
-    sync(scope, false, None, false).map_err(|err| rollback(&path, &original, err))
-}
-
-/// Write `original` back to `path` after `err`, and report the outcome of the
-/// rollback alongside the original error.
-fn rollback(path: &std::path::Path, original: &[u8], err: anyhow::Error) -> anyhow::Error {
-    match std::fs::write(path, original) {
-        Ok(()) => anyhow!(
-            "{err:#}\nrolled back: {} was restored to its previous state",
-            path.display()
-        ),
-        Err(restore) => anyhow!(
-            "{err:#}\nerror: could not restore {} to its previous state ({restore}); \
-             it still contains this command's change — fix or revert it by hand",
-            path.display()
-        ),
+impl Plan {
+    /// Project the planned skills + plugins into every configured target, then
+    /// persist `ai.lock`. Returns the number of locked skills + plugins.
+    fn apply(self, scope: &Scope) -> Result<usize> {
+        let lock = &self.lock;
+        if self.declares_any {
+            println!("materializing: {}", self.targets.join(", "));
+        }
+        for vendor in &self.vendors {
+            vendor.materialize(
+                scope,
+                &lock.id,
+                &self.materialized,
+                &self.previously_managed,
+            )?;
+            vendor.materialize_plugins(
+                scope,
+                &lock.id,
+                &self.plugins,
+                &self.previously_managed_plugins,
+            )?;
+        }
+        // Only persist `ai.lock` once every fallible step (resolution, fetching,
+        // collision checks, and vendor materialization) has succeeded —
+        // otherwise a failed `install` could leave behind a lockfile pointing at
+        // state that was never actually materialized. `--locked` never writes
+        // it: it already matches (checked in `plan`).
+        if !self.locked {
+            lock.save(&self.dir)?;
+        }
+        Ok(lock.skills.len() + lock.plugins.len())
     }
 }
 
@@ -519,12 +579,19 @@ fn stale_transitive_pins(
 
 /// How to fix a `--locked` failure, spelled for the scope in use.
 fn locked_fix_hint(scope: &Scope) -> String {
-    let g = if matches!(scope, Scope::Global) {
-        " -g"
+    format!(
+        "run `{}` (without --locked) and commit ai.lock",
+        install_command(scope)
+    )
+}
+
+/// `spm install`, spelled for the scope in use.
+fn install_command(scope: &Scope) -> &'static str {
+    if matches!(scope, Scope::Global) {
+        "spm install -g"
     } else {
-        ""
-    };
-    format!("run `spm install{g}` (without --locked) and commit ai.lock")
+        "spm install"
+    }
 }
 
 /// Reject materialized names that differ only by case. Vendor directories are
@@ -550,48 +617,4 @@ fn reject_case_folding_collisions<'a>(
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::rollback;
-
-    fn scratch(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "spm-rollback-{name}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    #[test]
-    fn rollback_restores_the_exact_original_bytes() {
-        let dir = scratch("ok");
-        let path = dir.join("ai.json");
-        let original = b"{\r\n  \"targets\": []\r\n}\r\n";
-        std::fs::write(&path, b"{\"changed\": true}\n").unwrap();
-        let msg = format!("{:#}", rollback(&path, original, anyhow::anyhow!("boom")));
-        assert_eq!(std::fs::read(&path).unwrap(), original);
-        assert!(msg.starts_with("boom\n"), "{msg}");
-        assert!(msg.contains("was restored to its previous state"), "{msg}");
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn rollback_reports_a_failed_restore_with_the_original_error() {
-        let dir = scratch("fail");
-        // A path whose parent does not exist cannot be written on any platform.
-        let path = dir.join("missing").join("ai.json");
-        let msg = format!("{:#}", rollback(&path, b"{}", anyhow::anyhow!("boom")));
-        assert!(msg.starts_with("boom\n"), "{msg}");
-        assert!(msg.contains("could not restore"), "{msg}");
-        assert!(msg.contains("fix or revert it by hand"), "{msg}");
-        assert!(!msg.contains("was restored"), "{msg}");
-        std::fs::remove_dir_all(dir).unwrap();
-    }
 }

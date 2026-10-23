@@ -1648,10 +1648,9 @@ fn snapshot(sb: &Sandbox, rel: &str) -> Option<Vec<u8>> {
     }
 }
 
-/// Assert a command that edits `ai.json` and then syncs failed *and* rolled
-/// back: `ai.json` and `ai.lock` are byte-for-byte what they were before, and
-/// the user is told the manifest was restored.
-fn assert_failed_and_rolled_back(
+/// Assert a command that edits `ai.json` and then syncs failed *before*
+/// touching anything: `ai.json` and `ai.lock` are byte-for-byte what they were.
+fn assert_failed_and_unchanged(
     sb: &Sandbox,
     out: &std::process::Output,
     manifest_before: &Option<Vec<u8>>,
@@ -1670,10 +1669,27 @@ fn assert_failed_and_rolled_back(
         "a failed command must leave ai.lock byte-for-byte unchanged: {err}"
     );
     assert!(
-        err.contains("ai.json was restored"),
-        "should tell the user ai.json was rolled back: {err}"
+        !err.contains("keeps this change"),
+        "nothing was applied, so nothing is kept: {err}"
     );
     err
+}
+
+/// Make the project's `.gitignore` unreadable as text, so a target that adds a
+/// per-skill ignore entry fails *after* copying the skill into its dir.
+fn corrupt_gitignore(sb: &Sandbox) {
+    std::fs::write(sb.project.join(".gitignore"), b"\xff\xfe\n").unwrap();
+}
+
+/// Assert a command failed while writing the targets, and kept its `ai.json`
+/// change (the ownership record for what was already written) with a hint to
+/// finish via `spm install`.
+fn assert_failed_while_applying(out: &std::process::Output) {
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "command must fail: {err}");
+    assert!(err.contains(".gitignore"), "{err}");
+    assert!(err.contains("ai.json keeps this change"), "{err}");
+    assert!(err.contains("run `spm install`"), "{err}");
 }
 
 /// Make every already-declared dependency unfetchable: move the skill repo away
@@ -1709,7 +1725,7 @@ fn failed_add_leaves_manifest_and_lock_unchanged_and_is_retryable() {
         args.extend_from_slice(extra);
         for attempt in 1..=2 {
             let out = sb.spm(&args);
-            let err = assert_failed_and_rolled_back(&sb, &out, &manifest_before, &lock_before);
+            let err = assert_failed_and_unchanged(&sb, &out, &manifest_before, &lock_before);
             assert!(
                 !err.contains("already exists"),
                 "attempt {attempt} of {extra:?} must not trip over a stale entry: {err}"
@@ -1729,11 +1745,11 @@ fn failed_add_in_fresh_project_leaves_manifest_unchanged_and_no_lock() {
     sb.ok(&["init", "--target", "copilot"]);
     let manifest_before = snapshot(&sb, "ai.json");
     let out = sb.spm(&["add", unreachable_url(), "--branch", "main"]);
-    assert_failed_and_rolled_back(&sb, &out, &manifest_before, &None);
+    assert_failed_and_unchanged(&sb, &out, &manifest_before, &None);
 }
 
 #[test]
-fn failed_force_add_restores_the_previous_entry() {
+fn failed_force_add_keeps_the_previous_entry() {
     let sb = Sandbox::new();
     sb.ok(&["init", "--target", "copilot"]);
     sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
@@ -1750,7 +1766,7 @@ fn failed_force_add_restores_the_previous_entry() {
         "greet",
         "--force",
     ]);
-    assert_failed_and_rolled_back(&sb, &out, &manifest_before, &lock_before);
+    assert_failed_and_unchanged(&sb, &out, &manifest_before, &lock_before);
     sb.ok(&["install", "--locked"]);
 }
 
@@ -1764,7 +1780,7 @@ fn failed_add_preserves_hand_formatted_crlf_manifest_bytes() {
     std::fs::write(sb.project.join("ai.json"), text).unwrap();
     let manifest_before = snapshot(&sb, "ai.json");
     let out = sb.spm(&["add", unreachable_url(), "--tag", "v1"]);
-    assert_failed_and_rolled_back(&sb, &out, &manifest_before, &None);
+    assert_failed_and_unchanged(&sb, &out, &manifest_before, &None);
 }
 
 #[test]
@@ -1798,12 +1814,12 @@ fn add_all_blocked_by_content_scan_leaves_manifest_unchanged() {
         "pack",
         "--all",
     ]);
-    let err = assert_failed_and_rolled_back(&sb, &out, &manifest_before, &None);
+    let err = assert_failed_and_unchanged(&sb, &out, &manifest_before, &None);
     assert!(err.contains("failed the content scan"), "{err}");
 }
 
 #[test]
-fn failed_remove_restores_the_removed_entry() {
+fn failed_remove_keeps_the_entry_declared() {
     let sb = Sandbox::new();
     sb.ok(&["init", "--target", "copilot"]);
     sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "a"]);
@@ -1814,11 +1830,11 @@ fn failed_remove_restores_the_removed_entry() {
 
     // Removing `a` re-syncs `b`, whose source is gone: `a` must stay declared.
     let out = sb.spm(&["remove", "a"]);
-    assert_failed_and_rolled_back(&sb, &out, &manifest_before, &lock_before);
+    assert_failed_and_unchanged(&sb, &out, &manifest_before, &lock_before);
 }
 
 #[test]
-fn failed_target_add_restores_the_previous_targets() {
+fn failed_target_add_keeps_the_previous_targets() {
     let sb = Sandbox::new();
     sb.ok(&["init", "--target", "copilot"]);
     sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
@@ -1827,7 +1843,85 @@ fn failed_target_add_restores_the_previous_targets() {
     break_existing_sources(&sb);
 
     let out = sb.spm(&["target", "add", "claude"]);
-    assert_failed_and_rolled_back(&sb, &out, &manifest_before, &lock_before);
+    assert_failed_and_unchanged(&sb, &out, &manifest_before, &lock_before);
+}
+
+#[test]
+fn add_failing_after_copying_keeps_the_entry_so_install_and_remove_recover() {
+    // Shared-dir targets clean only names spm declares or locked. If `add`
+    // failed after copying the skill and then dropped it from ai.json, nothing
+    // would ever own (and clean) `.agents/skills/greet/` again.
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex"]);
+    corrupt_gitignore(&sb);
+    let out = sb.spm(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    assert_failed_while_applying(&out);
+    let copied = sb.project.join(".agents/skills/greet");
+    assert!(
+        copied.join("SKILL.md").exists(),
+        "failure came after copying"
+    );
+    assert!(sb.read("ai.json").contains("\"greet\""), "entry is kept");
+    assert!(!sb.project.join("ai.lock").exists());
+
+    std::fs::write(sb.project.join(".gitignore"), "").unwrap();
+    sb.ok(&["install"]);
+    sb.ok(&["remove", "greet"]);
+    assert!(
+        !copied.exists(),
+        "the copied skill is still owned and cleaned"
+    );
+}
+
+#[test]
+fn remove_failing_while_applying_keeps_the_removal_and_install_recovers() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "a"]);
+    sb.ok(&["add", &sb.skill_url(), "--branch", "main", "--name", "b"]);
+    let lock_before = snapshot(&sb, "ai.lock");
+    corrupt_gitignore(&sb);
+    let out = sb.spm(&["remove", "a"]);
+    assert_failed_while_applying(&out);
+    assert!(!sb.read("ai.json").contains("\"a\""), "removal is kept");
+    assert_eq!(
+        snapshot(&sb, "ai.lock"),
+        lock_before,
+        "lock only on success"
+    );
+
+    std::fs::write(sb.project.join(".gitignore"), "").unwrap();
+    sb.ok(&["install"]);
+    assert!(!sb.project.join(".agents/skills/a").exists());
+    assert!(sb.project.join(".agents/skills/b/SKILL.md").exists());
+}
+
+#[test]
+fn target_add_failing_while_applying_keeps_the_target_so_it_can_be_removed() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    corrupt_gitignore(&sb);
+    let out = sb.spm(&["target", "add", "codex"]);
+    assert_failed_while_applying(&out);
+    let manifest: serde_json::Value = serde_json::from_str(&sb.read("ai.json")).unwrap();
+    assert!(
+        manifest["targets"]
+            .as_array()
+            .unwrap()
+            .contains(&"codex".into()),
+        "the new target is kept: {manifest}"
+    );
+
+    std::fs::write(sb.project.join(".gitignore"), "").unwrap();
+    sb.ok(&["install"]);
+    let copied = sb.project.join(".agents/skills/greet");
+    assert!(copied.join("SKILL.md").exists());
+    sb.ok(&["target", "remove", "codex"]);
+    assert!(
+        !copied.exists(),
+        "the kept target's output is still cleanable"
+    );
 }
 
 #[test]
@@ -3852,7 +3946,7 @@ fn add_blocks_skill_with_suspicious_content() {
     ]);
     // Blocked: nothing is written, and the blocked entry is rolled back out of
     // ai.json so a fixed-upstream retry is not rejected as a duplicate.
-    let err = assert_failed_and_rolled_back(&sb, &out, &manifest_before, &None);
+    let err = assert_failed_and_unchanged(&sb, &out, &manifest_before, &None);
     assert!(err.contains("failed the content scan"), "{err}");
     assert!(err.contains("prompt-injection"), "{err}");
     assert!(err.contains("curl-pipe-shell"), "{err}");

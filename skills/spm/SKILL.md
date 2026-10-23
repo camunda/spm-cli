@@ -489,25 +489,24 @@ configured, any source is accepted.
 Failure states to know about:
 
 - Commands that edit `ai.json` and then sync — `spm add` (with or without
-  `--all`/`--force`), `spm remove` and `spm target add` — are transactional for
-  `ai.json`: if the sync step fails (a bad ref or commit, an unreachable source
-  or auth error during the fetch, a blocked content scan, a name collision only
-  detected on reload), spm writes the previous `ai.json` back byte for byte and
-  says so on stderr (`rolled back: .../ai.json was restored to its previous state`).
-  Failures before the save (a malformed shorthand, an unknown `@<ref>`, a
-  default-branch lookup error, a duplicate name) never touch it. Either way,
-  fix the cause and re-run the *same* command — it will not be rejected as
-  `already exists`. In the rare case the restore itself fails, the error says
-  so and `ai.json` still holds the change; fix or revert it by hand.
-- `ai.lock` is only written when a sync fully succeeds, so a failure *before*
-  materialization (resolution, fetch, scan, collision check) leaves `ai.lock` and
-  every materialized skill on the old pin. Materialization itself is not atomic,
-  though: `sync` rewrites each configured target in turn before saving `ai.lock`,
-  so a copy/configuration failure partway through can leave some targets updated
-  (or partially rewritten) while `ai.json` and `ai.lock` still hold the old
-  state; `spm status` only compares names, so it will not flag a half-updated
-  target. Re-run `spm install` after fixing the cause to restore every target to
-  a consistent state.
+  `--all`/`--force`), `spm remove` and `spm target add` — only write `ai.json`
+  once resolution, fetching, the content scan and collision checks have all
+  passed. So a failure at any of those steps (a bad ref or commit, an
+  unreachable source or auth error, a blocked scan, a name collision, a
+  malformed shorthand, a duplicate name) leaves `ai.json` and `ai.lock`
+  untouched: fix the cause and re-run the *same* command — it will not be
+  rejected as `already exists`.
+- If the command then fails while *writing the targets* (e.g. an unreadable
+  `.gitignore`, a permission error), some targets may already hold the new
+  output, so `ai.json` deliberately keeps the change (it is what lets spm clean
+  that output later) and the error ends with a `hint:` saying `ai.json` keeps
+  this change and to fix the cause and run `spm install` to finish applying it.
+  Do exactly that; to abandon the change instead, run `spm install` first and
+  then `spm remove <name>` / `spm target remove <target>`. `ai.lock` is only
+  written when a sync fully succeeds, and materialization is not atomic across
+  targets, so until that `spm install` succeeds some targets may be updated (or
+  partially rewritten) while others are not; `spm status` only compares names,
+  so it will not flag a half-updated target.
 - To change the version selector of an existing entry from the CLI, re-run
   `spm add` for it with `--force` and the new selector (and the same
   `--name` and `--path`).

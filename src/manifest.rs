@@ -325,15 +325,23 @@ impl Manifest {
             };
             cause.context(format!("no {MANIFEST_FILE} found at {}", p.display()))
         })?;
+        Self::parse(&text, &p)
+    }
+
+    /// Parse and validate manifest `text` as if read from `p` (used only to
+    /// label errors). The single validation path behind [`Manifest::load`], so
+    /// an edited in-memory manifest can be checked exactly as the next load
+    /// will check it before it is written.
+    pub fn parse(text: &str, p: &Path) -> Result<Self> {
         let value: serde_json::Value =
-            serde_json::from_str(&text).with_context(|| format!("parsing {}", p.display()))?;
+            serde_json::from_str(text).with_context(|| format!("parsing {}", p.display()))?;
         crate::schema::validate(&value).with_context(|| format!("in {}", p.display()))?;
         // Deserialize from the raw text (not `value`): the intermediate
         // `serde_json::Value` above has already collapsed any duplicate object
         // keys, so duplicate skill names are only detectable by streaming the
         // original bytes through `deserialize_unique_skills`.
         let manifest: Self =
-            serde_json::from_str(&text).with_context(|| format!("parsing {}", p.display()))?;
+            serde_json::from_str(text).with_context(|| format!("parsing {}", p.display()))?;
         if let Some(patterns) = &manifest.allowed_sources {
             crate::policy::validate_patterns(patterns)
                 .with_context(|| format!("`allowedSources` in {}", p.display()))?;
@@ -368,8 +376,12 @@ impl Manifest {
 
     pub fn save(&self, dir: &Path) -> Result<()> {
         let p = Self::path_in(dir);
-        let text = serde_json::to_string_pretty(self)?;
-        std::fs::write(&p, text + "\n").with_context(|| format!("writing {}", p.display()))
+        std::fs::write(&p, self.to_text()?).with_context(|| format!("writing {}", p.display()))
+    }
+
+    /// The exact text [`Manifest::save`] writes.
+    pub fn to_text(&self) -> Result<String> {
+        Ok(serde_json::to_string_pretty(self)? + "\n")
     }
 
     pub fn exists(dir: &Path) -> bool {

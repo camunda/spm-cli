@@ -102,11 +102,13 @@ default: a hand-edited `ai.json` entry must still set exactly one selector.
 spm add https://github.com/org/repo --tag v1.0.0 --path skills --all
 ```
 
-`spm add` never leaves a half-recorded entry behind: if resolving, fetching,
-scanning or materializing fails (an unreachable source, a bad ref, a blocked
-content scan), spm restores `ai.json` byte for byte and leaves `ai.lock`
-untouched, so you can fix the cause and re-run the same command. `spm remove`
-and `spm target add` behave the same way.
+`spm add` only writes `ai.json` once resolving, fetching and the content scan
+have succeeded, so a failure there (an unreachable source, a bad ref, a blocked
+scan) leaves `ai.json` and `ai.lock` untouched and you can fix the cause and
+re-run the same command. If it fails later, while writing the targets, `ai.json`
+keeps the new entry (so spm still owns any output already written) and the
+error tells you to run `spm install` once the cause is fixed. `spm remove` and
+`spm target add` behave the same way.
 
 #### Adding a full plugin (`--plugin`)
 
