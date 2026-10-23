@@ -10047,3 +10047,118 @@ fn link_keeps_lock_bytes_and_refuses_an_out_of_sync_lock() {
     assert!(!lock_path.exists());
     assert!(!sb.project.join(".spm/links.json").exists());
 }
+
+/// Files spm edits in place (Claude's settings, `.gitignore`) are written
+/// through a symlink at their path, so one pointing into the linked dir is an
+/// overlap too: the link is rejected and the linked file stays unchanged.
+#[cfg(unix)]
+#[test]
+fn link_rejects_dirs_reached_by_files_spm_writes_through() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--name",
+        "greet",
+    ]);
+    let dev = local_skill_checkout(&sb, "dev", "LOCAL");
+    for rel in [".claude/settings.local.json", ".gitignore"] {
+        let real = sb.project.join(rel);
+        let inside = dev.join("redirected");
+        std::fs::rename(&real, &inside).unwrap();
+        symlink(&inside, &real);
+        let before = std::fs::read(&inside).unwrap();
+        let err = fails(&sb, &["link", "greet", "../dev"]);
+        assert!(err.contains("overlaps"), "{rel}: {err}");
+        assert!(err.contains(rel), "{rel}: {err}");
+        assert_eq!(std::fs::read(&inside).unwrap(), before, "{rel} written");
+        assert!(!sb.project.join(".spm/links.json").exists());
+        std::fs::remove_file(&real).unwrap();
+        std::fs::rename(&inside, &real).unwrap();
+    }
+    sb.ok(&["link", "greet", "../dev"]);
+}
+
+#[cfg(unix)]
+/// A local copy of the sandbox plugin at `<root>/dev-plugin` that drops the
+/// locked `composer` skill and adds an `extra` one.
+fn dev_plugin_without_composer(sb: &Sandbox) {
+    local_skill_checkout(sb, "dev-repo", "unused");
+    let dev = sb.root.join("dev-plugin");
+    std::fs::rename(sb.root.join("dev-repo/pkg"), &dev).unwrap();
+    std::fs::remove_dir_all(dev.join("skills/composer")).unwrap();
+    let extra = dev.join("skills/extra");
+    std::fs::create_dir_all(&extra).unwrap();
+    std::fs::write(extra.join("SKILL.md"), "---\nname: extra\n---\nExtra.\n").unwrap();
+}
+
+#[cfg(unix)]
+/// Cross-scope collisions use the other scope's *effective* names: a linked
+/// plugin's working-tree bundle replaces its locked one, so a skill it dropped
+/// no longer collides and one it added does.
+fn assert_linked_plugin_collisions(plugin_global: bool) {
+    let sb = Sandbox::new();
+    sb.add_plugin();
+    let (plugin_g, skill_g): (&[&str], &[&str]) = if plugin_global {
+        (&["-g"], &[])
+    } else {
+        (&[], &["-g"])
+    };
+    let with = |g: &[&str], args: &[&str]| -> Vec<String> {
+        args.iter().chain(g).map(|s| s.to_string()).collect()
+    };
+    let run = |args: Vec<String>| sb.ok(&args.iter().map(String::as_str).collect::<Vec<_>>());
+    run(with(plugin_g, &["init", "--target", "copilot"]));
+    let manifest = format!(
+        r#"{{"targets":["copilot"],"plugins":{{"ds":{{"git":"{}","branch":"main","path":"pkg"}}}}}}"#,
+        sb.skill_url()
+    );
+    let manifest_dir = if plugin_global {
+        sb.spm_home.clone()
+    } else {
+        sb.project.clone()
+    };
+    std::fs::write(manifest_dir.join("ai.json"), manifest).unwrap();
+    run(with(plugin_g, &["install"]));
+    dev_plugin_without_composer(&sb);
+    let dev = sb.root.join("dev-plugin");
+    run(with(plugin_g, &["link", "ds", dev.to_str().unwrap()]));
+
+    run(with(skill_g, &["init", "--target", "copilot"]));
+    for name in ["composer", "extra"] {
+        let url = sb.skill_url();
+        run(with(
+            skill_g,
+            &["add", &url, "--tag", "v0.1.0", "--name", name],
+        ));
+    }
+    let other = if plugin_global { "global" } else { "project" };
+    let doc = json_doc(
+        &sb.spm(
+            &with(skill_g, &["status", "--json"])
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+        ),
+    );
+    assert_eq!(
+        doc["collisions"],
+        serde_json::json!([{ "name": "extra", "otherScope": other }]),
+        "{doc}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn collisions_use_a_global_linked_plugins_effective_bundle() {
+    assert_linked_plugin_collisions(true);
+}
+
+#[cfg(unix)]
+#[test]
+fn collisions_use_a_project_linked_plugins_effective_bundle() {
+    assert_linked_plugin_collisions(false);
+}

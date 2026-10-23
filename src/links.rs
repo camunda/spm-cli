@@ -106,6 +106,23 @@ impl Links {
         std::fs::write(&p, text + "\n").with_context(|| format!("writing {}", p.display()))
     }
 
+    /// Every skill name materialized for a scope with this lock and these
+    /// links: locked skills, each plugin's locked bundled skills — except for
+    /// an actively linked plugin, whose working tree's bundled skills
+    /// (recorded in [`Links::managed`]) are materialized *instead*.
+    pub fn effective_skill_names(&self, lock: &crate::lockfile::Lockfile) -> Vec<String> {
+        let mut names: Vec<String> = lock.skills.keys().cloned().collect();
+        for (name, l) in &lock.plugins {
+            if !self.links.contains_key(name) {
+                names.extend(l.bundled_skills.iter().cloned());
+            }
+        }
+        names.extend(self.managed.iter().cloned());
+        names.sort();
+        names.dedup();
+        names
+    }
+
     /// Resolve the link recorded for `name` to an existing directory.
     pub fn resolve(&self, scope: &Scope, name: &str) -> Result<Option<Linked>> {
         let Some(display) = self.links.get(name) else {

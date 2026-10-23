@@ -122,13 +122,11 @@ fn collect(scope: &Scope) -> Result<StatusReport> {
     let manifest = Manifest::load(&dir, scope)?;
     let lock = Lockfile::load_or_default(&dir)?;
     let links = Links::load(scope)?;
-    let managed_by_links = links.managed.clone();
-    let linked_plugins: std::collections::BTreeSet<String> = links
-        .links
-        .keys()
-        .filter(|n| manifest.plugins.contains_key(*n))
-        .cloned()
-        .collect();
+    // Plugin-bundled skills are flattened into every vendor's skills dir just
+    // like standalone skills, so they belong in `expected` — otherwise `status`
+    // would flag them as stale (present on disk, not declared). A linked
+    // plugin contributes its working tree's bundled skills instead.
+    let expected = links.effective_skill_names(&lock);
     let links = links
         .links
         .into_iter()
@@ -138,21 +136,6 @@ fn collect(scope: &Scope) -> Result<StatusReport> {
             path,
         })
         .collect();
-    // Plugin-bundled skills are flattened into every vendor's skills dir just
-    // like standalone skills, so they belong in `expected` — otherwise `status`
-    // would flag them as stale (present on disk, not declared).
-    let mut expected: Vec<String> = lock.skills.keys().cloned().collect();
-    // A linked plugin materializes its working tree's bundled skills, recorded
-    // in the links file, *instead of* its locked commit's.
-    for (name, l) in &lock.plugins {
-        if !linked_plugins.contains(name) {
-            expected.extend(l.bundled_skills.iter().cloned());
-        }
-    }
-    expected.extend(managed_by_links);
-    expected.sort();
-    expected.dedup();
-
     // Warn when a skill name is materialized in *both* scopes: the vendor
     // discovery layer keys by name (`/spm:foo`, `.agents/skills/foo`), so a
     // project skill and a global skill of the same name collide/shadow at
@@ -365,20 +348,18 @@ fn shadowed_names(scope: &Scope, expected: &[String]) -> Result<Vec<String>> {
         Scope::Global => std::env::current_dir()?,
     };
     let other = Lockfile::load_or_default(&other_dir)?;
+    let other_scope = match scope {
+        Scope::Project { .. } => Scope::Global,
+        Scope::Global => Scope::Project { root: other_dir },
+    };
     // A name provided by a plugin's bundled skills in the *other* scope
     // collides on disk just as much as a standalone skill of the same name
     // (both are flattened into the same vendor skills dir), so it must be
-    // checked here too — not just `other.skills`.
-    let other_names: std::collections::HashSet<&str> = other
-        .skills
-        .keys()
-        .map(String::as_str)
-        .chain(
-            other
-                .plugins
-                .values()
-                .flat_map(|l| l.bundled_skills.iter().map(String::as_str)),
-        )
+    // checked here too — computed exactly as for this scope, so a linked
+    // plugin's working-tree bundle replaces its locked one.
+    let other_names: std::collections::HashSet<String> = Links::load(&other_scope)?
+        .effective_skill_names(&other)
+        .into_iter()
         .collect();
     Ok(expected
         .iter()

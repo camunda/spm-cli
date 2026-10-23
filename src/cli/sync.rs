@@ -687,12 +687,15 @@ fn resolve_links(
     Ok(out)
 }
 
-/// Reject a linked directory that overlaps any location a configured target
-/// writes or deletes. A source inside the output (e.g. linking Codex's own
+/// Reject a linked directory that overlaps any location a target writes or
+/// deletes. A source inside the output (e.g. linking Codex's own
 /// `.agents/skills/<name>`) would be wiped before it is copied — losing
 /// uncommitted edits — and output inside the source (e.g. linking the project
-/// root) would be copied into itself. Compared by filesystem identity, so
-/// symlinks and spelling aliases (case on a case-insensitive filesystem) match.
+/// root) would be copied into itself. Files spm edits in place (a vendor's
+/// settings, the project `.gitignore`) are followed through symlinks, since
+/// writing them would modify whatever they point at. Compared by filesystem
+/// identity, so symlinks and spelling aliases (case on a case-insensitive
+/// filesystem) match.
 fn reject_link_overlaps(
     scope: &Scope,
     vendors: &[Box<dyn Vendor>],
@@ -700,30 +703,46 @@ fn reject_link_overlaps(
     skills: &[String],
     plugins: &[String],
 ) -> Result<()> {
+    use crate::pathid::{deletion_target, identity, resolve};
     if linked.is_empty() {
         return Ok(());
     }
+    // (target, path as spelled, physical identity, written through?)
     let mut outputs = Vec::new();
+    let mut patched: Vec<(&str, PathBuf)> = Vec::new();
+    if let Scope::Project { root } = scope {
+        patched.push(("spm", root.join(".gitignore")));
+    }
     for v in vendors {
         let mut paths = v.clean_paths(scope, skills)?;
         paths.extend(v.skill_paths(scope, skills)?);
         paths.extend(v.plugin_clean_paths(scope, plugins)?);
         paths.extend(v.plugin_paths(scope, plugins)?);
         for p in paths {
-            let id = crate::pathid::identity(&crate::pathid::deletion_target(&p)?)?;
-            outputs.push((v.name(), p, id));
+            let id = identity(&deletion_target(&p)?)?;
+            outputs.push((v.name(), p, id, false));
         }
+        patched.extend(v.patched_files(scope)?.into_iter().map(|p| (v.name(), p)));
+    }
+    for (target, p) in patched {
+        let id = identity(&resolve(&p, &mut Vec::new())?)?;
+        outputs.push((target, p, id, true));
     }
     for (name, l) in linked {
-        let src = crate::pathid::identity(&l.dir)?;
-        if let Some((target, p, _)) = outputs
-            .iter()
-            .find(|(_, _, out)| out.starts_with(&src) || src.starts_with(out))
-        {
+        let src = identity(&l.dir)?;
+        let hit = outputs.iter().find(|(_, _, out, through)| {
+            out.starts_with(&src) || (!through && src.starts_with(out))
+        });
+        if let Some((target, p, ..)) = hit {
             let g = if scope.is_global() { " -g" } else { "" };
+            let owner = if *target == "spm" {
+                "spm".to_string()
+            } else {
+                format!("target `{target}`")
+            };
             bail!(
-                "linked directory `{}` for `{name}` overlaps `{}`, which target `{target}` \
-                 writes or deletes — link a working copy outside spm's output with \
+                "linked directory `{}` for `{name}` overlaps `{}`, which {owner} writes or \
+                 deletes — link a working copy outside spm's output with \
                  `spm link {name} <dir>{g}`, or drop it with `{}`",
                 l.display,
                 p.display(),

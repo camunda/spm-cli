@@ -112,6 +112,10 @@ impl Vendor for Claude {
         Ok(vec![managed_dir(scope)?, settings_path(scope)?])
     }
 
+    fn patched_files(&self, scope: &Scope) -> Result<Vec<PathBuf>> {
+        Ok(vec![settings_path(scope)?])
+    }
+
     fn deregister(&self, scope: &Scope) -> Result<()> {
         let path = settings_path(scope)?;
         if path.exists() {

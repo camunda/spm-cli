@@ -216,7 +216,9 @@ spm install                               # re-run after further edits
   `ai.json`, they fail and ask you to run `spm install` first.
 - The directory may not overlap anything a target writes or deletes (e.g.
   Codex's `.agents/skills/<name>`, or the project root, which contains the
-  output) — that would wipe your working copy or copy the output into itself.
+  output), nor be reached by a file spm edits in place (Claude's settings,
+  `.gitignore`) through a symlink — that would wipe or modify your working copy,
+  or copy the output into itself.
 - Linking a name that is not declared in `ai.json` is an error. If you later
   `spm remove` a linked dependency, the leftover link is ignored with a warning
   until `spm unlink` drops it. If a linked directory disappears, syncs fail until
