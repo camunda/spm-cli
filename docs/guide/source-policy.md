@@ -131,6 +131,9 @@ is written:
   that uses one fails, instead of downloading unchecked content or silently
   installing LFS pointer files as skills. Repositories that select no filter
   are unaffected.
+- The shared store only reuses a checkout under a policy if it was itself made
+  under these rules; a checkout cached by an earlier unrestricted install (for
+  example from another project) is fetched again first.
 
 Git's own URL rewriting in your git config (`url.<base>.insteadOf`) is machine
 configuration, trusted like the policy file itself; spm judges the URL as written

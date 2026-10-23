@@ -8304,3 +8304,91 @@ fn policy_disables_checkout_filters() {
         assert!(!installed(&sb), "{setting}");
     }
 }
+
+/// The shared store must not launder a checkout made without a policy into a
+/// policy-controlled install: its working tree may hold checkout-filter output
+/// from an unchecked source. Under a policy only checkouts made under the
+/// restricted rules are reused; any other is rebuilt (and a filtered one
+/// fails, without the filter running).
+#[test]
+fn policy_rebuilds_cached_checkouts_made_without_a_policy() {
+    let sb = Sandbox::new();
+    std::fs::write(
+        sb.skill_repo.join(".gitattributes"),
+        "*.md filter=fakelfs\n",
+    )
+    .unwrap();
+    sb.git(&["add", "-A"]);
+    sb.git(&["commit", "-qm", "filtered"]);
+    sb.ok(&["init", "--target", "copilot"]);
+    let marker = sb.root.join("filter-ran");
+    let marker_sh = marker.to_str().unwrap().replace('\\', "/");
+    let run = |args: &[&str]| {
+        let mut cmd = sb.command(args);
+        with_user_git_config(
+            &mut cmd,
+            "filter.fakelfs.smudge",
+            &format!("echo ran >> '{marker_sh}'; cat"),
+        );
+        cmd.output().unwrap()
+    };
+
+    // Populate the store (and ai.lock) without a policy: the filter runs.
+    let out = run(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--name",
+        "greet",
+    ]);
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(marker.exists());
+    std::fs::remove_file(&marker).unwrap();
+
+    // A machine policy that allows the source is now enforced.
+    write_policy_file(&sb.spm_home.join("policy.json"), &["file://*"]);
+    let out = run(&["install", "--locked"]);
+    assert!(!out.status.success());
+    let err = stderr_of(&out);
+    assert!(err.contains("checkout filters such as Git LFS"), "{err}");
+    assert!(!marker.exists(), "the filter ran: {err}");
+}
+
+/// Under a policy an unverified cached checkout is rebuilt, never reused; one
+/// made under the policy is reused (also without a policy) with no refetch.
+#[test]
+fn policy_reuses_only_cached_checkouts_made_under_a_policy() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--name",
+        "greet",
+    ]);
+    let away = sb.root.join("skill-away");
+    let hide = || std::fs::rename(&sb.skill_repo, &away).unwrap();
+    let restore = || std::fs::rename(&away, &sb.skill_repo).unwrap();
+    write_policy_file(&sb.spm_home.join("policy.json"), &["file://*"]);
+
+    // The no-policy checkout isn't reused: with the source gone, the rebuild fails.
+    hide();
+    let out = sb.spm(&["install", "--locked"]);
+    assert!(!out.status.success(), "the unverified checkout was reused");
+    restore();
+
+    // Rebuilt under the policy...
+    sb.ok(&["install", "--locked"]);
+    // ...and from then on served from the store, with or without a policy.
+    hide();
+    sb.ok(&["install", "--locked"]);
+    std::fs::remove_file(sb.spm_home.join("policy.json")).unwrap();
+    sb.ok(&["install", "--locked"]);
+    assert!(sb
+        .project
+        .join(".agents/skills/spm-managed-skills/greet/SKILL.md")
+        .exists());
+}

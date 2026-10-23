@@ -1,6 +1,10 @@
 use crate::{git, lockfile::LockedSkill, paths};
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
+
+/// Marks (inside the checkout's `.git`, which is never materialized) a store
+/// checkout that was fetched under a source policy's restricted git rules.
+const RESTRICTED_MARKER: &str = "spm-restricted";
 
 /// Outcome of ensuring a skill is in the store.
 pub struct Ensured {
@@ -30,14 +34,26 @@ pub fn ensure(locked: &LockedSkill) -> Result<Ensured> {
     crate::policy::gate(&locked.git)?;
     let repo_dir = paths::store_dir()?.join(&locked.store);
 
-    let fetched = !git::is_at_commit(&repo_dir, &locked.commit);
+    // The commit SHA pins the history, but not how the working tree was
+    // produced: a checkout made without a policy may hold checkout-filter (Git
+    // LFS) output fetched from somewhere no policy checked. Under a policy, only
+    // reuse a checkout that was itself made under the restricted git rules; any
+    // other is rebuilt. Such a checkout is valid for unrestricted use too, since
+    // under a policy a checkout needing a filter fails instead of skipping it.
+    let restricted = crate::policy::restricts();
+    let marker = repo_dir.join(".git").join(RESTRICTED_MARKER);
+    let fetched = !git::is_at_commit(&repo_dir, &locked.commit) || (restricted && !marker.exists());
     if fetched {
-        // Stale or missing: wipe and re-fetch to keep the store immutable-per-key.
+        // Stale, missing or unverified: wipe and re-fetch to keep the store
+        // immutable-per-key.
         if repo_dir.exists() {
             std::fs::remove_dir_all(&repo_dir)?;
         }
         std::fs::create_dir_all(repo_dir.parent().unwrap())?;
         git::fetch_commit(&locked.git, &locked.commit, &repo_dir)?;
+        if restricted {
+            std::fs::write(&marker, "").with_context(|| format!("writing {}", marker.display()))?;
+        }
     }
 
     let content = match &locked.path {
