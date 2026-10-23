@@ -878,10 +878,16 @@ fn reject_link_overlaps(
     // output (by its entry or where it points) it would be wiped, silently
     // dropping every link.
     for links_file in state_files {
-        let state = [
+        // Its entry, where it points, and every symlink on the way: deleting
+        // any of those loses the file (or access to it) just the same.
+        let mut hops = Vec::new();
+        let mut state = vec![
             identity(&deletion_target(links_file)?)?,
-            identity(&resolve(links_file, &mut Vec::new())?)?,
+            identity(&resolve(links_file, &mut hops)?)?,
         ];
+        for h in &hops {
+            state.push(identity(h)?);
+        }
         if let Some((owner, p, ..)) = outputs
             .iter()
             .find(|(_, _, out, through)| !through && state.iter().any(|s| s.starts_with(out)))

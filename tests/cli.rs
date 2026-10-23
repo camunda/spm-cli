@@ -10734,12 +10734,13 @@ fn a_link_whose_parent_became_a_file_never_blocks_recovery() {
 }
 
 /// The links file must survive the targets' cleanup: when it lies inside their
-/// output — its directory or the file itself symlinked there — every command
+/// output — its directory or the file itself symlinked there, or its route
+/// passing through a symlink there — every command
 /// that would rebuild or delete that output refuses before any writes, rather
 /// than silently dropping the links.
 #[test]
 fn commands_never_wipe_a_links_file_inside_target_output() {
-    for via_dir in [true, false] {
+    for layout in ["dir", "file", "hop"] {
         let sb = Sandbox::new();
         sb.ok(&["init", "--target", "copilot"]);
         sb.ok(&["target", "add", "claude"]);
@@ -10757,14 +10758,24 @@ fn commands_never_wipe_a_links_file_inside_target_output() {
         let links_file = sb.project_links();
         let links_dir = links_file.parent().unwrap().to_path_buf();
         let state = sb.project.join(".agents/skills/spm-managed-skills/state");
-        if via_dir {
-            std::fs::rename(&links_dir, &state).unwrap();
-            symlink(&state, &links_dir);
-        } else {
-            std::fs::create_dir_all(&state).unwrap();
-            let inside = state.join("links.json");
-            std::fs::rename(&links_file, &inside).unwrap();
-            symlink(&inside, &links_file);
+        match layout {
+            "dir" => {
+                std::fs::rename(&links_dir, &state).unwrap();
+                symlink(&state, &links_dir);
+            }
+            "file" => {
+                std::fs::create_dir_all(&state).unwrap();
+                let inside = state.join("links.json");
+                std::fs::rename(&links_file, &inside).unwrap();
+                symlink(&inside, &links_file);
+            }
+            // Only the route passes through the output: the file lives outside.
+            _ => {
+                let external = sb.root.join("external-state");
+                std::fs::rename(&links_dir, &external).unwrap();
+                symlink(&external, &state);
+                symlink(&state, &links_dir);
+            }
         }
         let before = read_path(&links_file);
         for args in [
@@ -10774,9 +10785,9 @@ fn commands_never_wipe_a_links_file_inside_target_output() {
             &["target", "remove", "copilot"],
         ] {
             let err = fails(&sb, args);
-            assert!(err.contains("the links file"), "{via_dir} {args:?}: {err}");
-            assert!(err.contains("copilot"), "{via_dir} {args:?}: {err}");
-            assert_eq!(read_path(&links_file), before, "{via_dir} {args:?}");
+            assert!(err.contains("the links file"), "{layout} {args:?}: {err}");
+            assert!(err.contains("copilot"), "{layout} {args:?}: {err}");
+            assert_eq!(read_path(&links_file), before, "{layout} {args:?}");
             assert!(sb
                 .read(".agents/skills/spm-managed-skills/greet/SKILL.md")
                 .contains("LOCAL"));
