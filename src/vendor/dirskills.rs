@@ -12,16 +12,17 @@ use crate::fsutil;
 use anyhow::{Context, Result};
 use std::path::Path;
 
-use super::MaterializedSkill;
+use super::{Claim, MaterializedSkill};
 
 /// Copy each skill into `dir/<name>/`, creating `dir` if needed.
 ///
 /// Replaces any pre-existing dir of the same name so re-materialization is
 /// idempotent even when `dir` is shared with the user's own hand-authored
-/// skills.
-pub fn copy_skills_into(dir: &Path, skills: &[MaterializedSkill]) -> Result<()> {
+/// skills. Each name is `claim`ed right before its entry is written.
+pub fn copy_skills_into(dir: &Path, skills: &[MaterializedSkill], claim: Claim) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     for s in skills {
+        claim(&s.name)?;
         let dest = dir.join(&s.name);
         if dest.exists() {
             std::fs::remove_dir_all(&dest)
@@ -35,10 +36,16 @@ pub fn copy_skills_into(dir: &Path, skills: &[MaterializedSkill]) -> Result<()> 
 
 /// Remove `dir/<name>/` for each managed `name`, ignoring absent entries and
 /// leaving every other entry in `dir` (e.g. the user's own skills) untouched.
-pub fn remove_managed<'a>(dir: &Path, names: impl Iterator<Item = &'a str>) -> Result<()> {
+/// Each present entry is `claim`ed right before it is removed.
+pub fn remove_managed<'a>(
+    dir: &Path,
+    names: impl Iterator<Item = &'a str>,
+    claim: Claim,
+) -> Result<()> {
     for name in names {
         let target = dir.join(name);
         if target.is_dir() {
+            claim(name)?;
             std::fs::remove_dir_all(&target)
                 .with_context(|| format!("removing {}", target.display()))?;
         }
@@ -79,9 +86,9 @@ mod tests {
         let tmp = scratch("overwrite");
         let dir = tmp.join("skills");
         let s = make_skill(&tmp, "greet");
-        copy_skills_into(&dir, std::slice::from_ref(&s)).unwrap();
+        copy_skills_into(&dir, std::slice::from_ref(&s), &mut |_| Ok(())).unwrap();
         std::fs::write(s.path.join("SKILL.md"), "v2\n").unwrap();
-        copy_skills_into(&dir, &[s]).unwrap();
+        copy_skills_into(&dir, &[s], &mut |_| Ok(())).unwrap();
         let got = std::fs::read_to_string(dir.join("greet").join("SKILL.md")).unwrap();
         assert_eq!(got, "v2\n");
         std::fs::remove_dir_all(&tmp).unwrap();
@@ -97,7 +104,7 @@ mod tests {
             std::fs::create_dir_all(dir.join(n)).unwrap();
             std::fs::write(dir.join(n).join("SKILL.md"), "x\n").unwrap();
         }
-        remove_managed(&dir, ["greet"].into_iter()).unwrap();
+        remove_managed(&dir, ["greet"].into_iter(), &mut |_| Ok(())).unwrap();
         assert!(!dir.join("greet").exists(), "managed skill removed");
         assert!(dir.join("user-skill").exists(), "unnamed skill preserved");
         std::fs::remove_dir_all(&tmp).unwrap();

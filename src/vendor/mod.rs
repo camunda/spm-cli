@@ -97,6 +97,10 @@ pub fn classify(skills_dir: &Path, expected: &[String], detect_stale: bool) -> V
 /// [`Scope::Project`](crate::scope::Scope) that is a project-local, gitignored
 /// directory; in [`Scope::Global`](crate::scope::Scope) it is a user-global
 /// location shared across every project.
+/// Records that spm is about to modify the named skill entry (see
+/// [`Vendor::materialize`]).
+pub type Claim<'a> = &'a mut dyn FnMut(&str) -> Result<()>;
+
 pub trait Vendor {
     #[allow(dead_code)] // part of the adapter contract; not all call sites use it yet
     fn name(&self) -> &'static str;
@@ -111,12 +115,18 @@ pub trait Vendor {
     /// share a directory with the user's own skills use it to remove only the
     /// entries spm previously owned but that were since dropped from the
     /// manifest, never touching the user's hand-authored skills.
+    ///
+    /// `claim(name)` must be called right before the vendor modifies (removes
+    /// or writes) a skill entry `name` in a dir it shares with the user, so the
+    /// ownership record (`crate::owned`) covers everything spm touched even if
+    /// a later step fails — and nothing it never reached.
     fn materialize(
         &self,
         scope: &Scope,
         project_id: &str,
         skills: &[MaterializedSkill],
         previously_managed: &[String],
+        claim: Claim,
     ) -> Result<()>;
 
     /// Remove everything this vendor generated for this `scope`: deletes each of

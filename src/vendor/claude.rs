@@ -1,4 +1,4 @@
-use super::{MaterializedPlugin, MaterializedSkill, Vendor};
+use super::{Claim, MaterializedPlugin, MaterializedSkill, Vendor};
 use crate::scope::Scope;
 use crate::{fsutil, gitignore, jsonutil, paths};
 use anyhow::{Context, Result};
@@ -63,6 +63,7 @@ impl Vendor for Claude {
         _project_id: &str,
         skills: &[MaterializedSkill],
         _previously_managed: &[String],
+        _claim: Claim,
     ) -> Result<()> {
         let market = marketplace(scope);
         let market_dir = managed_dir(scope)?;
@@ -424,7 +425,9 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         let scope = Scope::Project { root: tmp.clone() };
         let s = make_skill(&tmp, "greet");
-        Claude.materialize(&scope, "spm-1234", &[s], &[]).unwrap();
+        Claude
+            .materialize(&scope, "spm-1234", &[s], &[], &mut |_| Ok(()))
+            .unwrap();
 
         assert!(tmp
             .join(".spm/claude/plugin/skills/greet/SKILL.md")
@@ -449,7 +452,9 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         let scope = Scope::Project { root: tmp.clone() };
         let s = make_skill(&tmp, "greet");
-        Claude.materialize(&scope, "spm-1234", &[s], &[]).unwrap();
+        Claude
+            .materialize(&scope, "spm-1234", &[s], &[], &mut |_| Ok(()))
+            .unwrap();
         Claude.clean(&scope, &["greet".into()]).unwrap();
 
         assert!(!tmp.join(".spm/claude").exists(), "marketplace dir removed");

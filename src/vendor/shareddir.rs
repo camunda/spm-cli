@@ -18,7 +18,7 @@
 //! - In [`Scope::Global`] there is no repo, so no `.gitignore` is written.
 
 use super::dirskills::{copy_skills_into, remove_managed};
-use super::{MaterializedSkill, Vendor};
+use super::{Claim, MaterializedSkill, Vendor};
 use crate::scope::Scope;
 use crate::{gitignore, paths};
 use anyhow::Result;
@@ -148,15 +148,16 @@ impl Vendor for SharedDirVendor {
         _project_id: &str,
         skills: &[MaterializedSkill],
         previously_managed: &[String],
+        claim: Claim,
     ) -> Result<()> {
         let dir = self.skills_dir(scope)?;
         // Shared dir: remove only the entries spm owns (previously-managed ∪
         // about-to-write), then copy the current set. Never wipe the whole dir.
         let mut owned: BTreeSet<&str> = previously_managed.iter().map(String::as_str).collect();
         owned.extend(skills.iter().map(|s| s.name.as_str()));
-        remove_managed(&dir, owned.iter().copied())?;
+        remove_managed(&dir, owned.iter().copied(), claim)?;
         if !skills.is_empty() {
-            copy_skills_into(&dir, skills)?;
+            copy_skills_into(&dir, skills, claim)?;
         }
         // Keep spm's skills out of VCS without ignoring the user's own committed
         // skills in the same shared dir: ignore each managed subdir by name.
@@ -280,8 +281,14 @@ mod tests {
 
         let scope = Scope::Project { root: tmp.clone() };
         let greet = make_skill(&tmp, "greet");
-        v.materialize(&scope, "spm-1234", &[greet], &["old-skill".to_string()])
-            .unwrap();
+        v.materialize(
+            &scope,
+            "spm-1234",
+            &[greet],
+            &["old-skill".to_string()],
+            &mut |_| Ok(()),
+        )
+        .unwrap();
 
         assert!(
             dir.join("greet").join("SKILL.md").exists(),
@@ -306,7 +313,7 @@ mod tests {
             std::fs::create_dir_all(dir.join(n)).unwrap();
             std::fs::write(dir.join(n).join("SKILL.md"), "x\n").unwrap();
         }
-        remove_managed(&dir, ["greet"].into_iter()).unwrap();
+        remove_managed(&dir, ["greet"].into_iter(), &mut |_| Ok(())).unwrap();
         assert!(!dir.join("greet").exists(), "managed skill removed");
         assert!(dir.join("user-skill").exists(), "user skill preserved");
         std::fs::remove_dir_all(&tmp).unwrap();

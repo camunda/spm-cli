@@ -1,5 +1,5 @@
 use super::dirskills::{copy_skills_into, remove_managed};
-use super::{MaterializedSkill, Vendor};
+use super::{Claim, MaterializedSkill, Vendor};
 use crate::scope::Scope;
 use crate::{gitignore, paths};
 use anyhow::{Context, Result};
@@ -48,6 +48,7 @@ impl Vendor for Copilot {
         _project_id: &str,
         skills: &[MaterializedSkill],
         previously_managed: &[String],
+        claim: Claim,
     ) -> Result<()> {
         let dir = skills_dir(scope)?;
         match scope {
@@ -61,7 +62,7 @@ impl Vendor for Copilot {
                 if skills.is_empty() {
                     return Ok(());
                 }
-                copy_skills_into(&dir, skills)?;
+                copy_skills_into(&dir, skills, claim)?;
                 ensure_gitignored(root)
             }
             Scope::Global => {
@@ -71,9 +72,9 @@ impl Vendor for Copilot {
                 let mut owned: BTreeSet<&str> =
                     previously_managed.iter().map(String::as_str).collect();
                 owned.extend(skills.iter().map(|s| s.name.as_str()));
-                remove_managed(&dir, owned.iter().copied())?;
+                remove_managed(&dir, owned.iter().copied(), claim)?;
                 if !skills.is_empty() {
-                    copy_skills_into(&dir, skills)?;
+                    copy_skills_into(&dir, skills, claim)?;
                 }
                 Ok(())
             }
@@ -204,7 +205,7 @@ mod tests {
             std::fs::write(dir.join(n).join("SKILL.md"), "x\n").unwrap();
         }
 
-        remove_managed(&dir, ["greet"].into_iter()).unwrap();
+        remove_managed(&dir, ["greet"].into_iter(), &mut |_| Ok(())).unwrap();
 
         assert!(!dir.join("greet").exists(), "managed skill removed");
         assert!(dir.join("user-skill").exists(), "user skill preserved");
@@ -218,10 +219,10 @@ mod tests {
         let tmp = scratch("overwrite");
         let dir = tmp.join("skills");
         let s = make_skill(&tmp, "greet");
-        copy_skills_into(&dir, std::slice::from_ref(&s)).unwrap();
+        copy_skills_into(&dir, std::slice::from_ref(&s), &mut |_| Ok(())).unwrap();
         // Change the source, copy again — the dest must reflect the new content.
         std::fs::write(s.path.join("SKILL.md"), "v2\n").unwrap();
-        copy_skills_into(&dir, &[s]).unwrap();
+        copy_skills_into(&dir, &[s], &mut |_| Ok(())).unwrap();
         let got = std::fs::read_to_string(dir.join("greet").join("SKILL.md")).unwrap();
         assert_eq!(got, "v2\n");
         std::fs::remove_dir_all(&tmp).unwrap();
@@ -232,7 +233,7 @@ mod tests {
     fn copy_and_purge(dir: &Path, skills: &[MaterializedSkill], previously_managed: &[String]) {
         let mut owned: BTreeSet<&str> = previously_managed.iter().map(String::as_str).collect();
         owned.extend(skills.iter().map(|s| s.name.as_str()));
-        remove_managed(dir, owned.iter().copied()).unwrap();
-        copy_skills_into(dir, skills).unwrap();
+        remove_managed(dir, owned.iter().copied(), &mut |_| Ok(())).unwrap();
+        copy_skills_into(dir, skills, &mut |_| Ok(())).unwrap();
     }
 }

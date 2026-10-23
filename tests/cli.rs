@@ -12514,3 +12514,47 @@ fn target_remove_after_a_partially_failed_target_add_removes_what_it_wrote() {
         );
     }
 }
+
+/// Ownership is claimed name by name as the vendor reaches each entry: when
+/// removing an earlier entry fails (`a`, which can't be deleted), a later
+/// requested name the vendor never reached — the user's own `mine` — is not
+/// claimed, so a later `clean` leaves it alone.
+#[cfg(unix)]
+#[test]
+fn a_failure_before_the_vendor_reaches_a_user_skill_does_not_claim_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = Sandbox::new();
+    let repo = |name: &str| {
+        make_repo(
+            &sb.root.join(name),
+            &[("SKILL.md", &format!("---\nname: {name}\n---\n{name}.\n"))],
+        )
+    };
+    sb.ok(&["init", "--target", "codex"]);
+    sb.ok(&["add", &repo("base"), "--branch", "main", "--name", "base"]);
+    let dir = sb.project.join(".agents/skills");
+    std::fs::create_dir_all(dir.join("mine")).unwrap();
+    std::fs::write(dir.join("mine/SKILL.md"), "Mine.\n").unwrap();
+    let locked = dir.join("a/locked");
+    std::fs::create_dir_all(&locked).unwrap();
+    std::fs::write(locked.join("f"), "x\n").unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+    for name in ["a", "mine"] {
+        sb.ok(&[
+            "add",
+            &repo(name),
+            "--branch",
+            "main",
+            "--name",
+            name,
+            "--lock-only",
+        ]);
+    }
+
+    let err = fails(&sb, &["install"]);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(err.contains("removing"), "{err}");
+    sb.ok(&["clean"]);
+    assert_eq!(sb.read(".agents/skills/mine/SKILL.md"), "Mine.\n");
+    assert!(!dir.join("base").exists(), "installed `base` cleaned");
+}

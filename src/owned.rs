@@ -19,8 +19,9 @@
 
 use crate::lockfile::Lockfile;
 use crate::manifest::validate_skill_name;
-use crate::paths;
 use crate::scope::Scope;
+use crate::vendor::Claim;
+use crate::{gitignore, paths};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -57,11 +58,6 @@ impl Owned {
                 .collect(),
             plugins: lock.plugins.keys().cloned().collect(),
         }
-    }
-
-    pub fn extend(&mut self, other: &Owned) {
-        self.skills.extend(other.skills.iter().cloned());
-        self.plugins.extend(other.plugins.iter().cloned());
     }
 
     pub fn skill_names(&self) -> Vec<String> {
@@ -127,17 +123,18 @@ impl Ownership {
     }
 
     /// Install `lock`'s set into each of `targets` with `install(index, prior
-    /// ownership)`, keeping the record true at every step. Before a target is
-    /// written it is recorded as possibly holding its prior ownership ∪ the new
-    /// set — vendors remove and rewrite exactly those names in its dir, so a
-    /// failure part-way leaves nothing of spm's unrecorded and claims nothing
-    /// else. Once a target is written it holds exactly the new set.
+    /// ownership, claim)`, keeping the record true at every step: a failure
+    /// part-way leaves nothing spm touched unrecorded, and claims nothing it
+    /// did not touch. A skill name is recorded when the vendor `claim`s it,
+    /// right before modifying its entry; plugin output lives only in
+    /// spm-owned locations, so the new plugins are recorded up front. Once a
+    /// target is written it holds exactly the new set.
     pub fn install(
         &self,
         scope: &Scope,
         targets: &[String],
         lock: &Lockfile,
-        mut install: impl FnMut(usize, &Owned) -> Result<()>,
+        mut install: impl FnMut(usize, &Owned, Claim) -> Result<()>,
     ) -> Result<()> {
         let desired = Owned::from_lock(lock);
         let mut record: BTreeMap<String, Owned> = targets
@@ -147,10 +144,17 @@ impl Ownership {
         for (i, target) in targets.iter().enumerate() {
             let prior = self.for_target(target);
             let mut ahead = prior.clone();
-            ahead.extend(&desired);
+            ahead.plugins.extend(desired.plugins.iter().cloned());
             record.insert(target.clone(), ahead);
             Self::Recorded(record.clone()).save(scope)?;
-            install(i, &prior)?;
+            let mut claim = |name: &str| -> Result<()> {
+                let owned = record.get_mut(target).expect("target recorded above");
+                if owned.skills.insert(name.to_string()) {
+                    Self::Recorded(record.clone()).save(scope)?;
+                }
+                Ok(())
+            };
+            install(i, &prior, &mut claim)?;
             record.insert(target.clone(), desired.clone());
         }
         Self::Recorded(record).save(scope)
@@ -190,11 +194,9 @@ impl Ownership {
         let dir = p.parent().expect("record path has a parent");
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         if let Scope::Project { .. } = scope {
-            let ignore = dir.join(".gitignore");
-            if !ignore.exists() {
-                std::fs::write(&ignore, "# machine-local spm state — never commit\n*\n")
-                    .with_context(|| format!("writing {}", ignore.display()))?;
-            }
+            // `.spm/.gitignore` may pre-exist (even empty): append the rule
+            // rather than trust it, so the record can never be committed.
+            gitignore::ensure(dir, "# machine-local spm state — never commit", "*")?;
         }
         let record = Record {
             targets: targets.clone(),
@@ -248,7 +250,8 @@ mod tests {
         fail_at: usize,
     ) -> String {
         let err = owned
-            .install(scope, targets, lock, |i, _| {
+            .install(scope, targets, lock, |i, _, claim| {
+                claim("touched")?;
                 if i == fail_at {
                     anyhow::bail!("boom")
                 }
@@ -276,13 +279,14 @@ mod tests {
         let targets = ["codex".to_string(), "cursor".to_string()];
         let err = installed_err(&scope, &recorded, &targets, &lock_with(&["b"]), 1);
         assert!(err.contains("boom"), "{err}");
-        // `codex` was written; `cursor` failed part-way, so it may hold either set.
+        // `codex` was written; `cursor` failed part-way, so it holds its prior
+        // set plus exactly what it claimed — not the rest of the new set.
         let partial = Ownership::load(&scope, &lock_with(&[])).unwrap();
         assert_eq!(partial.for_target("codex").skills, set(&["b"]));
-        assert_eq!(partial.for_target("cursor").skills, set(&["b"]));
+        assert_eq!(partial.for_target("cursor").skills, set(&["touched"]));
         let mut seen = Vec::new();
         recorded
-            .install(&scope, &targets[..1], &lock_with(&["b"]), |i, prior| {
+            .install(&scope, &targets[..1], &lock_with(&["b"]), |i, prior, _| {
                 seen.push((i, prior.skill_names()));
                 Ok(())
             })
@@ -298,6 +302,21 @@ mod tests {
         let ignore = std::fs::read_to_string(root.join(".spm").join(".gitignore")).unwrap();
         assert!(ignore.lines().any(|l| l == "*"), "{ignore}");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_existing_ignore_file_without_the_rule_gets_it() {
+        for existing in ["", "keep-me\n"] {
+            let root = scratch("ignore");
+            let scope = Scope::Project { root: root.clone() };
+            std::fs::create_dir_all(root.join(".spm")).unwrap();
+            std::fs::write(root.join(".spm").join(".gitignore"), existing).unwrap();
+            Ownership::Recorded(BTreeMap::new()).save(&scope).unwrap();
+            let ignore = std::fs::read_to_string(root.join(".spm").join(".gitignore")).unwrap();
+            assert!(ignore.starts_with(existing), "{ignore:?}");
+            assert!(ignore.lines().any(|l| l == "*"), "{ignore:?}");
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

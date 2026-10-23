@@ -843,14 +843,20 @@ impl Plan {
             }
         }
         self.previously_owned
-            .install(scope, &self.targets, lock, |i, _| {
+            .install(scope, &self.targets, lock, |i, _, claim| {
                 let vendor = &self.vendors[i];
                 let owned = owned_in(
                     &self.previously_owned,
                     &self.targets[i],
                     &self.previously_linked,
                 );
-                vendor.materialize(scope, &lock.id, &self.materialized, &owned.skill_names())?;
+                vendor.materialize(
+                    scope,
+                    &lock.id,
+                    &self.materialized,
+                    &owned.skill_names(),
+                    claim,
+                )?;
                 vendor.materialize_plugins(scope, &lock.id, &self.plugins, &owned.plugin_names())
             })?;
         // Only persist `ai.lock` once every fallible step (resolution, fetching,
