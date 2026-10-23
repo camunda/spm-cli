@@ -7236,6 +7236,10 @@ fn policy_denied_add_fails_before_git_and_leaves_manifest_untouched() {
             "main",
         ],
         &["add", "ssh://git@evil.test/attacker/skill.git"],
+        // `?`/`#` end the authority: the host is `evil.test`, not the
+        // allowed host after the `@`.
+        &["add", "https://evil.test?@example.test/org/skill.git"],
+        &["add", "https://evil.test#@example.test/org/skill.git"],
         // The shorthand's ref lookup would need git: the expanded URL is
         // checked first.
         &["add", "github.com/attacker/skill@v1"],
@@ -7323,6 +7327,19 @@ fn policy_local_sources_need_file_star() {
     assert!(err.contains("a local source"), "{err}");
     assert!(err.contains("file://*"), "{err}");
 
+    // `file://*` covers local paths only, never a remote that merely looks
+    // like one: a backslash before the colon is still scp-style SSH to git.
+    set_project_policy(&sb, &["file://*"]);
+    let mut remotes = vec![r"domain\user@evil.test:attacker/skill.git"];
+    // Off Windows git reads a drive-like `x:path` as SSH to host `x`.
+    if cfg!(not(windows)) {
+        remotes.push("x:attacker/skill.git");
+    }
+    for url in remotes {
+        let err = fails_without_git(&sb, &["add", url, "--branch", "main"]);
+        assert!(err.contains("is not allowed"), "{url}: {err}");
+    }
+
     set_project_policy(&sb, &["example.test/org/*", "file://*"]);
     sb.ok(&[
         "add",
@@ -7332,6 +7349,21 @@ fn policy_local_sources_need_file_star() {
         "--name",
         "greet",
     ]);
+}
+
+/// On Windows a drive path is a local source, allowed by `file://*`.
+#[cfg(windows)]
+#[test]
+fn policy_windows_drive_paths_are_local() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    set_project_policy(&sb, &["file://*"]);
+    let path = sb.skill_repo.display().to_string();
+    assert_eq!(path.as_bytes()[1], b':', "{path}");
+    sb.ok(&["add", &path, "--branch", "main", "--name", "greet"]);
+    set_project_policy(&sb, &["example.test/org/*"]);
+    let err = fails_without_git(&sb, &["install"]);
+    assert!(err.contains("a local source"), "{err}");
 }
 
 /// An empty `allowedSources` is a policy that allows nothing.
@@ -7778,6 +7810,49 @@ fn policy_denied_source_is_an_outdated_error_row() {
     );
     assert!(all.contains("is not allowed"), "{all}");
     assert!(all.contains("could not check 1"), "{all}");
+}
+
+/// A commit pin is never queried remotely, but a denied commit-pinned source
+/// is still an error row (not `pinned`) — and no git runs.
+#[test]
+fn policy_denied_commit_pin_is_an_outdated_error_row() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    let sha = skill_head(&sb.skill_repo);
+    sb.ok(&["add", &sb.skill_url(), "--commit", &sha, "--name", "greet"]);
+    write_policy_file(&sb.spm_home.join("policy.json"), &["example.test/org/*"]);
+    let out = sb
+        .command(&["outdated", "--json"])
+        .env("PATH", empty_path(&sb))
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let row = &report["skills"][0];
+    assert_eq!(row["status"], "error", "{stdout}");
+    assert!(
+        row["error"].as_str().unwrap().contains("is not allowed"),
+        "{stdout}"
+    );
+}
+
+/// A dangling `$SPM_HOME/policy.json` symlink (a managed policy whose target
+/// vanished) is a configured-but-broken policy, not an absent one.
+#[cfg(unix)]
+#[test]
+fn policy_dangling_default_symlink_fails_closed() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    std::fs::create_dir_all(&sb.spm_home).unwrap();
+    std::os::unix::fs::symlink(
+        sb.root.join("managed/policy.json"),
+        sb.spm_home.join("policy.json"),
+    )
+    .unwrap();
+    let err = fails(&sb, &["add", &sb.skill_url(), "--branch", "main"]);
+    assert!(err.contains("reading the machine policy"), "{err}");
+    assert!(!sb.read("ai.json").contains("greet"));
 }
 
 /// Commands that never touch the network keep working under a policy that

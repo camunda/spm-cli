@@ -317,7 +317,13 @@ fn evaluate(label: &str, git: &str, locked: &str, remotes: &mut Remotes) -> Sele
         status: Status::Error,
         error: None,
     };
-    if let Err(e) = compare(&mut out, selector.as_ref(), label, git, locked, remotes) {
+    // The source policy is judged here, for every selector kind: a commit pin
+    // never reaches the remote query (where the transport gate sits), so
+    // without this a denied commit-pinned source would report `pinned`.
+    let checked = crate::policy::gate(git)
+        .map_err(|e| format!("{e:#}"))
+        .and_then(|()| compare(&mut out, selector.as_ref(), label, git, locked, remotes));
+    if let Err(e) = checked {
         out.status = Status::Error;
         out.error = Some(e);
     }

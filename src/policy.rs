@@ -65,9 +65,16 @@ impl Source {
             return match scheme.to_ascii_lowercase().as_str() {
                 "file" => Source::Local,
                 "https" | "http" | "ssh" | "git" | "git+ssh" | "ssh+git" => {
-                    match rest.split_once('/') {
-                        Some((authority, path)) => remote(strip_userinfo(authority), path),
-                        None => Source::Opaque,
+                    // The authority ends at the first `/`, `?` or `#` (and a `\`
+                    // is one on some stacks). Only a `/` gives a host and path
+                    // we can judge; otherwise an `@` *after* the real end of the
+                    // authority (`https://evil?@allowed/o/r`) would be mistaken
+                    // for a userinfo separator.
+                    match rest.find(['/', '?', '#', '\\']) {
+                        Some(i) if rest.as_bytes()[i] == b'/' => {
+                            remote(strip_userinfo(&rest[..i]), &rest[i + 1..])
+                        }
+                        _ => Source::Opaque,
                     }
                 }
                 _ => Source::Opaque,
@@ -78,13 +85,16 @@ impl Source {
         if s.contains("::") {
             return Source::Opaque;
         }
-        // Git's rule: a colon before the first slash makes it scp-style
-        // `[user@]host:path`; otherwise it is a local path. A drive letter
-        // (`C:\…`, `C:/…`, `C:repo`) is a Windows path, not a one-letter host.
+        // Git's own rule (`url_is_local_not_ssh`): with no colon, or a `/`
+        // before the first colon, it is a local path; otherwise it is
+        // scp-style `[user@]host:path`. Only `/` counts — a backslash does not,
+        // so `domain\user@host:o/r` is SSH on every platform. A drive letter
+        // (`C:\…`, `C:/…`, `C:repo`) is a local path only on Windows; elsewhere
+        // git reads it as the one-letter host `C`, and so do we.
         match s.find(':') {
             None => Source::Local,
-            Some(i) if s[..i].contains(['/', '\\']) => Source::Local,
-            Some(1) if s.as_bytes()[0].is_ascii_alphabetic() => Source::Local,
+            Some(i) if s[..i].contains('/') => Source::Local,
+            Some(1) if cfg!(windows) && s.as_bytes()[0].is_ascii_alphabetic() => Source::Local,
             Some(i) => remote(strip_userinfo(&s[..i]), &s[i + 1..]),
         }
     }
@@ -333,13 +343,19 @@ impl Policy {
         } else {
             format!("machine policy {}", loc.path.display())
         };
-        let text = match std::fs::read_to_string(&loc.path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !loc.explicit => {
-                return Ok(Policy::default())
+        // Only a default location with *no directory entry at all* means "no
+        // machine policy". `symlink_metadata` doesn't follow links, so a
+        // dangling `policy.json` symlink (say, to a managed file that went
+        // missing) still counts as configured and its read error surfaces.
+        if !loc.explicit {
+            match std::fs::symlink_metadata(&loc.path) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Policy::default()),
+                Err(e) => return Err(anyhow!(e).context(format!("reading the {origin}"))),
+                Ok(_) => {}
             }
-            Err(e) => return Err(anyhow!(e).context(format!("reading the {origin}"))),
-        };
+        }
+        let text =
+            std::fs::read_to_string(&loc.path).with_context(|| format!("reading the {origin}"))?;
         let file: PolicyFile =
             serde_json::from_str(&text).with_context(|| format!("parsing the {origin}"))?;
         Ok(Policy {
@@ -389,8 +405,23 @@ pub fn gate(git: &str) -> Result<()> {
     let active = ACTIVE.lock().unwrap_or_else(|e| e.into_inner()).clone();
     match active {
         Some(policy) => policy.check(git),
-        None => Policy::machine()?.check(git),
+        None => fallback()?.check(git),
     }
+}
+
+/// The policy [`gate`] applies when no command activated one: the machine
+/// layer. In-process unit tests (which drive `git`/`store` helpers directly and
+/// never activate a policy) get no layer instead, so a policy configured on the
+/// developer's or CI machine can't change their outcome. The real binary — and
+/// so every end-to-end test of the machine layer — always takes the first arm.
+#[cfg(not(test))]
+fn fallback() -> Result<Policy> {
+    Policy::machine()
+}
+
+#[cfg(test)]
+fn fallback() -> Result<Policy> {
+    Ok(Policy::default())
 }
 
 #[cfg(test)]
@@ -456,15 +487,69 @@ mod tests {
             "./repo",
             "../repo",
             "repo",
-            r"C:\Users\me\repo",
-            "C:/Users/me/repo",
-            "C:repo",
             r"\\server\share\repo",
+            r"dir\repo",
             "//server/share/repo",
             "dir/with:colon",
         ] {
             assert_eq!(Source::classify(url), Source::Local, "{url}");
         }
+    }
+
+    /// A drive letter is a local path only where git treats it as one.
+    #[test]
+    #[cfg(windows)]
+    fn drive_paths_are_local_on_windows() {
+        for url in [r"C:\Users\me\repo", "C:/Users/me/repo", "C:repo"] {
+            assert_eq!(Source::classify(url), Source::Local, "{url}");
+        }
+    }
+
+    /// Off Windows, git reads `x:path` as scp-style SSH to the one-letter host
+    /// `x`, so it must be judged as that remote — never as an `file://*` path.
+    #[test]
+    #[cfg(not(windows))]
+    fn drive_like_paths_are_remotes_off_windows() {
+        assert_eq!(Source::classify("x:org/repo"), remote_src("x", "org/repo"));
+        // An absolute or backslashed scp path can't be judged: fail closed.
+        assert_eq!(Source::classify("C:/Users/me/repo"), Source::Opaque);
+        assert_eq!(Source::classify(r"C:\Users\me\repo"), Source::Opaque);
+        let local_only = policy(&[ANY_LOCAL]);
+        assert!(local_only.check("x:org/repo").is_err());
+    }
+
+    /// A backslash before the colon doesn't make a path local (git only looks
+    /// at `/`): `domain\user@host:o/r` is an SSH source on every platform.
+    #[test]
+    fn backslash_in_scp_userinfo_is_still_a_remote() {
+        assert_eq!(
+            Source::classify(r"domain\user@evil.test:org/repo"),
+            remote_src("evil.test", "org/repo")
+        );
+        let local_only = policy(&[ANY_LOCAL]);
+        assert!(local_only.check(r"domain\user@evil.test:org/repo").is_err());
+    }
+
+    /// `?`/`#` end a URL authority, so an `@` after them is not a userinfo
+    /// separator: the real host is `evil.test`, never the allowed one.
+    #[test]
+    fn authority_delimiters_before_userinfo_fail_closed() {
+        let p = policy(&["github.com/camunda/*"]);
+        for url in [
+            "https://evil.test?@github.com/camunda/repo.git",
+            "https://evil.test#@github.com/camunda/repo.git",
+            r"https://evil.test\@github.com/camunda/repo.git",
+            "ssh://git@evil.test?@github.com/camunda/repo.git",
+            "git://evil.test#@github.com/camunda/repo",
+        ] {
+            assert_eq!(Source::classify(url), Source::Opaque, "{url}");
+            assert!(p.check(url).is_err(), "{url}");
+        }
+        // A genuine userinfo is still stripped.
+        assert_eq!(
+            Source::classify("https://user:pw@github.com/camunda/repo.git"),
+            remote_src("github.com", "camunda/repo")
+        );
     }
 
     /// Anything that could be reinterpreted on the way to the server must fail
@@ -584,10 +669,10 @@ mod tests {
         let remote_only = policy(&["github.com/*"]);
         let err = format!("{:#}", remote_only.check("file:///tmp/repo").unwrap_err());
         assert!(err.contains("file://*"), "{err}");
-        assert!(remote_only.check(r"C:\work\repo").is_err());
+        assert!(remote_only.check("../work/repo").is_err());
         let local = policy(&["file://*"]);
         assert!(local.check("file:///tmp/repo").is_ok());
-        assert!(local.check(r"C:\work\repo").is_ok());
+        assert!(local.check("../work/repo").is_ok());
         assert!(local.check("https://github.com/o/r").is_err());
     }
 

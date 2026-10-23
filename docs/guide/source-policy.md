@@ -49,7 +49,8 @@ present but broken never fails open:
   `SPM_POLICY` counts as unset).
 - Unreadable or malformed JSON, an unknown key, a missing `allowedSources` or an
   invalid pattern are errors.
-- Only a missing **default** `$SPM_HOME/policy.json` means "no machine policy".
+- Only a **default** `$SPM_HOME/policy.json` that doesn't exist at all means "no
+  machine policy" — a dangling symlink there is an error.
 
 ## Pattern syntax
 
@@ -61,7 +62,7 @@ A pattern is `host/path`, with no scheme:
 | `github.com/camunda/reviewer` | exactly that repository |
 | `github.com/*` | every repository on the host |
 | `git.example.com:8443/team/*` | a host on a non-default port (the port must be spelled out) |
-| `file://*` | local sources (`file://` URLs and plain filesystem paths, including Windows paths like `C:\skills\repo`) |
+| `file://*` | local sources (`file://` URLs and plain filesystem paths; on Windows also drive paths like `C:\skills\repo`) |
 
 - `*` is only allowed as the **whole last segment**, and matches one or more
   segments; `github.com/*` allows a whole host. A bare host (`github.com`) and
@@ -86,9 +87,12 @@ git@github.com:camunda/reviewer.git          →  github.com/camunda/reviewer
 github.com/camunda/reviewer@v1 (shorthand)   →  github.com/camunda/reviewer
 ```
 
-Local sources match only `file://*`. A URL spm can't reduce to an identity (an
-unknown scheme, a `transport::address` helper, a path with `..`, `%`-escapes or
-other ambiguous characters) is **denied** under any policy.
+Local sources match only `file://*`. "Local" follows git's own rule: no colon,
+or a `/` before the first colon (a drive letter counts only on Windows) — so
+`host:org/repo` and `domain\user@host:org/repo` are SSH remotes judged by their
+host, never by `file://*`. A URL spm can't reduce to an identity (an
+unknown scheme, a `transport::address` helper, a `?`/`#` inside the URL
+authority, a path with `..`, `%`-escapes or other ambiguous characters) is **denied** under any policy.
 
 ## What is enforced, and when
 
