@@ -206,9 +206,12 @@ spm install                               # re-run after further edits
   `$SPM_HOME/links.json` with `-g` (stored as an absolute path). A repository
   can't supply link state: a committed `.spm/links.json` is ignored. `ai.json` and `ai.lock` are **not modified**, so teammates and CI are
   unaffected.
-- A linked entry is copied straight from the directory (skipping `.git`;
-  symlinks may not escape the directory) and still passes the
-  [content scan](/guide/how-it-works). It is not fetched into the store; with
+- A linked entry is copied from the directory (skipping `.git`; symlinks may
+  not escape the directory) and still passes the
+  [content scan](/guide/how-it-works). Each sync first snapshots it into a
+  temporary directory and scans and materializes that snapshot, so edits made
+  while the sync runs can't reach a target unscanned (a directory containing
+  that temporary directory can't be linked). It is not fetched into the store; with
   `"resolveTransitive": true` its transitive dependencies still come from its
   locked commit's nested `ai.json`.
 - Every sync (`install`, `update`, `add`, …) re-copies linked content; there is
@@ -229,7 +232,8 @@ spm install                               # re-run after further edits
   This protection covers every link on the machine, whichever scope recorded it:
   a global link (or another project's) pointing into this project's output
   makes this project's syncs, `clean` and `target remove` refuse until it is
-  unlinked where it was linked.
+  unlinked where it was linked. Neither may a file spm or a target patches in
+  place (e.g. `.gitignore`, Claude's settings) be a symlink to a links file.
   These checks hold even when the linked directory has since been deleted, and
   they can't race: `link`/`unlink` serialize with every command that rewrites
   target output via a machine-wide lock (`$SPM_HOME/links.lock`), and commands

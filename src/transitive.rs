@@ -468,19 +468,19 @@ fn visit(
     };
     if let Some(l) = link {
         println!("  {name:<width$}  linked → {}", l.display);
-        if !l.dir.join("SKILL.md").is_file() {
+        if !l.content.join("SKILL.md").is_file() {
             eprintln!(
                 "warning: linked skill `{name}` has no SKILL.md at the root of `{}` — agents \
                  may ignore it (link the skill directory itself)",
                 l.display
             );
         }
-        crate::scan::enforce(name, &l.dir, &l.dir)
+        crate::scan::enforce(name, &l.content, &l.content)
             .with_context(|| format!("scanning linked skill `{name}`"))?;
         w.out.materialized.push(MaterializedSkill {
             name: name.to_string(),
-            path: l.dir.clone(),
-            root: l.dir.clone(),
+            path: l.content.clone(),
+            root: l.content.clone(),
         });
         // Without transitive resolution a linked root needs nothing from the
         // store at all.

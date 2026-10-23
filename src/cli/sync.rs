@@ -164,7 +164,55 @@ struct Plan {
     /// The `spm link` overrides to persist after applying (with `managed`
     /// refreshed), or `None` when the links file is already up to date.
     links: Option<Links>,
+    _snapshots: Option<Snapshots>,
     _state_lock: StateLock,
+}
+
+/// Private copies of the linked directories, made with the same safe-copy
+/// rules as materialization (no `.git`, no symlink leaving the directory), and
+/// removed once the sync is done.
+struct Snapshots {
+    root: PathBuf,
+}
+
+impl Snapshots {
+    /// Snapshot every link in `linked`, pointing its `content` at the copy.
+    fn take(linked: &mut BTreeMap<String, Linked>) -> Result<Option<Self>> {
+        if linked.is_empty() {
+            return Ok(None);
+        }
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let root = std::env::temp_dir().join(format!("spm-links-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&root).with_context(|| format!("creating {}", root.display()))?;
+        let snapshots = Self {
+            root: std::fs::canonicalize(&root)
+                .with_context(|| format!("resolving {}", root.display()))?,
+        };
+        for (name, l) in linked.iter_mut() {
+            if crate::fsutil::contains(&l.dir, &snapshots.root) {
+                bail!(
+                    "linked directory `{}` for `{name}` contains spm's temporary directory \
+                     `{}` — link the skill or plugin directory itself",
+                    l.display,
+                    snapshots.root.display()
+                );
+            }
+            let content = snapshots.root.join(name);
+            crate::fsutil::copy_tree(&l.dir, &content, &l.dir)
+                .with_context(|| format!("snapshotting linked `{name}` ({})", l.display))?;
+            l.content = content;
+        }
+        Ok(Some(snapshots))
+    }
+}
+
+impl Drop for Snapshots {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
 }
 
 /// Resolve `manifest` -> lock, populate the store, and run every check (source
@@ -194,7 +242,7 @@ fn plan(
     // Source policy: judge every direct source before any network access, and
     // report all denied ones at once.
     let policy = crate::policy::activate(manifest, &dir)?;
-    let linked = resolve_links(scope, manifest, &links)?;
+    let mut linked = resolve_links(scope, manifest, &links)?;
     let denied: Vec<String> = manifest
         .skills
         .iter()
@@ -419,6 +467,10 @@ fn plan(
         }
     }
 
+    // Scan and materialize linked content from one snapshot, so a later edit
+    // to a working copy can't reach a target unscanned (or only some targets).
+    let snapshots = Snapshots::take(&mut linked)?;
+
     // Populate the store for plugins first: we need each plugin's checkout to
     // enumerate its bundled skills before writing the lockfile (so `ai.lock`
     // records the full component set) and before flattening those skills into
@@ -446,7 +498,7 @@ fn plan(
         };
         let (path, root) = if let Some(l) = link {
             println!("  {name:<width$}  linked → {}", l.display);
-            (l.dir.clone(), l.dir.clone())
+            (l.content.clone(), l.content.clone())
         } else if let Some(e) = &ensured {
             (e.path.clone(), e.root.clone())
         } else {
@@ -668,6 +720,7 @@ fn plan(
         previously_managed_plugins,
         locked,
         links,
+        _snapshots: snapshots,
         _state_lock: state_lock,
     })
 }
@@ -912,7 +965,9 @@ fn reject_link_overlaps(
     }
     // The links file itself must survive the targets' cleanup: inside their
     // output (by its entry or where it points) it would be wiped, silently
-    // dropping every link.
+    // dropping every link. Nor may any other file spm or a target patches in
+    // place (`.gitignore`, a settings file, ...) resolve to it: that write would
+    // corrupt it.
     for links_file in state_files {
         // Its entry, where it points, and every symlink on the way: deleting
         // any of those loses the file (or access to it) just the same.
@@ -924,14 +979,23 @@ fn reject_link_overlaps(
         for h in &hops {
             state.push(identity(h)?);
         }
-        if let Some((owner, p, ..)) = outputs
-            .iter()
-            .find(|(_, _, out, through)| !through && state.iter().any(|s| s.starts_with(out)))
-        {
+        if let Some((owner, p, _, through)) = outputs.iter().find(|(_, p, out, through)| {
+            (!through || p != links_file) && state.iter().any(|s| s.starts_with(out))
+        }) {
+            let (relation, effect) = if *through {
+                ("is the same file as", "writes in place")
+            } else {
+                ("lies inside", "writes or deletes")
+            };
+            let owner = if *owner == "spm" {
+                "spm".to_string()
+            } else {
+                format!("target `{owner}`")
+            };
             bail!(
-                "the links file `{}` lies inside `{}`, which target `{owner}` writes or \
-                 deletes; refusing to continue, as that would drop your links — remove whatever \
-                 puts it there (e.g. a symlink) and retry",
+                "the links file `{}` {relation} `{}`, which {owner} {effect}; refusing to \
+                 continue, as that would drop your links — remove whatever puts it there (e.g. \
+                 a symlink) and retry",
                 links_file.display(),
                 p.display()
             );

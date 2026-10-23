@@ -9,6 +9,9 @@ use std::path::Path;
 /// from the local directory `dir` (working tree, uncommitted edits included)
 /// instead of its locked commit. `ai.json` and `ai.lock` are left untouched.
 pub(super) fn link(scope: &Scope, cwd: &Path, name: &str, dir: &str) -> Result<()> {
+    // Before reading anything: the declaration checked below must still hold
+    // when the sync runs (e.g. not be removed by a `spm remove` in between).
+    let state_lock = StateLock::acquire(scope, true)?;
     let manifest_dir = scope.manifest_dir()?;
     let manifest = Manifest::load(&manifest_dir, scope)?;
     let kind = if manifest.skills.contains_key(name) {
@@ -28,7 +31,6 @@ pub(super) fn link(scope: &Scope, cwd: &Path, name: &str, dir: &str) -> Result<(
     if !meta.is_dir() {
         bail!("`{dir}` is not a directory");
     }
-    let state_lock = StateLock::acquire(scope, true)?;
     let mut links = Links::load(scope)?;
     let recorded = record_path(scope, cwd, dir)?;
     links.links.insert(name.to_string(), recorded.clone());

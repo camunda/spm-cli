@@ -205,8 +205,8 @@ content, uncommitted edits included, into every target. The override lives in
 with `-g`, stored absolute; a repository-supplied `.spm/links.json` is ignored); a relative `<dir>` is kept relative to the project root. `ai.json`
 and `ai.lock` are **not** modified, so never commit anything for a link. There
 is no file watching: run `spm install` after each edit. Linked content is
-copied (not symlinked), skips `.git`, may not symlink outside the directory,
-and still passes the [content scan](#content-scan). Linking an undeclared name
+copied (not symlinked) from a per-sync snapshot, skips `.git`, may not symlink
+outside the directory, and still passes the [content scan](#content-scan). Linking an undeclared name
 is an error (`spm add` it first). `link`/`unlink` never write `ai.lock`; if it
 is missing or out of sync they fail with ``run `spm install` first`` — do that,
 then retry. A `<dir>` overlapping target output (e.g. `.agents/skills/<name>` or

@@ -61,9 +61,12 @@ pub struct Recorded {
 /// A link resolved against the filesystem, ready to materialize from.
 #[derive(Debug, Clone)]
 pub struct Linked {
-    /// Canonical path of the linked directory: both the content and the
-    /// containment boundary for symlink following and the content scan.
+    /// Canonical path of the linked directory (the working copy to protect).
     pub dir: PathBuf,
+    /// Canonical path to read the content from — both the content and the
+    /// containment boundary for symlink following and the content scan: `dir`
+    /// itself, or a snapshot of it a sync scans and materializes from.
+    pub content: PathBuf,
     /// The path as recorded in the links file, for messages.
     pub display: String,
 }
@@ -256,6 +259,7 @@ impl Links {
             bail!("linked path `{display}` for `{name}` is not a directory");
         }
         Ok(Some(Linked {
+            content: canon.clone(),
             dir: canon,
             display: display.clone(),
         }))
