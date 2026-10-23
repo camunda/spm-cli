@@ -739,16 +739,29 @@ pub(super) fn guard_working_copies(
         .iter()
         .map(|(n, l)| (n.as_str(), l.dir.clone(), l.display.as_str(), true))
         .collect();
-    let on_disk = Links::load(scope).unwrap_or_default();
-    for name in on_disk.links.keys() {
-        if let Ok(Some(l)) = on_disk.resolve(scope, name) {
-            let display = on_disk.links[name].as_str();
-            if !guarded
-                .iter()
-                .any(|(n, _, d, _)| n == name && *d == display)
-            {
-                guarded.push((name, l.dir, display, false));
+    // Fail closed: a links file or recorded dir that can't be read is not
+    // "nothing to protect". Only a dir that is gone (or no longer a dir) is
+    // skipped, so `spm unlink` can always drop a dead link.
+    let on_disk = Links::load(scope)?;
+    for (name, display) in &on_disk.links {
+        let dir = match manifest_dir.join(display).canonicalize() {
+            Ok(d) if d.is_dir() => d,
+            Ok(_) => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!(
+                        "inspecting linked directory `{display}` for `{name}` — spm can't \
+                         rule out that this command would modify or delete it"
+                    )
+                })
             }
+        };
+        if !guarded
+            .iter()
+            .any(|(n, _, d, _)| n == name && *d == display)
+        {
+            guarded.push((name, dir, display, false));
         }
     }
     reject_link_overlaps(scope, manifest_dir, vendors, &guarded, skills, plugins)

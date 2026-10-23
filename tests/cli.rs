@@ -3413,6 +3413,14 @@ fn symlink(target: impl AsRef<Path>, link: impl AsRef<Path>) {
     }
 }
 
+/// Remove a symlink itself: Windows removes one to a directory with
+/// `remove_dir`, everything else with `remove_file`.
+fn remove_symlink(link: &Path) {
+    std::fs::remove_file(link)
+        .or_else(|_| std::fs::remove_dir(link))
+        .unwrap_or_else(|e| panic!("removing symlink {}: {e}", link.display()));
+}
+
 fn write_manifest(sb: &Sandbox, json: &str) {
     std::fs::write(sb.project.join("ai.json"), json).unwrap();
 }
@@ -10066,7 +10074,6 @@ fn link_keeps_lock_bytes_and_refuses_an_out_of_sync_lock() {
 /// Files spm edits in place (Claude's settings, `.gitignore`) are written
 /// through a symlink at their path, so one pointing into the linked dir is an
 /// overlap too: the link is rejected and the linked file stays unchanged.
-#[cfg(unix)]
 #[test]
 fn link_rejects_dirs_reached_by_files_spm_writes_through() {
     let sb = Sandbox::new();
@@ -10101,7 +10108,7 @@ fn link_rejects_dirs_reached_by_files_spm_writes_through() {
         assert!(err.contains("overlaps"), "{rel}: {err}");
         assert!(err.contains(rel), "{rel}: {err}");
         assert_eq!(std::fs::read(&inside).unwrap(), before, "{rel} written");
-        std::fs::remove_file(&real).unwrap();
+        remove_symlink(&real);
         if existed {
             std::fs::rename(&inside, &real).unwrap();
         } else {
@@ -10196,7 +10203,6 @@ fn collisions_use_a_project_linked_plugins_effective_bundle() {
 /// overlap it (here `.agents/skills` symlinked onto its parent), `unlink`
 /// refuses rather than letting the vendor wipe it while restoring the locked
 /// content, and succeeds once the overlap is gone.
-#[cfg(unix)]
 #[test]
 fn unlink_still_protects_the_dropped_working_copy() {
     let sb = Sandbox::new();
@@ -10224,7 +10230,7 @@ fn unlink_still_protects_the_dropped_working_copy() {
     assert!(read_path(&wc.join("SKILL.md")).contains("WIP"), "wiped");
     assert!(sb.read(".spm/links.json").contains("greet"), "link dropped");
 
-    std::fs::remove_file(&skills).unwrap();
+    remove_symlink(&skills);
     sb.ok(&["unlink", "greet"]);
     assert!(read_path(&wc.join("SKILL.md")).contains("WIP"));
     assert!(read_path(&skills.join("spm-managed-skills/greet/SKILL.md")).contains("Greet warmly."));
@@ -10233,7 +10239,6 @@ fn unlink_still_protects_the_dropped_working_copy() {
 /// `clean` and `target remove` delete target output too, so they share the
 /// linked-working-copy guard: when output has come to overlap a linked dir,
 /// they refuse before deleting or writing anything.
-#[cfg(unix)]
 #[test]
 fn clean_and_target_remove_never_delete_a_linked_working_copy() {
     for cmd in [&["clean"][..], &["target", "remove", "copilot"][..]] {
@@ -10273,7 +10278,7 @@ fn clean_and_target_remove_never_delete_a_linked_working_copy() {
         );
         assert!(sb.claude_market_dir().exists(), "{cmd:?} cleaned claude");
 
-        std::fs::remove_file(&skills).unwrap();
+        remove_symlink(&skills);
         sb.ok(cmd);
         assert!(read_path(&wc.join("SKILL.md")).contains("WIP"));
     }
@@ -10346,7 +10351,6 @@ fn failed_plugin_link_never_orphans_its_extra_skills() {
 /// The overlap guard follows the recorded path itself, not just where it
 /// leads: a symlink (or a dir holding one) on the way to the working copy is
 /// part of the link, and replacing or deleting it would break the link.
-#[cfg(unix)]
 #[test]
 fn link_rejects_a_path_routed_through_target_output() {
     for (target, via) in [
@@ -10473,7 +10477,6 @@ fn links_need_a_policy_that_allows_local_sources() {
 /// Symlinks inside the working copy are followed by the copy, so their routes
 /// are protected too: one passing through target output would be deleted by
 /// materialization, leaving the working copy's file dangling.
-#[cfg(unix)]
 #[test]
 fn link_rejects_a_working_copy_whose_symlinks_route_through_output() {
     let sb = Sandbox::new();
@@ -10505,7 +10508,6 @@ fn link_rejects_a_working_copy_whose_symlinks_route_through_output() {
 
 /// A symlink the copy and the scan skip (here a cycle) is no route to guard:
 /// it never blocks linking, syncing, unlinking or cleaning.
-#[cfg(unix)]
 #[test]
 fn skipped_symlinks_in_a_working_copy_never_block_link_commands() {
     let sb = Sandbox::new();
@@ -10535,4 +10537,42 @@ fn skipped_symlinks_in_a_working_copy_never_block_link_commands() {
     sb.ok(&["clean"]);
     assert!(!installed.exists());
     assert!(std::fs::symlink_metadata(dev.join("cycle")).is_ok());
+}
+
+/// The guard fails closed: a recorded working copy spm cannot inspect is not
+/// treated as having nothing to protect.
+#[cfg(unix)]
+#[test]
+fn guard_fails_closed_when_a_linked_dir_cannot_be_inspected() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--name",
+        "greet",
+    ]);
+    let wc = sb.root.join("locked/wc");
+    std::fs::create_dir_all(&wc).unwrap();
+    std::fs::write(wc.join("SKILL.md"), "---\nname: greet\n---\nWIP\n").unwrap();
+    sb.ok(&["link", "greet", "../locked/wc"]);
+    let installed = sb
+        .project
+        .join(".agents/skills/spm-managed-skills/greet/SKILL.md");
+
+    let parent = sb.root.join("locked");
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let out = sb.spm(&["clean"]);
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(!out.status.success(), "clean ignored an uninspectable link");
+    let err = stderr_of(&out);
+    assert!(
+        err.contains("inspecting linked directory `../locked/wc`"),
+        "{err}"
+    );
+    assert!(installed.exists(), "clean deleted output despite failing");
+    sb.ok(&["clean"]);
 }
