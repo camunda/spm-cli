@@ -100,11 +100,19 @@ impl Vendor for Claude {
         Ok(())
     }
 
-    fn clean(&self, scope: &Scope, _project_id: &str, _managed: &[String]) -> Result<()> {
-        let market_dir = managed_dir(scope)?;
-        if market_dir.exists() {
-            std::fs::remove_dir_all(&market_dir)?;
-        }
+    fn clean_paths(&self, scope: &Scope, _managed: &[String]) -> Result<Vec<PathBuf>> {
+        // `.gitignore` is intentionally left untouched (project scope only): the
+        // entry spm added is harmless once the materialized dir is gone.
+        Ok(vec![managed_dir(scope)?])
+    }
+
+    fn skill_paths(&self, scope: &Scope, _managed: &[String]) -> Result<Vec<PathBuf>> {
+        // Claude loads the whole marketplace — its `.claude-plugin/` metadata as
+        // well as the skills — registered through its settings file.
+        Ok(vec![managed_dir(scope)?, settings_path(scope)?])
+    }
+
+    fn deregister(&self, scope: &Scope) -> Result<()> {
         let path = settings_path(scope)?;
         if path.exists() {
             let mut root = jsonutil::read_object(&path)?;
@@ -112,8 +120,6 @@ impl Vendor for Claude {
             jsonutil::remove_nested(&mut root, "enabledPlugins", &plugin_key(scope));
             jsonutil::write(&path, &root)?;
         }
-        // `.gitignore` is intentionally left untouched (project scope only): the
-        // entry spm added is harmless once the materialized dir is gone.
         Ok(())
     }
 
@@ -238,12 +244,16 @@ impl Vendor for Claude {
         Ok(Some(st))
     }
 
-    fn clean_plugins(&self, scope: &Scope, _project_id: &str, _managed: &[String]) -> Result<()> {
+    fn plugin_clean_paths(&self, scope: &Scope, _managed: &[String]) -> Result<Vec<PathBuf>> {
+        Ok(vec![plugins_managed_dir(scope)?])
+    }
+
+    fn plugin_paths(&self, scope: &Scope, _managed: &[String]) -> Result<Vec<PathBuf>> {
+        Ok(vec![plugins_managed_dir(scope)?, settings_path(scope)?])
+    }
+
+    fn deregister_plugins(&self, scope: &Scope) -> Result<()> {
         let market = plugins_marketplace(scope);
-        let market_dir = plugins_managed_dir(scope)?;
-        if market_dir.exists() {
-            std::fs::remove_dir_all(&market_dir)?;
-        }
         let settings = settings_path(scope)?;
         if settings.exists() {
             let mut root = jsonutil::read_object(&settings)?;
@@ -436,7 +446,7 @@ mod tests {
         let scope = Scope::Project { root: tmp.clone() };
         let s = make_skill(&tmp, "greet");
         Claude.materialize(&scope, "spm-1234", &[s], &[]).unwrap();
-        Claude.clean(&scope, "spm-1234", &["greet".into()]).unwrap();
+        Claude.clean(&scope, &["greet".into()]).unwrap();
 
         assert!(!tmp.join(".spm/claude").exists(), "marketplace dir removed");
         let settings: Value = serde_json::from_str(

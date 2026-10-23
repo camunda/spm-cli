@@ -12,7 +12,6 @@ mod sync;
 mod target;
 mod update;
 
-use crate::scope::Scope;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use common::{JsonArg, ScopeArg, TransportArgs, VersionArg};
@@ -180,7 +179,21 @@ enum TargetCommand {
         #[arg(value_delimiter = ',')]
         vendors: Vec<String>,
         #[command(flatten)]
+        scope: ScopeArg,
+        #[command(flatten)]
         transport: TransportArgs,
+    },
+    /// Remove one or more target vendors from ai.json and clean what spm
+    /// materialized for them (leaving your own skills untouched). Refuses to
+    /// remove the last target — use `spm clean` for that.
+    #[command(visible_alias = "rm")]
+    Remove {
+        /// Vendor(s) to remove: amp, claude, cline, codex, copilot, cursor, gemini
+        /// and/or windsurf. Repeatable or comma-separated.
+        #[arg(value_delimiter = ',', required = true)]
+        vendors: Vec<String>,
+        #[command(flatten)]
+        scope: ScopeArg,
     },
 }
 
@@ -215,9 +228,16 @@ pub fn run() -> Result<()> {
             )
         }
         Command::Target { command } => match command {
-            TargetCommand::Add { vendors, transport } => {
+            TargetCommand::Add {
+                vendors,
+                scope,
+                transport,
+            } => {
                 transport.apply();
-                target::target_add(&Scope::Project { root: cwd }, vendors)
+                target::target_add(&scope.resolve(&cwd), vendors)
+            }
+            TargetCommand::Remove { vendors, scope } => {
+                target::target_remove(&scope.resolve(&cwd), vendors)
             }
         },
         Command::Remove {

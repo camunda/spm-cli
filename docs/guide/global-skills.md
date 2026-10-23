@@ -1,12 +1,12 @@
 # Global Skills
 
 `spm`'s scope-aware commands (`init`, `add`, `remove`, `update`, `install`,
-`list`, `status`, `outdated`, `clean`) default to **project scope**: they read/write the
+`list`, `status`, `outdated`, `clean`, `target add`, `target remove`) default to **project scope**: they read/write the
 `ai.json` and `ai.lock` in the current directory and materialize skills into a
 project-local location. Pass `-g` / `--global` to instead manage a
 **user-global** set of skills — available to your AI tools in *every* project on
-your machine, with no `ai.json` to add to each repo. (`spm target add`,
-`spm prune`, and `spm scan` aren't scope-aware: `prune` always wipes the shared
+your machine, with no `ai.json` to add to each repo. (`spm prune` and
+`spm scan` aren't scope-aware: `prune` always wipes the shared
 global fetch cache and `scan` always operates on a path.)
 
 ```bash
@@ -15,6 +15,8 @@ spm add  -g https://github.com/org/skills --tag v1.0.0 --name reviewer
 spm list -g                                          # list global skills
 spm status -g                                        # check they're materialized
 spm remove -g reviewer                               # drop a global skill
+spm target add -g cursor                             # also materialize global skills for Cursor
+spm target remove -g claude                          # stop targeting Claude globally (cleans its output)
 spm clean  -g                                        # remove global vendor config
 ```
 

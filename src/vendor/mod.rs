@@ -4,7 +4,7 @@ mod dirskills;
 mod shareddir;
 
 use crate::scope::Scope;
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -119,10 +119,32 @@ pub trait Vendor {
         previously_managed: &[String],
     ) -> Result<()>;
 
-    /// Remove everything this vendor generated for this `scope`. `managed` lists
-    /// the skill names spm currently owns (from the lockfile); global vendors
-    /// sharing a directory with the user's skills remove only those.
-    fn clean(&self, scope: &Scope, project_id: &str, managed: &[String]) -> Result<()>;
+    /// Remove everything this vendor generated for this `scope`: deletes each of
+    /// [`clean_paths`](Vendor::clean_paths), then [`deregister`](Vendor::deregister)s.
+    /// `managed` lists the skill names spm currently owns (from the lockfile).
+    fn clean(&self, scope: &Scope, managed: &[String]) -> Result<()> {
+        remove_paths(&self.clean_paths(scope, managed)?)?;
+        self.deregister(scope)
+    }
+
+    /// The paths [`clean`](Vendor::clean) deletes for `scope`. Vendors sharing a
+    /// dir with the user's own skills list only the `managed` entries in it.
+    fn clean_paths(&self, scope: &Scope, managed: &[String]) -> Result<Vec<PathBuf>>;
+
+    /// The paths this vendor loads the `managed` skills (and any metadata they
+    /// need, e.g. a marketplace manifest) from in `scope`. Another target's
+    /// [`clean_paths`](Vendor::clean_paths) must not delete these, an ancestor,
+    /// anything inside them, or anything they reach through a symlink while this
+    /// vendor is still configured — e.g. `codex` and `amp` share the project's
+    /// `.agents/skills/<name>/`.
+    fn skill_paths(&self, scope: &Scope, managed: &[String]) -> Result<Vec<PathBuf>>;
+
+    /// Drop the config pointing this vendor at spm's output (e.g. Claude's
+    /// settings entries) without deleting the output itself. Default: nothing to
+    /// drop.
+    fn deregister(&self, _scope: &Scope) -> Result<()> {
+        Ok(())
+    }
 
     /// Report what this vendor has materialized in the given `scope`, compared
     /// against the declared `expected` skill names (from `ai.lock`).
@@ -160,11 +182,43 @@ pub trait Vendor {
     }
 
     /// Remove everything this vendor registered for full plugins in this
-    /// `scope`. Counterpart to [`materialize_plugins`](Vendor::materialize_plugins);
-    /// the default is a no-op for targets that never registered any.
-    fn clean_plugins(&self, _scope: &Scope, _project_id: &str, _managed: &[String]) -> Result<()> {
+    /// `scope`: deletes each of [`plugin_clean_paths`](Vendor::plugin_clean_paths),
+    /// then [`deregister_plugins`](Vendor::deregister_plugins). Counterpart to
+    /// [`materialize_plugins`](Vendor::materialize_plugins).
+    fn clean_plugins(&self, scope: &Scope, managed: &[String]) -> Result<()> {
+        remove_paths(&self.plugin_clean_paths(scope, managed)?)?;
+        self.deregister_plugins(scope)
+    }
+
+    /// The paths [`clean_plugins`](Vendor::clean_plugins) deletes. Default: none,
+    /// for targets that never register full plugins.
+    fn plugin_clean_paths(&self, _scope: &Scope, _managed: &[String]) -> Result<Vec<PathBuf>> {
+        Ok(Vec::new())
+    }
+
+    /// The paths this vendor loads the `managed` full plugins (and their
+    /// metadata) from, protected like [`skill_paths`](Vendor::skill_paths).
+    /// Default: none.
+    fn plugin_paths(&self, _scope: &Scope, _managed: &[String]) -> Result<Vec<PathBuf>> {
+        Ok(Vec::new())
+    }
+
+    /// Drop the config registering this vendor's full plugins without deleting
+    /// them. Default: nothing to drop.
+    fn deregister_plugins(&self, _scope: &Scope) -> Result<()> {
         Ok(())
     }
+}
+
+/// Delete each directory in `paths`, ignoring absent ones. A symlink is removed
+/// itself, never followed.
+pub fn remove_paths(paths: &[PathBuf]) -> Result<()> {
+    for p in paths {
+        if p.is_dir() {
+            std::fs::remove_dir_all(p).with_context(|| format!("removing {}", p.display()))?;
+        }
+    }
+    Ok(())
 }
 
 /// Every target vendor spm knows how to materialize. Single source of truth for

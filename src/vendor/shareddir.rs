@@ -168,12 +168,17 @@ impl Vendor for SharedDirVendor {
         Ok(())
     }
 
-    fn clean(&self, scope: &Scope, _project_id: &str, managed: &[String]) -> Result<()> {
-        // Shared dir: remove only the skills spm owns, never the whole dir.
+    fn clean_paths(&self, scope: &Scope, managed: &[String]) -> Result<Vec<PathBuf>> {
+        // Shared dir: only the skills spm owns, never the whole dir.
         // `.gitignore` is intentionally left untouched: the per-skill entries spm
         // added are harmless once the materialized dirs are gone, and rewriting a
         // user-owned file on `clean` risks clobbering it.
-        remove_managed(&self.skills_dir(scope)?, managed.iter().map(String::as_str))
+        self.skill_paths(scope, managed)
+    }
+
+    fn skill_paths(&self, scope: &Scope, managed: &[String]) -> Result<Vec<PathBuf>> {
+        let dir = self.skills_dir(scope)?;
+        Ok(managed.iter().map(|n| dir.join(n)).collect())
     }
 
     fn status(&self, scope: &Scope, expected: &[String]) -> Result<super::VendorStatus> {

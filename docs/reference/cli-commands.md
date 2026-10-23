@@ -8,7 +8,8 @@ spm init [--target amp|claude|cline|codex|copilot|cursor|gemini|windsurf ...] [-
 spm add <git> [--tag|--branch|--commit <v>] \      # add + install a skill (no selector = default branch; github.com/owner/repo@ref also works)
         [--path <subdir>] [--name <local-name>] [--all] [--force] [-g]  # --all: add every skill under --path
         [--plugin]                                 # --plugin: add a full plugin instead of a skill
-spm target add [vendor ...]                        # add target vendor(s); no arg = pick interactively
+spm target add [vendor ...] [-g]                   # add target vendor(s); no arg = pick interactively
+spm target remove <vendor ...> [-g]               # drop target vendor(s) + clean their output; alias: rm
 spm remove <name> [--plugin] [-g]                  # drop a skill (or a plugin with --plugin); alias: rm
 spm update [name] [-g]                             # re-resolve branches/tags to latest
 spm install [-g] [--locked]                        # rebuild from ai.lock (after clone); alias: i; --locked fails if ai.lock is out of sync (CI)
@@ -20,9 +21,9 @@ spm prune [--yes]                                  # wipe the global fetch cache
 spm scan [path] [--json]                           # scan skill content for suspicious patterns (default: .)
 ```
 
-Three commands have short aliases that behave identically, including `-g`:
-`spm i` for `spm install`, `spm rm <name>` for `spm remove <name>`, and `spm ls`
-for `spm list`.
+Four commands have short aliases that behave identically, including `-g`:
+`spm i` for `spm install`, `spm rm <name>` for `spm remove <name>`, `spm ls`
+for `spm list`, and `spm target rm` for `spm target remove`.
 
 `add`, `install`, `update`, `remove`, `target add` and `outdated` also accept `--protocol ssh|https` and
 `--protocol-fallback` (see [Repo URLs](#repo-urls-https-ssh)).
@@ -33,8 +34,8 @@ instead of text (see [Machine-readable output](#machine-readable-output-json)).
 ## Scope: project (default) vs. global (`-g`)
 
 Scope-aware commands (`init`, `add`, `remove`, `update`, `install`, `list`,
-`status`, `outdated`, `clean`) accept `-g` / `--global`; `spm target add`, `spm prune`, and
-`spm scan` don't (`prune` always wipes the shared global fetch cache and `scan`
+`status`, `outdated`, `clean`, `target add`, `target remove`) accept `-g` / `--global`;
+`spm prune` and `spm scan` don't (`prune` always wipes the shared global fetch cache and `scan`
 always operates on a path). Without `-g`, a scope-aware command operates on the
 **project** in the current directory. With it, it manages a **user-global** set
 of skills available to your AI tools in *every* project, with its own
@@ -126,8 +127,25 @@ plugin's skill) is a hard error, never a silent overwrite.
 
 ### `spm target add`
 
-Adds one or more target vendors. With no argument, prompts you to pick
-interactively.
+Adds one or more target vendors and materializes existing skills for them. With
+no argument, prompts you to pick interactively. A vendor that is already
+configured is skipped. `-g` adds to the global manifest.
+
+### `spm target remove <vendor ...>`
+
+Removes one or more target vendors (repeatable or comma-separated; alias `rm`)
+and cleans what spm materialized for them — your own skills in a shared dir are
+left alone. Every vendor is validated first, so a typo changes nothing; a vendor
+that isn't configured is skipped. A skills dir still used by a remaining target
+(`codex` and `amp` share the project's `.agents/skills`) is kept. Removing the
+last target is an error: use `spm clean` instead. `.gitignore` is left as is,
+like `spm clean`. `-g` removes from the global manifest and user-global
+locations.
+
+```bash
+spm target remove cursor           # drop Cursor, clean .cursor/skills/<managed>
+spm target remove -g claude        # stop targeting Claude globally
+```
 
 ### `spm remove <name>`
 
