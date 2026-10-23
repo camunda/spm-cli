@@ -11035,3 +11035,113 @@ fn link_in_a_non_utf8_project_refuses_before_writing_any_output() {
     assert_eq!(sb.read(managed), before);
     assert!(!sb.spm_home.join("links").exists());
 }
+
+/// Hold the machine-wide links lock exclusively — as a `link`/`unlink` in
+/// another process would — until the returned file is dropped.
+fn hold_links_lock_exclusively(sb: &Sandbox) -> std::fs::File {
+    std::fs::create_dir_all(&sb.spm_home).unwrap();
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(sb.spm_home.join("links.lock"))
+        .unwrap();
+    file.lock().unwrap();
+    file
+}
+
+/// Rewrite the project's links file as a concurrent `link`/`unlink` would.
+fn edit_project_links(sb: &Sandbox, edit: impl FnOnce(&mut serde_json::Value)) {
+    let path = sb.project_links();
+    let mut doc: serde_json::Value = serde_json::from_str(&read_path(&path)).unwrap();
+    edit(&mut doc);
+    std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+}
+
+/// A command reads link state only once it holds the links lock, so a link
+/// state change committed while it waited (here: another process unlinking
+/// `greet`) is never undone by it republishing — or re-materializing — the
+/// stale overrides it would otherwise have read before waiting.
+#[test]
+fn commands_waiting_on_the_links_lock_never_restore_stale_overrides() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--name",
+        "greet",
+    ]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "other"]);
+    local_skill_checkout(&sb, "dev", "LOCAL GREET");
+    local_skill_checkout(&sb, "dev2", "LOCAL OTHER");
+    let greet = ".agents/skills/spm-managed-skills/greet/SKILL.md";
+
+    for args in [
+        &["install"][..],
+        &["update"],
+        &["link", "other", "../dev2"],
+        &["unlink", "other"],
+    ] {
+        sb.ok(&["link", "greet", "../dev"]);
+        if args == ["unlink", "other"] {
+            sb.ok(&["link", "other", "../dev2"]);
+        }
+        let held = hold_links_lock_exclusively(&sb);
+        let blocked = BlockedOnStateLock::spawn(&sb, args);
+        edit_project_links(&sb, |doc| {
+            doc["links"].as_object_mut().unwrap().remove("greet");
+        });
+        drop(held);
+        blocked.finish();
+        let links = std::fs::read_to_string(sb.project_links()).unwrap_or_default();
+        assert!(!links.contains("greet"), "{args:?}: {links}");
+        assert!(!sb.read(greet).contains("LOCAL"), "{args:?}");
+        if args[0] == "link" {
+            assert!(links.contains("other"), "{args:?}: {links}");
+            sb.ok(&["unlink", "other"]);
+        }
+    }
+}
+
+/// Cleanup computes what it owns only once it holds the links lock, so a skill
+/// a linked plugin started bundling while it waited (recorded in the links
+/// file's `managed` list by the concurrent `link`/`install`) is cleaned up too,
+/// rather than left behind in a shared skills dir that nothing tracks anymore.
+#[test]
+fn cleanup_waiting_on_the_links_lock_removes_skills_managed_meanwhile() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex,copilot"]);
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--name",
+        "greet",
+    ]);
+    local_skill_checkout(&sb, "dev", "LOCAL");
+    let extra = sb.project.join(".agents/skills/extra");
+
+    for args in [&["install"][..], &["clean"], &["target", "remove", "codex"]] {
+        sb.ok(&["link", "greet", "../dev"]);
+        let held = hold_links_lock_exclusively(&sb);
+        let blocked = BlockedOnStateLock::spawn(&sb, args);
+        std::fs::create_dir_all(&extra).unwrap();
+        std::fs::write(
+            extra.join("SKILL.md"),
+            "---\nname: extra\ndescription: Bundled.\n---\n",
+        )
+        .unwrap();
+        edit_project_links(&sb, |doc| doc["managed"] = serde_json::json!(["extra"]));
+        drop(held);
+        blocked.finish();
+        assert!(!extra.exists(), "{args:?}");
+        sb.ok(&["unlink", "greet"]);
+        if args[0] == "target" {
+            sb.ok(&["target", "add", "codex"]);
+        }
+    }
+}

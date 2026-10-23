@@ -265,9 +265,12 @@ impl Links {
 /// rebuilding the output — while several syncs still run side by side.
 pub struct StateLock {
     _file: std::fs::File,
+    exclusive: bool,
 }
 
 impl StateLock {
+    /// Take the lock, waiting (and saying so on stderr) while another command
+    /// holds it in a conflicting mode. Take it before reading any link state.
     pub fn acquire(exclusive: bool) -> Result<Self> {
         let home = paths::spm_home()?;
         std::fs::create_dir_all(&home).with_context(|| format!("creating {}", home.display()))?;
@@ -301,7 +304,14 @@ impl StateLock {
                 return Err(e).with_context(|| format!("locking {}", p.display()))
             }
         }
-        Ok(Self { _file: file })
+        Ok(Self {
+            _file: file,
+            exclusive,
+        })
+    }
+
+    pub fn is_exclusive(&self) -> bool {
+        self.exclusive
     }
 }
 

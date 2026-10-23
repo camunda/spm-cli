@@ -232,8 +232,10 @@ spm install                               # re-run after further edits
   unlinked where it was linked.
   These checks hold even when the linked directory has since been deleted, and
   they can't race: `link`/`unlink` serialize with every command that rewrites
-  target output via a machine-wide lock (`$SPM_HOME/links.lock`); a command that
-  has to wait says so on stderr.
+  target output via a machine-wide lock (`$SPM_HOME/links.lock`), held from
+  reading link state to the last write, so a waiting command always acts on the
+  links as they are once it resumes. A command that has to wait says so on
+  stderr.
 - Under a [source policy](/guide/source-policy) a link is a local source, so it
   needs `file://*` even when the dependency it overrides is an allowed remote.
 - A linked plugin's working tree may bundle different skills than its locked

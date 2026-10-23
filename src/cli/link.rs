@@ -1,5 +1,5 @@
 use super::sync::{install_command, sync_with_links, unlink_command};
-use crate::links::{record_path, Links};
+use crate::links::{record_path, Links, StateLock};
 use crate::manifest::Manifest;
 use crate::scope::Scope;
 use anyhow::{bail, Context, Result};
@@ -28,10 +28,11 @@ pub(super) fn link(scope: &Scope, cwd: &Path, name: &str, dir: &str) -> Result<(
     if !meta.is_dir() {
         bail!("`{dir}` is not a directory");
     }
+    let state_lock = StateLock::acquire(true)?;
     let mut links = Links::load(scope)?;
     let recorded = record_path(scope, cwd, dir)?;
     links.links.insert(name.to_string(), recorded.clone());
-    sync_with_links(scope, links)?;
+    sync_with_links(scope, state_lock, links)?;
     println!(
         "linked {kind} {name} → {recorded} (ai.json and ai.lock unchanged; re-run `{}` after \
          edits, `{}` to restore the locked version)",
@@ -44,6 +45,7 @@ pub(super) fn link(scope: &Scope, cwd: &Path, name: &str, dir: &str) -> Result<(
 /// `spm unlink <name>` / `spm unlink --all`: drop local overrides and
 /// re-materialize the locked versions.
 pub(super) fn unlink(scope: &Scope, name: Option<&str>, all: bool) -> Result<()> {
+    let state_lock = StateLock::acquire(true)?;
     let mut links = Links::load(scope)?;
     let removed: Vec<String> = if all {
         std::mem::take(&mut links.links).into_keys().collect()
@@ -58,7 +60,7 @@ pub(super) fn unlink(scope: &Scope, name: Option<&str>, all: bool) -> Result<()>
         println!("no links");
         return Ok(());
     }
-    sync_with_links(scope, links)?;
+    sync_with_links(scope, state_lock, links)?;
     println!("unlinked {}", removed.join(", "));
     Ok(())
 }

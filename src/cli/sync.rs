@@ -25,6 +25,7 @@ pub(super) fn sync(
     only: Option<&str>,
     locked: bool,
 ) -> Result<usize> {
+    let state_lock = StateLock::acquire(false)?;
     let dir = scope.manifest_dir()?;
     let manifest = Manifest::load(&dir, scope)?;
     let links = Links::load(scope)?;
@@ -33,7 +34,16 @@ pub(super) fn sync(
     } else {
         LockMode::Write
     };
-    plan(scope, &manifest, links, force_refresh, only, mode)?.apply(scope)
+    plan(
+        scope,
+        &manifest,
+        state_lock,
+        links,
+        force_refresh,
+        only,
+        mode,
+    )?
+    .apply(scope)
 }
 
 /// Sync with an edited set of `spm link` overrides, persisting them only once
@@ -42,10 +52,20 @@ pub(super) fn sync(
 /// affected by links: the lock still pins every dependency's declared source,
 /// so this runs in [`LockMode::Links`] — it never re-resolves a pin nor writes
 /// `ai.lock`, and fails instead when `ai.lock` is out of sync with `ai.json`.
-pub(super) fn sync_with_links(scope: &Scope, links: Links) -> Result<usize> {
+/// `links` must have been read and edited under `state_lock`, held exclusively.
+pub(super) fn sync_with_links(scope: &Scope, state_lock: StateLock, links: Links) -> Result<usize> {
     let dir = scope.manifest_dir()?;
     let manifest = Manifest::load(&dir, scope)?;
-    plan(scope, &manifest, links, false, None, LockMode::Links)?.apply(scope)
+    plan(
+        scope,
+        &manifest,
+        state_lock,
+        links,
+        false,
+        None,
+        LockMode::Links,
+    )?
+    .apply(scope)
 }
 
 /// How a sync may treat `ai.lock`.
@@ -106,9 +126,11 @@ pub(super) fn save_and_sync(scope: &Scope, manifest: &Manifest) -> Result<usize>
     // Validate exactly as the next `Manifest::load` will (schema, name
     // collisions across skills/plugins, ...), so an invalid edit is never saved.
     let manifest = Manifest::parse(&text, &path)?;
+    let state_lock = StateLock::acquire(false)?;
     let plan = plan(
         scope,
         &manifest,
+        state_lock,
         Links::load(scope)?,
         false,
         None,
@@ -148,14 +170,22 @@ struct Plan {
 /// Resolve `manifest` -> lock, populate the store, and run every check (source
 /// policy, content scan, collisions, `--locked` drift). Writes nothing outside
 /// the global store: no target output, no `ai.json`, no `ai.lock`.
+///
+/// `links` must have been read under `state_lock` — exclusively when they were
+/// edited (`LockMode::Links`) — and the plan holds it until it has been applied,
+/// so no other command changes link state in between.
 fn plan(
     scope: &Scope,
     manifest: &Manifest,
+    state_lock: StateLock,
     mut links: Links,
     force_refresh: bool,
     only: Option<&str>,
     mode: LockMode,
 ) -> Result<Plan> {
+    if mode == LockMode::Links && !state_lock.is_exclusive() {
+        bail!("internal error: editing links requires the exclusive links lock");
+    }
     let locked = mode != LockMode::Write;
     let dir = scope.manifest_dir()?;
     if manifest.targets.is_empty() {
@@ -579,9 +609,6 @@ fn plan(
         .map(|p| p.name.clone())
         .chain(previously_managed_plugins.iter().cloned())
         .collect();
-    // Held until `apply` has finished writing: no link may be published into
-    // this output between the check below and the writes.
-    let state_lock = StateLock::acquire(mode == LockMode::Links)?;
     guard_working_copies(
         scope,
         &dir,
