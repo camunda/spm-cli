@@ -12438,3 +12438,79 @@ fn target_added_after_lock_only_update_does_not_purge_other_targets_names() {
     assert!(record["targets"]["cursor"].is_null(), "{record}");
     assert!(!record["targets"]["codex"].is_null(), "{record}");
 }
+
+/// Install codex with skill `base`, then `add --lock-only` a skill `fresh`
+/// and make the next materialization fail part-way: the shared-dir vendor
+/// copies the skills before it updates the (now unreadable) `.gitignore`.
+fn partially_failed_install(sb: &Sandbox) -> (PathBuf, String) {
+    let base = make_repo(
+        &sb.root.join("base"),
+        &[("SKILL.md", "---\nname: base\n---\nBase.\n")],
+    );
+    let fresh = make_repo(
+        &sb.root.join("fresh"),
+        &[("SKILL.md", "---\nname: fresh\n---\nFresh.\n")],
+    );
+    sb.ok(&["init", "--target", "codex"]);
+    sb.ok(&["add", &base, "--branch", "main", "--name", "base"]);
+    sb.ok(&[
+        "add",
+        &fresh,
+        "--branch",
+        "main",
+        "--name",
+        "fresh",
+        "--lock-only",
+    ]);
+    let dir = sb.project.join(".agents/skills");
+    std::fs::create_dir_all(dir.join("mine")).unwrap();
+    std::fs::write(dir.join("mine/SKILL.md"), "Mine.\n").unwrap();
+    corrupt_gitignore(sb);
+    (dir, fresh)
+}
+
+/// What a failed install already wrote is recorded, so `clean` right after it
+/// (no successful install in between) still removes it.
+#[test]
+fn clean_after_a_partially_failed_install_removes_what_it_wrote() {
+    let sb = Sandbox::new();
+    let (dir, _) = partially_failed_install(&sb);
+    fails(&sb, &["install"]);
+    assert!(dir.join("fresh/SKILL.md").exists(), "copied before failing");
+    sb.ok(&["clean"]);
+    for gone in ["base", "fresh"] {
+        assert!(!dir.join(gone).exists(), "{gone} cleaned");
+    }
+    assert_eq!(sb.read(".agents/skills/mine/SKILL.md"), "Mine.\n");
+}
+
+/// Same for a target whose addition failed part-way: `target remove` right
+/// after it removes what that addition wrote. Codex installs fine; Cursor
+/// copies `base`, then fails on `fresh` (a file of the user's is in the way).
+#[test]
+fn target_remove_after_a_partially_failed_target_add_removes_what_it_wrote() {
+    let sb = Sandbox::new();
+    let (dir, _) = partially_failed_install(&sb);
+    std::fs::remove_file(sb.project.join(".gitignore")).unwrap();
+    sb.ok(&["install"]);
+    let cursor = sb.project.join(".cursor/skills");
+    std::fs::create_dir_all(cursor.join("mine")).unwrap();
+    std::fs::write(cursor.join("mine/SKILL.md"), "Mine.\n").unwrap();
+    std::fs::write(cursor.join("fresh"), "in the way\n").unwrap();
+
+    let err = fails(&sb, &["target", "add", "cursor"]);
+    assert!(err.contains("clearing") && err.contains("fresh"), "{err}");
+    assert!(
+        cursor.join("base/SKILL.md").exists(),
+        "copied before failing"
+    );
+    sb.ok(&["target", "remove", "cursor"]);
+    assert!(!cursor.join("base").exists(), "removed from cursor");
+    assert_eq!(sb.read(".cursor/skills/mine/SKILL.md"), "Mine.\n");
+    for kept in ["base", "fresh", "mine"] {
+        assert!(
+            dir.join(kept).join("SKILL.md").exists(),
+            "codex keeps {kept}"
+        );
+    }
+}

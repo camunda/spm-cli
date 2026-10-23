@@ -59,6 +59,11 @@ impl Owned {
         }
     }
 
+    pub fn extend(&mut self, other: &Owned) {
+        self.skills.extend(other.skills.iter().cloned());
+        self.plugins.extend(other.plugins.iter().cloned());
+    }
+
     pub fn skill_names(&self) -> Vec<String> {
         self.skills.iter().cloned().collect()
     }
@@ -121,10 +126,34 @@ impl Ownership {
         }
     }
 
-    /// Record that every one of `targets` now holds exactly `lock`'s set.
-    pub fn save_installed(scope: &Scope, targets: &[String], lock: &Lockfile) -> Result<()> {
-        let owned = Owned::from_lock(lock);
-        Self::Recorded(targets.iter().map(|t| (t.clone(), owned.clone())).collect()).save(scope)
+    /// Install `lock`'s set into each of `targets` with `install(index, prior
+    /// ownership)`, keeping the record true at every step. Before a target is
+    /// written it is recorded as possibly holding its prior ownership ∪ the new
+    /// set — vendors remove and rewrite exactly those names in its dir, so a
+    /// failure part-way leaves nothing of spm's unrecorded and claims nothing
+    /// else. Once a target is written it holds exactly the new set.
+    pub fn install(
+        &self,
+        scope: &Scope,
+        targets: &[String],
+        lock: &Lockfile,
+        mut install: impl FnMut(usize, &Owned) -> Result<()>,
+    ) -> Result<()> {
+        let desired = Owned::from_lock(lock);
+        let mut record: BTreeMap<String, Owned> = targets
+            .iter()
+            .map(|t| (t.clone(), self.for_target(t)))
+            .collect();
+        for (i, target) in targets.iter().enumerate() {
+            let prior = self.for_target(target);
+            let mut ahead = prior.clone();
+            ahead.extend(&desired);
+            record.insert(target.clone(), ahead);
+            Self::Recorded(record.clone()).save(scope)?;
+            install(i, &prior)?;
+            record.insert(target.clone(), desired.clone());
+        }
+        Self::Recorded(record).save(scope)
     }
 
     /// Before the lock changes without an install, pin down what the targets
@@ -211,6 +240,24 @@ mod tests {
         lock
     }
 
+    fn installed_err(
+        scope: &Scope,
+        owned: &Ownership,
+        targets: &[String],
+        lock: &Lockfile,
+        fail_at: usize,
+    ) -> String {
+        let err = owned
+            .install(scope, targets, lock, |i, _| {
+                if i == fail_at {
+                    anyhow::bail!("boom")
+                }
+                Ok(())
+            })
+            .unwrap_err();
+        format!("{err:#}")
+    }
+
     #[test]
     fn records_per_target_and_ignores_itself_in_a_project() {
         let root = scratch("roundtrip");
@@ -226,9 +273,24 @@ mod tests {
         recorded.freeze(&scope, &["cursor".to_string()]).unwrap();
         assert_eq!(Ownership::load(&scope, &lock_with(&[])).unwrap(), recorded);
 
-        Ownership::save_installed(&scope, &["codex".to_string()], &lock_with(&["b"])).unwrap();
+        let targets = ["codex".to_string(), "cursor".to_string()];
+        let err = installed_err(&scope, &recorded, &targets, &lock_with(&["b"]), 1);
+        assert!(err.contains("boom"), "{err}");
+        // `codex` was written; `cursor` failed part-way, so it may hold either set.
+        let partial = Ownership::load(&scope, &lock_with(&[])).unwrap();
+        assert_eq!(partial.for_target("codex").skills, set(&["b"]));
+        assert_eq!(partial.for_target("cursor").skills, set(&["b"]));
+        let mut seen = Vec::new();
+        recorded
+            .install(&scope, &targets[..1], &lock_with(&["b"]), |i, prior| {
+                seen.push((i, prior.skill_names()));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(seen, [(0, vec!["a".to_string()])]);
         let installed = Ownership::load(&scope, &lock_with(&[])).unwrap();
         assert_eq!(installed.for_target("codex").skills, set(&["b"]));
+        assert_eq!(installed.for_target("cursor"), Owned::default());
         // An explicitly empty record stays exact rather than falling back to the lock.
         installed.without("codex").save(&scope).unwrap();
         let empty = Ownership::load(&scope, &lock_with(&["b"])).unwrap();

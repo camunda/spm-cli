@@ -842,14 +842,17 @@ impl Plan {
                 pending.save(scope)?;
             }
         }
-        for (target, vendor) in self.targets.iter().zip(&self.vendors) {
-            let owned = owned_in(&self.previously_owned, target, &self.previously_linked);
-            vendor.materialize(scope, &lock.id, &self.materialized, &owned.skill_names())?;
-            vendor.materialize_plugins(scope, &lock.id, &self.plugins, &owned.plugin_names())?;
-        }
-        // Every target now holds exactly `lock`'s set: anything else spm put
-        // there was purged above.
-        Ownership::save_installed(scope, &self.targets, lock)?;
+        self.previously_owned
+            .install(scope, &self.targets, lock, |i, _| {
+                let vendor = &self.vendors[i];
+                let owned = owned_in(
+                    &self.previously_owned,
+                    &self.targets[i],
+                    &self.previously_linked,
+                );
+                vendor.materialize(scope, &lock.id, &self.materialized, &owned.skill_names())?;
+                vendor.materialize_plugins(scope, &lock.id, &self.plugins, &owned.plugin_names())
+            })?;
         // Only persist `ai.lock` once every fallible step (resolution, fetching,
         // collision checks, and vendor materialization) has succeeded —
         // otherwise a failed `install` could leave behind a lockfile pointing at
