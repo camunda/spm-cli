@@ -9088,3 +9088,40 @@ fn lock_rejects_a_resolved_tag_that_does_not_satisfy_the_range() {
         std::fs::write(sb.project.join("ai.lock"), lock).unwrap();
     }
 }
+
+/// A newer in-range tag on the *same* commit as the locked one still means
+/// `spm update` would advance `resolved_tag`, so the range is `behind` — even
+/// when a release outside the range also exists.
+#[test]
+fn outdated_detects_a_newer_in_range_tag_on_the_locked_commit() {
+    let sb = Sandbox::new();
+    let (_, _, v141, _) = range_fixture(&sb);
+    sb.ok(&["init", "--target", "claude"]);
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--version",
+        "^1.2",
+        "--name",
+        "greet",
+    ]);
+    sb.git(&["tag", "v1.9.0", &v141]);
+
+    let doc = json_doc(&sb.spm(&["outdated", "--json"]));
+    let row = outdated_row(&doc, "greet");
+    assert_eq!(row["status"], "behind", "{doc}");
+    assert_eq!(row["latestInRange"], "v1.9.0", "{doc}");
+    assert_eq!(row["remoteCommit"], v141.as_str(), "{doc}");
+    assert_eq!(row["latestTag"], "v2.0.0", "{doc}");
+    assert!(!sb.spm(&["outdated", "--exit-code"]).status.success());
+    let text = sb.ok(&["outdated"]);
+    assert!(
+        text.contains("greet: newer tag within the version range"),
+        "{text}"
+    );
+
+    sb.ok(&["update", "greet"]);
+    let lock = lock_doc(&sb);
+    assert_eq!(lock["skills"]["greet"]["resolved_tag"], "v1.9.0", "{lock}");
+    assert_eq!(lock["skills"]["greet"]["commit"], v141.as_str(), "{lock}");
+}

@@ -453,10 +453,15 @@ fn compare(
             .is_some_and(|sha| !sha.eq_ignore_ascii_case(locked)),
         _ => false,
     };
+    // A newer in-range tag can share the locked commit; `spm update` would
+    // still advance `resolved_tag`, so comparing commits alone misses it.
+    let range_tag_advanced = matches!(selector, Some(Version::Range(_)))
+        && resolved_tag.is_some_and(|t| out.latest_in_range.as_deref() != Some(t));
     out.status = match (selector, &now) {
         (_, None) => Status::Pinned,
         (Some(Version::Tag(_)), Some(now)) if !now.eq_ignore_ascii_case(locked) => Status::TagMoved,
         (Some(Version::Range(_)), _) if range_tag_moved => Status::TagMoved,
+        (Some(Version::Range(_)), _) if range_tag_advanced => Status::Behind,
         (_, Some(now)) if !now.eq_ignore_ascii_case(locked) => Status::Behind,
         _ if out.latest_tag.is_some() => Status::NewerTag,
         _ => Status::UpToDate,

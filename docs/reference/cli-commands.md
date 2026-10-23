@@ -243,7 +243,7 @@ in a scheduled CI job or bot that reports drift.
 | `branch` | the remote branch tip vs the locked commit | `behind` when the tip moved |
 | `tag` | the newest [semver](https://semver.org) tag on the remote (a leading `v` is allowed; floating or non-semver tags such as `v1` or `latest` are ignored; pre-releases only count when the pinned tag is one) | `newer tag` |
 | `tag` | the pinned tag itself now resolves to a different commit | `tag moved`, plus a warning — someone re-pointed the tag |
-| `version` | the newest tag in the range vs the locked commit | `behind` — run `spm update` |
+| `version` | the newest tag in the range vs the locked `resolved_tag` and commit | `behind` — run `spm update` |
 | `version` | a newer semver tag exists only outside the range | `newer tag` — widen `version` in `ai.json` |
 | `version` | the locked `resolved_tag` now resolves to a different commit | `tag moved`, plus a warning |
 | `commit` | none (never queried) | `pinned` |
