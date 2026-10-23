@@ -6,6 +6,7 @@ mod jsonutil;
 mod links;
 mod lockfile;
 mod manifest;
+mod pathid;
 mod paths;
 mod plugin;
 mod policy;

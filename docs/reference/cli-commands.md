@@ -212,6 +212,11 @@ spm install                               # re-run after further edits
   locked commit's nested `ai.json`.
 - Every sync (`install`, `update`, `add`, …) re-copies linked content; there is
   no file watching.
+- `link`/`unlink` never write `ai.lock`: if it is missing or out of sync with
+  `ai.json`, they fail and ask you to run `spm install` first.
+- The directory may not overlap anything a target writes or deletes (e.g.
+  Codex's `.agents/skills/<name>`, or the project root, which contains the
+  output) — that would wipe your working copy or copy the output into itself.
 - Linking a name that is not declared in `ai.json` is an error. If you later
   `spm remove` a linked dependency, the leftover link is ignored with a warning
   until `spm unlink` drops it. If a linked directory disappears, syncs fail until

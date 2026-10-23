@@ -112,10 +112,11 @@ impl Links {
             return Ok(None);
         };
         let dir = Self::base(scope)?.join(display);
+        let g = if scope.is_global() { " -g" } else { "" };
         let canon = dir.canonicalize().with_context(|| {
             format!(
                 "linked directory `{display}` for `{name}` not found — fix it with \
-                 `spm link {name} <dir>` or drop it with `spm unlink {name}`"
+                 `spm link {name} <dir>{g}` or drop it with `spm unlink {name}{g}`"
             )
         })?;
         if !canon.is_dir() {

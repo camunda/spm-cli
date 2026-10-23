@@ -35,7 +35,13 @@ edit. `spm unlink --all` drops every link in the scope.
   project, which spm gitignores, or in `$SPM_HOME/links.json` with `-g`.
 - **`ai.json` and `ai.lock` stay byte-identical.** The lock keeps pinning the
   declared git source, so teammates, CI and `spm install --locked` are
-  unaffected and your diff stays clean.
+  unaffected and your diff stays clean. `link`/`unlink` never write `ai.lock`,
+  so if it is missing or out of sync with `ai.json` they ask you to run
+  `spm install` first.
+- **Keep the working copy outside spm's output.** A directory that overlaps
+  what a target writes or deletes — e.g. Codex's `.agents/skills/<name>`, or
+  the project root (which contains the output) — is rejected, since syncing
+  would wipe it or copy the output into itself.
 - **Same safety rules.** Linked content is copied (never symlinked), `.git` is
   skipped, symlinks inside the directory may not point outside it, and it must
   pass the same content scan as fetched content.

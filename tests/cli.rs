@@ -9798,6 +9798,20 @@ fn link_plugin_materializes_local_tree_and_cleans_extra_bundled_skills() {
     sb.ok(&["install"]);
     assert!(!shared.join("extra").exists(), "orphaned extra skill");
 
+    // A skill the *locked* commit bundles but the local tree dropped is neither
+    // materialized nor expected: `status` stays green.
+    let composer = dev.join("skills/composer");
+    let parked = sb.root.join("parked-composer");
+    std::fs::rename(&composer, &parked).unwrap();
+    sb.ok(&["install"]);
+    assert!(!shared.join("composer").exists(), "dropped skill kept");
+    let out = sb.spm(&["status", "--json"]);
+    assert!(out.status.success(), "status flagged the dropped skill");
+    let doc = json_doc(&out);
+    assert!(!doc["expected"].to_string().contains("composer"), "{doc}");
+    std::fs::rename(&parked, &composer).unwrap();
+    sb.ok(&["install"]);
+
     std::fs::create_dir_all(&extra).unwrap();
     std::fs::write(extra.join("SKILL.md"), "---\nname: extra\n---\nExtra.\n").unwrap();
     sb.ok(&["install"]);
@@ -9897,9 +9911,139 @@ fn global_link_and_unlink() {
     assert!(sb.ok(&["status", "-g"]).contains("linked: `greet`"));
     // The project scope is unaffected.
     assert!(fails(&sb, &["unlink", "greet"]).contains("not linked"));
+    // A vanished global link's recovery hints stay in the global scope.
+    let dev = sb.root.join("dev");
+    let parked = sb.root.join("dev-parked");
+    std::fs::rename(&dev, &parked).unwrap();
+    let err = fails(&sb, &["install", "-g"]);
+    assert!(err.contains("`spm link greet <dir> -g`"), "{err}");
+    assert!(err.contains("`spm unlink greet -g`"), "{err}");
+    std::fs::rename(&parked, &dev).unwrap();
 
     sb.ok(&["unlink", "-g", "greet"]);
     assert!(read_path(&skill).contains("Greet warmly."));
     assert_eq!(std::fs::read(sb.spm_home.join("ai.lock")).unwrap(), lock);
     assert!(!sb.spm_home.join("links.json").exists());
+}
+
+/// A linked directory may not overlap anything a target writes or deletes:
+/// a source inside the output would be wiped before being copied (losing
+/// uncommitted edits), and output inside the source would be copied into
+/// itself. Nothing is written on rejection and the source stays untouched.
+#[test]
+fn link_rejects_dirs_overlapping_target_output() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot,codex"]);
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--name",
+        "greet",
+    ]);
+    let (manifest, lock) = (
+        snapshot(&sb, "ai.json").unwrap(),
+        snapshot(&sb, "ai.lock").unwrap(),
+    );
+    // Source inside Codex's output: `.agents/skills/greet`, with a local edit.
+    let inside = sb.project.join(".agents/skills/greet/SKILL.md");
+    std::fs::write(&inside, "---\nname: greet\n---\nUNSAVED EDIT\n").unwrap();
+    let err = fails(&sb, &["link", "greet", ".agents/skills/greet"]);
+    assert!(err.contains("overlaps"), "{err}");
+    assert!(err.contains("target `codex`"), "{err}");
+    assert!(
+        read_path(&inside).contains("UNSAVED EDIT"),
+        "source was wiped"
+    );
+
+    // Output inside the source: the project root itself.
+    let err = fails(&sb, &["link", "greet", "."]);
+    assert!(err.contains("overlaps"), "{err}");
+    assert!(!sb.project.join(".spm/links.json").exists());
+    let nested = sb
+        .project
+        .join(".agents/skills/spm-managed-skills/greet/.agents");
+    assert!(!nested.exists(), "copied into itself");
+    assert_eq!(snapshot(&sb, "ai.json").unwrap(), manifest);
+    assert_eq!(snapshot(&sb, "ai.lock").unwrap(), lock);
+
+    // An alias reaching the output through a symlink is caught as well.
+    #[cfg(unix)]
+    {
+        symlink(sb.project.join(".agents"), sb.root.join("alias"));
+        let err = fails(&sb, &["link", "greet", "../alias/skills/greet"]);
+        assert!(err.contains("overlaps"), "{err}");
+        assert!(
+            read_path(&inside).contains("UNSAVED EDIT"),
+            "source was wiped"
+        );
+    }
+
+    // A link that becomes overlapping later (a target added afterwards) fails
+    // the sync instead of deleting the working copy.
+    let sb2 = Sandbox::new();
+    sb2.ok(&["init", "--target", "copilot"]);
+    sb2.ok(&[
+        "add",
+        &sb2.skill_url(),
+        "--branch",
+        "main",
+        "--name",
+        "greet",
+    ]);
+    let wc = sb2.project.join(".agents/skills/greet");
+    std::fs::create_dir_all(&wc).unwrap();
+    std::fs::write(wc.join("SKILL.md"), "---\nname: greet\n---\nWIP\n").unwrap();
+    sb2.ok(&["link", "greet", ".agents/skills/greet"]);
+    let err = fails(&sb2, &["target", "add", "codex"]);
+    assert!(err.contains("overlaps"), "{err}");
+    assert!(
+        read_path(&wc.join("SKILL.md")).contains("WIP"),
+        "source was wiped"
+    );
+}
+
+/// `link`/`unlink` never write `ai.lock`: a lock with non-default formatting
+/// (CRLF, compact JSON) stays byte-identical, and when `ai.lock` is out of
+/// sync with `ai.json` they refuse instead of re-resolving pins.
+#[test]
+fn link_keeps_lock_bytes_and_refuses_an_out_of_sync_lock() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--name",
+        "greet",
+    ]);
+    local_skill_checkout(&sb, "dev", "LOCAL");
+    let lock_path = sb.project.join("ai.lock");
+    let doc: serde_json::Value = serde_json::from_str(&read_path(&lock_path)).unwrap();
+    let odd = serde_json::to_string(&doc).unwrap().replace(",", ",\r\n") + "\r\n";
+    std::fs::write(&lock_path, &odd).unwrap();
+    sb.ok(&["link", "greet", "../dev"]);
+    assert_eq!(read_path(&lock_path), odd, "link rewrote ai.lock");
+    sb.ok(&["unlink", "greet"]);
+    assert_eq!(read_path(&lock_path), odd, "unlink rewrote ai.lock");
+
+    // Hand-edited selector: the lock no longer matches.
+    let manifest =
+        read_path(&sb.project.join("ai.json")).replace(r#""branch": "main""#, r#""tag": "v0.1.0""#);
+    assert!(manifest.contains("v0.1.0"), "{manifest}");
+    std::fs::write(sb.project.join("ai.json"), &manifest).unwrap();
+    let err = fails(&sb, &["link", "greet", "../dev"]);
+    assert!(err.contains("never write ai.lock"), "{err}");
+    assert!(err.contains("run `spm install` first"), "{err}");
+    assert_eq!(read_path(&lock_path), odd, "ai.lock changed");
+    assert!(!sb.project.join(".spm/links.json").exists());
+
+    // Missing lock: same guidance, nothing written.
+    std::fs::remove_file(&lock_path).unwrap();
+    let err = fails(&sb, &["link", "greet", "../dev"]);
+    assert!(err.contains("run `spm install` first"), "{err}");
+    assert!(!lock_path.exists());
+    assert!(!sb.project.join(".spm/links.json").exists());
 }

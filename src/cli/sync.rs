@@ -28,17 +28,60 @@ pub(super) fn sync(
     let dir = scope.manifest_dir()?;
     let manifest = Manifest::load(&dir, scope)?;
     let links = Links::load(scope)?;
-    plan(scope, &manifest, links, force_refresh, only, locked)?.apply(scope)
+    let mode = if locked {
+        LockMode::Locked
+    } else {
+        LockMode::Write
+    };
+    plan(scope, &manifest, links, force_refresh, only, mode)?.apply(scope)
 }
 
 /// Sync with an edited set of `spm link` overrides, persisting them only once
 /// the sync has been planned successfully (an unreadable or blocked linked
 /// directory leaves the links file untouched). `ai.json` and `ai.lock` are not
-/// affected by links: the lock still pins every dependency's declared source.
+/// affected by links: the lock still pins every dependency's declared source,
+/// so this runs in [`LockMode::Links`] — it never re-resolves a pin nor writes
+/// `ai.lock`, and fails instead when `ai.lock` is out of sync with `ai.json`.
 pub(super) fn sync_with_links(scope: &Scope, links: Links) -> Result<usize> {
     let dir = scope.manifest_dir()?;
     let manifest = Manifest::load(&dir, scope)?;
-    plan(scope, &manifest, links, false, None, false)?.apply(scope)
+    plan(scope, &manifest, links, false, None, LockMode::Links)?.apply(scope)
+}
+
+/// How a sync may treat `ai.lock`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LockMode {
+    /// Re-resolve what changed or is unpinned, then write `ai.lock`.
+    Write,
+    /// `spm install --locked`: install exactly `ai.lock`, never write it.
+    Locked,
+    /// `spm link`/`spm unlink`: like [`LockMode::Locked`] — they promise to
+    /// leave `ai.lock` byte-identical — but with their own guidance on failure.
+    Links,
+}
+
+impl LockMode {
+    /// Prefix for an error raised because `ai.lock` is missing or out of sync.
+    fn label(self) -> &'static str {
+        match self {
+            LockMode::Links => "`spm link`/`spm unlink` never write ai.lock",
+            _ => "--locked",
+        }
+    }
+
+    /// How to fix such an error, spelled for the scope in use.
+    fn fix_hint(self, scope: &Scope) -> String {
+        match self {
+            LockMode::Links => format!(
+                "run `{}` first to bring ai.lock in sync, then retry",
+                install_command(scope)
+            ),
+            _ => format!(
+                "run `{}` (without --locked) and commit ai.lock",
+                install_command(scope)
+            ),
+        }
+    }
 }
 
 /// Write an edited `manifest` to `ai.json` and [`sync`] it, without ever leaving
@@ -63,7 +106,14 @@ pub(super) fn save_and_sync(scope: &Scope, manifest: &Manifest) -> Result<usize>
     // Validate exactly as the next `Manifest::load` will (schema, name
     // collisions across skills/plugins, ...), so an invalid edit is never saved.
     let manifest = Manifest::parse(&text, &path)?;
-    let plan = plan(scope, &manifest, Links::load(scope)?, false, None, false)?;
+    let plan = plan(
+        scope,
+        &manifest,
+        Links::load(scope)?,
+        false,
+        None,
+        LockMode::Write,
+    )?;
     std::fs::write(&path, &text).with_context(|| format!("writing {}", path.display()))?;
     plan.apply(scope).map_err(|err| {
         anyhow!(
@@ -103,8 +153,9 @@ fn plan(
     mut links: Links,
     force_refresh: bool,
     only: Option<&str>,
-    locked: bool,
+    mode: LockMode,
 ) -> Result<Plan> {
+    let locked = mode != LockMode::Write;
     let dir = scope.manifest_dir()?;
     if manifest.targets.is_empty() {
         bail!("ai.json declares no targets");
@@ -145,9 +196,10 @@ fn plan(
     let linked = resolve_links(scope, manifest, &links)?;
     if locked && !Lockfile::path_in(&dir).exists() {
         bail!(
-            "--locked: {} not found\n{}",
+            "{}: {} not found\n{}",
+            mode.label(),
             Lockfile::path_in(&dir).display(),
-            locked_fix_hint(scope)
+            mode.fix_hint(scope)
         );
     }
     let mut prev = Lockfile::load_or_default(&dir)?;
@@ -509,6 +561,17 @@ fn plan(
     // separately, across plugins — before any vendor writes a byte.
     reject_case_folding_collisions("skill", materialized.iter().map(|m| m.name.as_str()))?;
     reject_case_folding_collisions("plugin", plugins.iter().map(|p| p.name.as_str()))?;
+    let output_skills: Vec<String> = materialized
+        .iter()
+        .map(|m| m.name.clone())
+        .chain(previously_managed.iter().cloned())
+        .collect();
+    let output_plugins: Vec<String> = plugins
+        .iter()
+        .map(|p| p.name.clone())
+        .chain(previously_managed_plugins.iter().cloned())
+        .collect();
+    reject_link_overlaps(scope, &vendors, &linked, &output_skills, &output_plugins)?;
     if locked {
         // Backstop for the whole defect class: whatever the specific checks above
         // missed (a hand-edited `bundled_skills`/`requested_by`/store key, ...),
@@ -527,14 +590,15 @@ fn plan(
         }
         if !mismatches.is_empty() {
             bail!(
-                "--locked: ai.lock is out of sync with ai.json ({} problem(s)):\n{}\n{}",
+                "{}: ai.lock is out of sync with ai.json ({} problem(s)):\n{}\n{}",
+                mode.label(),
                 mismatches.len(),
                 mismatches
                     .iter()
                     .map(|m| format!("  - {m}"))
                     .collect::<Vec<_>>()
                     .join("\n"),
-                locked_fix_hint(scope)
+                mode.fix_hint(scope)
             );
         }
     }
@@ -623,6 +687,53 @@ fn resolve_links(
     Ok(out)
 }
 
+/// Reject a linked directory that overlaps any location a configured target
+/// writes or deletes. A source inside the output (e.g. linking Codex's own
+/// `.agents/skills/<name>`) would be wiped before it is copied — losing
+/// uncommitted edits — and output inside the source (e.g. linking the project
+/// root) would be copied into itself. Compared by filesystem identity, so
+/// symlinks and spelling aliases (case on a case-insensitive filesystem) match.
+fn reject_link_overlaps(
+    scope: &Scope,
+    vendors: &[Box<dyn Vendor>],
+    linked: &BTreeMap<String, Linked>,
+    skills: &[String],
+    plugins: &[String],
+) -> Result<()> {
+    if linked.is_empty() {
+        return Ok(());
+    }
+    let mut outputs = Vec::new();
+    for v in vendors {
+        let mut paths = v.clean_paths(scope, skills)?;
+        paths.extend(v.skill_paths(scope, skills)?);
+        paths.extend(v.plugin_clean_paths(scope, plugins)?);
+        paths.extend(v.plugin_paths(scope, plugins)?);
+        for p in paths {
+            let id = crate::pathid::identity(&crate::pathid::deletion_target(&p)?)?;
+            outputs.push((v.name(), p, id));
+        }
+    }
+    for (name, l) in linked {
+        let src = crate::pathid::identity(&l.dir)?;
+        if let Some((target, p, _)) = outputs
+            .iter()
+            .find(|(_, _, out)| out.starts_with(&src) || src.starts_with(out))
+        {
+            let g = if scope.is_global() { " -g" } else { "" };
+            bail!(
+                "linked directory `{}` for `{name}` overlaps `{}`, which target `{target}` \
+                 writes or deletes — link a working copy outside spm's output with \
+                 `spm link {name} <dir>{g}`, or drop it with `{}`",
+                l.display,
+                p.display(),
+                unlink_command(scope, name)
+            );
+        }
+    }
+    Ok(())
+}
+
 /// `spm unlink <name>`, spelled for the scope in use.
 pub(super) fn unlink_command(scope: &Scope, name: &str) -> String {
     let g = if scope.is_global() { " -g" } else { "" };
@@ -686,14 +797,6 @@ fn stale_transitive_pins(
         .filter(|(n, _)| !unwalked.contains(*n))
         .map(|(n, _)| format!("transitive skill `{n}`: in ai.lock but no longer required"))
         .collect()
-}
-
-/// How to fix a `--locked` failure, spelled for the scope in use.
-fn locked_fix_hint(scope: &Scope) -> String {
-    format!(
-        "run `{}` (without --locked) and commit ai.lock",
-        install_command(scope)
-    )
 }
 
 /// `spm install`, spelled for the scope in use.

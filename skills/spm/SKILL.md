@@ -207,7 +207,10 @@ and `ai.lock` are **not** modified, so never commit anything for a link. There
 is no file watching: run `spm install` after each edit. Linked content is
 copied (not symlinked), skips `.git`, may not symlink outside the directory,
 and still passes the [content scan](#content-scan). Linking an undeclared name
-is an error (`spm add` it first). If a linked directory disappears, syncs fail
+is an error (`spm add` it first). `link`/`unlink` never write `ai.lock`; if it
+is missing or out of sync they fail with ``run `spm install` first`` — do that,
+then retry. A `<dir>` overlapping target output (e.g. `.agents/skills/<name>` or
+the project root) is rejected with `overlaps`; keep the working copy elsewhere. If a linked directory disappears, syncs fail
 until you re-link or unlink it; a link left behind by `spm remove` is ignored
 with a warning. `--protocol`/`--protocol-fallback` behave as under
 [`spm add`](#spm-add). `spm list`/`spm status` show `linked → <dir>`.

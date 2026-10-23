@@ -123,6 +123,12 @@ fn collect(scope: &Scope) -> Result<StatusReport> {
     let lock = Lockfile::load_or_default(&dir)?;
     let links = Links::load(scope)?;
     let managed_by_links = links.managed.clone();
+    let linked_plugins: std::collections::BTreeSet<String> = links
+        .links
+        .keys()
+        .filter(|n| manifest.plugins.contains_key(*n))
+        .cloned()
+        .collect();
     let links = links
         .links
         .into_iter()
@@ -136,10 +142,13 @@ fn collect(scope: &Scope) -> Result<StatusReport> {
     // like standalone skills, so they belong in `expected` — otherwise `status`
     // would flag them as stale (present on disk, not declared).
     let mut expected: Vec<String> = lock.skills.keys().cloned().collect();
-    for l in lock.plugins.values() {
-        expected.extend(l.bundled_skills.iter().cloned());
+    // A linked plugin materializes its working tree's bundled skills, recorded
+    // in the links file, *instead of* its locked commit's.
+    for (name, l) in &lock.plugins {
+        if !linked_plugins.contains(name) {
+            expected.extend(l.bundled_skills.iter().cloned());
+        }
     }
-    // Skills a linked plugin's working tree bundles beyond its locked commit.
     expected.extend(managed_by_links);
     expected.sort();
     expected.dedup();
