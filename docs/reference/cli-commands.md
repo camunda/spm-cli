@@ -272,7 +272,10 @@ will not adopt it:
   upstream `ai.json`. Publish the bump there, then follow the requester chain
   up until the change reaches something that picks it up. A requester that
   tracks a branch picks it up through a bare `spm update` (`spm install` would
-  reuse every locked commit and its old manifest). A transitive requester
+  reuse every locked commit and its old manifest). A requester that tracks a
+  `version` range ends the chain too: publish a release of it inside that range
+  and run a bare `spm update` — no selector edit above it (a release outside the
+  range needs the range widened where it is declared). A transitive requester
   pinned to a tag or commit must publish a new version that *its* requester
   bumps in its own upstream `ai.json`, and so on up. A dependency you declare
   yourself that is pinned to a tag or commit needs its selector changed in

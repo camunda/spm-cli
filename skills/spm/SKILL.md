@@ -312,6 +312,10 @@ pins alone. `newer tag` is **not** applied by
   - A requester that **tracks a branch** (direct or transitive) picks it up
     once the bump is on that branch: run a bare `spm update` (`spm install`
     would reuse every locked commit and its old manifest).
+  - A requester that **tracks a `version` range** (direct or transitive) picks
+    it up once it publishes a release inside that range — no selector edit
+    above it: run a bare `spm update`. A release outside the range needs the
+    range widened where it is declared.
   - A **transitive** requester pinned to a tag or commit must publish a new
     version, and *its* requester must bump that selector in its own upstream
     `ai.json`; keep walking up.

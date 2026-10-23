@@ -128,8 +128,9 @@ struct SelectorCheck {
 /// locally declared dependency. A requester pinned to a tag or commit only
 /// sees the change once a new version of it is published *and* its own
 /// selector is bumped by its requester, recursively; a branch-tracking
-/// requester picks it up through `spm update`, and a pinned local dependency
-/// through an `ai.json` edit plus `spm install`.
+/// requester picks it up through `spm update`, a range-tracking one once it
+/// publishes a release inside its range (then `spm update`, no selector edit),
+/// and a pinned local dependency through an `ai.json` edit plus `spm install`.
 #[derive(Default, Debug, PartialEq)]
 struct Upgrade {
     /// Pinned transitive requesters to republish, each with the requesters
@@ -140,6 +141,9 @@ struct Upgrade {
     local_edits: Vec<String>,
     /// Some chain ends at a branch-tracking requester (`spm update`).
     via_branch: bool,
+    /// Requesters tracking a `version` range (name, requirement): a release
+    /// inside the range reaches the project through `spm update`.
+    in_range: Vec<(String, String)>,
 }
 
 impl Upgrade {
@@ -152,13 +156,12 @@ impl Upgrade {
                 continue;
             }
             let locked = lock.skills.get(req).or_else(|| lock.plugins.get(req));
-            let branch = locked.is_some_and(|q| {
-                matches!(Version::from_label(&q.reference), Some(Version::Branch(_)))
-            });
+            let selector = locked.and_then(|q| Version::from_label(&q.reference));
             let local = manifest.skills.contains_key(req) || manifest.plugins.contains_key(req);
-            match locked {
-                _ if branch => up.via_branch = true,
-                Some(q) if !local && !q.requested_by.is_empty() => {
+            match (locked, selector) {
+                (_, Some(Version::Branch(_))) => up.via_branch = true,
+                (_, Some(Version::Range(r))) => up.in_range.push((req.clone(), r)),
+                (Some(q), _) if !local && !q.requested_by.is_empty() => {
                     up.republish.push((req.clone(), q.requested_by.clone()));
                     queue.extend(&q.requested_by);
                 }
@@ -761,7 +764,17 @@ fn summary(report: &OutdatedReport) -> Vec<String> {
                     parents.join(", ")
                 ));
             }
-            let run = if up.via_branch { "update" } else { "install" };
+            for (name, req) in &up.in_range {
+                steps.push(format!(
+                    "publish a new {name} release within its `version: {req}` range \
+                     (one outside it needs that range widened)"
+                ));
+            }
+            let run = if up.via_branch || !up.in_range.is_empty() {
+                "update"
+            } else {
+                "install"
+            };
             steps.push(if up.local_edits.is_empty() {
                 format!("then run `spm {run}{g}`")
             } else {
@@ -783,7 +796,7 @@ fn summary(report: &OutdatedReport) -> Vec<String> {
                 lines.push(format!(
                     "  {}: newer tag {} for {} — bump it in the upstream ai.json that requests \
                      it, then move that requester onto the change (`spm update{g}` if it \
-                     tracks a branch)",
+                     tracks a branch or a `version` range)",
                     r.name,
                     sec.latest_tag.as_deref().unwrap_or("?"),
                     label_of(&sec.selector)
@@ -933,6 +946,33 @@ mod tests {
                 "  inr: newer tag within the version range — run `spm update` to move to it",
                 "  out: newer tag outside the version range — widen `version` in ai.json, \
                  then run `spm install`",
+            ]
+        );
+    }
+
+    #[test]
+    fn summary_ends_a_transitive_chain_at_a_range_tracking_requester() {
+        let via = ["mid".to_string()];
+        let report = OutdatedReport {
+            scope: "project",
+            skills: vec![Row {
+                upgrade: Upgrade {
+                    republish: vec![("mid".into(), vec!["top".into()])],
+                    in_range: vec![("top".into(), "^1".into())],
+                    ..Default::default()
+                },
+                ..row("leaf", Status::NewerTag, &via)
+            }],
+            plugins: vec![],
+        };
+        assert_eq!(
+            summary(&report),
+            [
+                "1 dependency outdated:",
+                "  leaf: newer tag — bump it in the upstream ai.json of mid; publish a new mid \
+                 version and bump mid in the upstream ai.json of top; publish a new top release \
+                 within its `version: ^1` range (one outside it needs that range widened); then \
+                 run `spm update`",
             ]
         );
     }

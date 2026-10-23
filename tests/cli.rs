@@ -9246,3 +9246,102 @@ fn outdated_errors_when_the_resolved_range_tag_was_deleted() {
         "{doc}"
     );
 }
+
+/// A requester tracking a `version` range ends the upgrade chain: publishing a
+/// release inside its range reaches the project through `spm update`, with no
+/// selector edit above it — whether the range is the local root's or an
+/// intermediate transitive edge's.
+#[test]
+fn outdated_guides_a_newer_tag_through_range_tracking_requesters() {
+    let sb = Sandbox::new();
+    let leaf_dir = sb.root.join("rchain-leaf");
+    let leaf = make_repo(&leaf_dir, &[("SKILL.md", "---\nname: leaf\n---\nLeaf.\n")]);
+    git_in(&leaf_dir, &["tag", "v1.0.0"]);
+    let middle_dir = sb.root.join("rchain-middle");
+    let middle_manifest =
+        |tag: &str| format!(r#"{{"skills":{{"leaf":{{"git":"{leaf}","tag":"{tag}"}}}}}}"#);
+    let middle = make_repo(
+        &middle_dir,
+        &[
+            ("SKILL.md", "---\nname: middle\n---\nMiddle.\n"),
+            ("ai.json", &middle_manifest("v1.0.0")),
+        ],
+    );
+    git_in(&middle_dir, &["tag", "v1.0.0"]);
+    let root_dir = sb.root.join("rchain-root");
+    let root = make_repo(
+        &root_dir,
+        &[
+            ("SKILL.md", "---\nname: root\n---\nRoot.\n"),
+            (
+                "ai.json",
+                &format!(r#"{{"skills":{{"middle":{{"git":"{middle}","version":"^1"}}}}}}"#),
+            ),
+        ],
+    );
+    git_in(&root_dir, &["tag", "v1.0.0"]);
+    sb.ok(&["init", "--target", "copilot"]);
+    let manifest = |sel: &str| {
+        format!(
+            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{"root":{{"git":"{root}",{sel}}}}}}}"#
+        )
+    };
+    let newer_leaf = |sb: &Sandbox| {
+        let doc = json_doc(&sb.spm(&["outdated", "--json"]));
+        let row = doc["skills"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["status"] == "newer-tag")
+            .cloned();
+        (doc, row)
+    };
+
+    // Intermediate range: root is a local exact tag, middle tracks `^1`.
+    write_manifest(&sb, &manifest(r#""tag":"v1.0.0""#));
+    sb.ok(&["install"]);
+    git_in(&leaf_dir, &["tag", "v1.1.0"]);
+    let (doc, row) = newer_leaf(&sb);
+    let row = row.unwrap_or_else(|| panic!("no newer-tag row: {doc}"));
+    let middle_name = row["requestedBy"][0].as_str().unwrap().to_string();
+    let text = sb.ok(&["outdated"]);
+    let expected = format!(
+        "bump it in the upstream ai.json of {middle_name}; publish a new {middle_name} release \
+         within its `version: ^1` range (one outside it needs that range widened); then run \
+         `spm update`"
+    );
+    assert!(text.contains(&expected), "{text}");
+    assert!(!text.contains("point root at"), "{text}");
+
+    // Following that guidance really applies the change: no edit to root.
+    std::fs::write(middle_dir.join("ai.json"), middle_manifest("v1.1.0")).unwrap();
+    git_in(&middle_dir, &["commit", "-qam", "bump leaf"]);
+    git_in(&middle_dir, &["tag", "v1.1.0"]);
+    sb.ok(&["update"]);
+    let (doc, row) = newer_leaf(&sb);
+    assert!(row.is_none(), "leaf picked up v1.1.0: {doc}");
+
+    // Direct range: root tracks `^1` locally and now pins middle exactly, so
+    // middle is republished and bumped in root, whose in-range release ends it.
+    std::fs::write(
+        root_dir.join("ai.json"),
+        format!(r#"{{"skills":{{"middle":{{"git":"{middle}","tag":"v1.1.0"}}}}}}"#),
+    )
+    .unwrap();
+    git_in(&root_dir, &["commit", "-qam", "pin middle"]);
+    git_in(&root_dir, &["tag", "v1.1.0"]);
+    write_manifest(&sb, &manifest(r#""version":"^1""#));
+    sb.ok(&["install"]);
+    git_in(&leaf_dir, &["tag", "v1.2.0"]);
+    let (doc, row) = newer_leaf(&sb);
+    let row = row.unwrap_or_else(|| panic!("no newer-tag row: {doc}"));
+    let middle_name = row["requestedBy"][0].as_str().unwrap().to_string();
+    let text = sb.ok(&["outdated"]);
+    let expected = format!(
+        "publish a new {middle_name} version and bump {middle_name} in the upstream ai.json of \
+         root; publish a new root release within its `version: ^1` range (one outside it needs \
+         that range widened); then run `spm update`"
+    );
+    assert!(text.contains(&expected), "{text}");
+    assert!(!text.contains("point root at"), "{text}");
+}
