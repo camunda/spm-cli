@@ -80,7 +80,10 @@ impl Links {
     /// so a command can protect working copies linked from any scope. Fails
     /// closed: one that can't be read is an error, not "no links".
     pub fn all_recorded() -> Result<Vec<Recorded>> {
-        let home = paths::spm_home()?;
+        Self::all_recorded_in(&paths::spm_home()?)
+    }
+
+    fn all_recorded_in(home: &Path) -> Result<Vec<Recorded>> {
         let mut out = Vec::new();
         let global = home.join(FILE);
         out.push(Recorded {
@@ -99,6 +102,11 @@ impl Links {
             let file = entry
                 .with_context(|| format!("reading {}", dir.display()))?
                 .path();
+            // Only links files: not staging files mid-publication (see
+            // `save_to`) or unrelated entries like `.DS_Store`.
+            if file.extension().is_none_or(|e| e != "json") {
+                continue;
+            }
             let mut links = Self::load_from(&file)?;
             if links.links.is_empty() {
                 continue;
@@ -175,12 +183,29 @@ impl Links {
                 _ => Ok(()),
             };
         }
+        let staged = self.stage(p)?;
+        publish(&staged, p)
+    }
+
+    /// Write the complete file next to its destination (following a symlinked
+    /// links file, so publishing replaces what it points at, not the link) as
+    /// a staging file that readers skip, returning `(staging, destination)`.
+    fn stage(&self, p: &Path) -> Result<(PathBuf, PathBuf)> {
         if let Some(parent) = p.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
+        let dest = match p.canonicalize() {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => p.to_path_buf(),
+            Err(e) => return Err(e).with_context(|| format!("resolving {}", p.display())),
+        };
+        let name = dest.file_name().unwrap_or_default().to_string_lossy();
+        let staging = dest.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
         let text = serde_json::to_string_pretty(self)?;
-        std::fs::write(p, text + "\n").with_context(|| format!("writing {}", p.display()))
+        std::fs::write(&staging, text + "\n")
+            .with_context(|| format!("writing {}", staging.display()))?;
+        Ok((staging, dest))
     }
 
     /// Every skill name materialized for a scope with this lock and these
@@ -227,6 +252,17 @@ impl Links {
 /// `$SPM_HOME/links`) plus a stable hash of its canonical root's native bytes
 /// (for uniqueness). FNV-1a is used because, unlike std's `DefaultHasher`, its output
 /// is fixed across Rust releases, so an upgrade never orphans a project's links.
+/// Atomically replace the destination with the staged file: links files are
+/// read by every spm command on the machine (see [`Links::all_recorded`]), so
+/// a concurrent reader must see either the old or the new file, never a
+/// truncated one.
+fn publish((staging, dest): &(PathBuf, PathBuf), p: &Path) -> Result<()> {
+    std::fs::rename(staging, dest).with_context(|| {
+        let _ = std::fs::remove_file(staging);
+        format!("writing {}", p.display())
+    })
+}
+
 fn canonical_root(root: &Path) -> Result<PathBuf> {
     root.canonicalize()
         .with_context(|| format!("resolving project root {}", root.display()))
@@ -322,6 +358,58 @@ mod tests {
         assert_eq!(a, "my_app-c0a1125f1079eaa1.json");
         assert_ne!(a, project_file_name(Path::new("/other/my app")));
         assert!(!project_file_name(Path::new("/x/a\\b..c")).contains(['/', '\\']));
+    }
+
+    /// A reader running while a links file is being published sees the old
+    /// complete file (never a truncated one) and skips the staging file and
+    /// unrelated entries; once published, it sees the new one.
+    #[test]
+    fn publication_is_atomic_for_concurrent_readers() {
+        let home = tmp("atomic");
+        let dir = home.join(PROJECT_DIR);
+        let file = dir.join("app-0000000000000000.json");
+        let with = |link: &str| {
+            let mut l = Links {
+                project: Some(home.to_string_lossy().into_owned()),
+                ..Links::default()
+            };
+            l.links.insert(link.into(), "dir".into());
+            l
+        };
+        let read = || {
+            let all = Links::all_recorded_in(&home).unwrap();
+            let names: Vec<_> = all.iter().flat_map(|r| r.links.links.keys()).collect();
+            names.into_iter().cloned().collect::<Vec<_>>()
+        };
+        with("old").save_to(&file).unwrap();
+        std::fs::write(dir.join(".DS_Store"), [0xFFu8, 0, 1]).unwrap();
+        std::fs::write(dir.join("notes.txt"), "not json").unwrap();
+
+        let staged = with("new").stage(&file).unwrap();
+        assert!(staged.0.exists());
+        assert_eq!(read(), ["old"], "mid-publication");
+        publish(&staged, &file).unwrap();
+        assert!(!staged.0.exists());
+        assert_eq!(read(), ["new"], "published");
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// Saving through a symlinked links file updates what it points at and
+    /// keeps the symlink.
+    #[cfg(unix)]
+    #[test]
+    fn save_follows_a_symlinked_links_file() {
+        let root = tmp("symlinked");
+        let real = root.join("real.json");
+        let file = root.join(FILE);
+        std::fs::write(&real, "{}").unwrap();
+        std::os::unix::fs::symlink(&real, &file).unwrap();
+        let mut links = Links::default();
+        links.links.insert("a".into(), "dir".into());
+        links.save_to(&file).unwrap();
+        assert!(std::fs::symlink_metadata(&file).unwrap().is_symlink());
+        assert_eq!(Links::load_from(&real).unwrap(), links);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     /// Roots that only differ in bytes that aren't valid UTF-8 (which a lossy

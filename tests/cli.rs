@@ -352,7 +352,11 @@ impl Sandbox {
     fn project_links(&self) -> PathBuf {
         let dir = self.spm_home.join("links");
         let files: Vec<PathBuf> = std::fs::read_dir(&dir)
-            .map(|rd| rd.map(|e| e.unwrap().path()).collect())
+            .map(|rd| {
+                rd.map(|e| e.unwrap().path())
+                    .filter(|p| p.extension().is_some_and(|e| e == "json"))
+                    .collect()
+            })
             .unwrap_or_default();
         assert!(files.len() <= 1, "one project per sandbox: {files:?}");
         files
@@ -10798,14 +10802,20 @@ fn commands_never_wipe_a_links_file_inside_target_output() {
 /// Every working copy linked on this machine is protected, whichever scope
 /// linked it: a global link — or another project's — pointing into this
 /// project's output makes every command that would rebuild or delete that
-/// output refuse, until it's unlinked where it was linked.
+/// output refuse, until it's unlinked where it was linked. The global case is
+/// Unix only: on Windows the home dir (global output) can't be redirected into
+/// the sandbox.
 #[test]
 fn links_from_other_scopes_are_guarded_too() {
     let sb = Sandbox::new();
     sb.ok(&["init", "--target", "copilot"]);
     sb.ok(&["target", "add", "claude"]);
-    sb.ok(&["init", "-g", "--target", "copilot"]);
-    for g in [&[][..], &["-g"]] {
+    let mut scopes: Vec<&[&str]> = vec![&[]];
+    if cfg!(unix) {
+        sb.ok(&["init", "-g", "--target", "copilot"]);
+        scopes.push(&["-g"]);
+    }
+    for g in scopes {
         let mut args = vec!["add"];
         args.extend_from_slice(g);
         let url = sb.skill_url();
@@ -10843,13 +10853,13 @@ fn links_from_other_scopes_are_guarded_too() {
         sb.ok(&a);
     };
     type Run<'a> = &'a dyn Fn(&[&str]);
-    let linkers: [(String, Run); 2] = [
-        ("linked globally".into(), &in_global),
-        (
-            format!("linked in `{}`", other.canonicalize().unwrap().display()),
-            &in_other,
-        ),
-    ];
+    let mut linkers: Vec<(String, Run)> = vec![(
+        format!("linked in `{}`", other.canonicalize().unwrap().display()),
+        &in_other,
+    )];
+    if cfg!(unix) {
+        linkers.push(("linked globally".into(), &in_global));
+    }
     std::fs::create_dir_all(sb.root.join("elsewhere")).unwrap();
     for (origin, run) in linkers {
         // Recreated each round: once unlinked, it's ordinary output again.
