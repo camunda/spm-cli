@@ -63,7 +63,7 @@ impl Vendor for Claude {
         _project_id: &str,
         skills: &[MaterializedSkill],
         _previously_managed: &[String],
-        _claim: Claim,
+        claim: Claim,
     ) -> Result<()> {
         let market = marketplace(scope);
         let market_dir = managed_dir(scope)?;
@@ -76,6 +76,7 @@ impl Vendor for Claude {
         std::fs::create_dir_all(&skills_dir)?;
 
         for s in skills {
+            claim(&s.name)?;
             let dest = skills_dir.join(&s.name);
             fsutil::copy_tree(&s.path, &dest, &s.root)
                 .with_context(|| format!("copying skill `{}` into plugin", s.name))?;

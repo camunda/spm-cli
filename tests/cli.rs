@@ -12631,6 +12631,47 @@ fn an_unreadable_ownership_record_stops_clean_before_deleting() {
     assert_eq!(sb.read(".cursor/skills/mine/SKILL.md"), "Mine.\n");
 }
 
+/// Claude claims each skill as it copies it into its marketplace too: when a
+/// Claude install fails after copying (here: unparsable settings), a target
+/// aliasing that marketplace inherits what was copied once Claude is removed,
+/// so a later `clean` removes it.
+#[test]
+fn a_partial_claude_install_records_the_skills_it_copied() {
+    let sb = Sandbox::new();
+    let fresh = make_repo(
+        &sb.root.join("fresh"),
+        &[("SKILL.md", "---\nname: fresh\n---\nFresh.\n")],
+    );
+    std::fs::create_dir_all(sb.project.join(".cursor")).unwrap();
+    symlink(
+        "../.spm/claude/plugin/skills",
+        sb.project.join(".cursor/skills"),
+    );
+    sb.ok(&["init", "--target", "claude,cursor"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    sb.ok(&[
+        "add",
+        &fresh,
+        "--branch",
+        "main",
+        "--name",
+        "fresh",
+        "--lock-only",
+    ]);
+    let settings = sb.project.join(".claude/settings.local.json");
+    let good = std::fs::read_to_string(&settings).unwrap();
+    std::fs::write(&settings, "{").unwrap();
+    fails(&sb, &["install"]);
+    let copied = sb.claude_market_dir().join("plugin/skills/fresh/SKILL.md");
+    assert!(copied.exists(), "copied before failing");
+
+    std::fs::write(&settings, good).unwrap();
+    let out = sb.ok(&["target", "remove", "claude"]);
+    assert!(out.contains("still used by target `cursor`"), "{out}");
+    sb.ok(&["clean"]);
+    assert!(!copied.exists(), "fresh cleaned through cursor");
+}
+
 /// Ownership is claimed name by name as the vendor reaches each entry: when
 /// removing an earlier entry fails (`a`, which can't be deleted), a later
 /// requested name the vendor never reached — the user's own `mine` — is not
