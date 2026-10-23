@@ -116,10 +116,13 @@ is written:
 - `--protocol` and `--protocol-fallback` can't bypass the policy: the URL you
   wrote **and** every rewritten URL actually contacted must be allowed.
 - While a policy is in force git does not follow HTTP redirects
-  (`http.followRedirects=false`, overriding your git config), so an allowed URL
-  can't redirect to a host or namespace the policy never judged. The same
-  setting stops git from following a dumb-HTTP server's
-  `objects/info/http-alternates`. Without a policy, both behave as before.
+  (`http.followRedirects=false`), so an allowed URL can't redirect to a host or
+  namespace the policy never judged. The same setting stops git from following
+  a dumb-HTTP server's `objects/info/http-alternates`. spm pins it for the exact
+  URL being contacted, so it overrides your git config — including URL-scoped
+  `http.<url>.followRedirects` entries — and checks the value git will actually
+  use; if it still can't turn redirects off for a URL, it refuses to contact it.
+  Without a policy, redirects and alternates behave as before.
 
 Git's own URL rewriting in your git config (`url.<base>.insteadOf`) is machine
 configuration, trusted like the policy file itself; spm judges the URL as written

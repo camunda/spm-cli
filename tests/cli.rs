@@ -8031,42 +8031,89 @@ fn local_http_command(sb: &Sandbox, args: &[&str]) -> Command {
 #[test]
 fn policy_blocks_http_redirects_to_unchecked_destinations() {
     let (port, seen) = redirecting_http_server();
-    let url = format!("http://127.0.0.1:{port}/allowed/skill.git");
-    let run = |sb: &Sandbox| {
-        local_http_command(sb, &["add", &url, "--branch", "main"])
-            .output()
-            .unwrap()
-    };
-    let denied_hits = || {
+    let base = format!("http://127.0.0.1:{port}/allowed/");
+    let url = format!("{base}skill.git");
+    let hits = |prefix: &str| {
         seen.lock()
             .unwrap()
             .iter()
-            .filter(|p| p.starts_with("/denied/"))
+            .filter(|p| p.starts_with(prefix))
             .count()
     };
+    let policy_sandbox = || {
+        let sb = Sandbox::new();
+        sb.ok(&["init", "--target", "claude"]);
+        set_project_policy(&sb, &[&format!("127.0.0.1:{port}/allowed/*")]);
+        sb
+    };
 
-    // With a policy allowing only `/allowed/*`: the redirect is not followed.
-    let sb = Sandbox::new();
-    sb.ok(&["init", "--target", "claude"]);
-    set_project_policy(&sb, &[&format!("127.0.0.1:{port}/allowed/*")]);
-    let out = run(&sb);
+    // With a policy allowing only `/allowed/*` the redirect is not followed,
+    // even when the user's git config turns redirects on — generically or for
+    // a URL prefix / the exact URL, which git would otherwise prefer over a
+    // generic setting.
+    for user_key in [
+        None,
+        Some("http.followRedirects".to_string()),
+        Some(format!("http.{base}.followRedirects")),
+        Some(format!("http.{url}.followRedirects")),
+    ] {
+        let sb = policy_sandbox();
+        seen.lock().unwrap().clear();
+        let mut cmd = local_http_command(&sb, &["add", &url, "--branch", "main"]);
+        if let Some(key) = &user_key {
+            with_user_git_config(&mut cmd, key, "true");
+        }
+        let out = cmd.output().unwrap();
+        assert!(!out.status.success(), "{user_key:?}");
+        assert!(
+            hits("/allowed/") > 0,
+            "{user_key:?}: the allowed URL was contacted: {}",
+            stderr_of(&out)
+        );
+        assert_eq!(hits("/denied/"), 0, "{user_key:?}: {}", stderr_of(&out));
+    }
+
+    // A URL `-c` can't pin (it contains `=`): fine without a conflicting
+    // setting, refused before any request when the user's config enables
+    // redirects for it.
+    let eq_url = format!("{base}a=b.git");
+    let sb = policy_sandbox();
+    seen.lock().unwrap().clear();
+    let out = local_http_command(&sb, &["add", &eq_url, "--branch", "main"])
+        .output()
+        .unwrap();
     assert!(!out.status.success());
+    assert!(hits("/allowed/") > 0, "{}", stderr_of(&out));
+    assert_eq!(hits("/denied/"), 0, "{}", stderr_of(&out));
+    let sb = policy_sandbox();
+    seen.lock().unwrap().clear();
+    let mut cmd = local_http_command(&sb, &["add", &eq_url, "--branch", "main"]);
+    with_user_git_config(&mut cmd, &format!("http.{base}.followRedirects"), "true");
+    let out = cmd.output().unwrap();
+    assert!(!out.status.success());
+    let err = stderr_of(&out);
     assert!(
-        seen.lock()
-            .unwrap()
-            .iter()
-            .any(|p| p.starts_with("/allowed/")),
-        "the allowed URL was contacted: {}",
-        stderr_of(&out)
+        err.contains("refusing to contact") && err.contains("followRedirects"),
+        "{err}"
     );
-    assert_eq!(denied_hits(), 0, "{}", stderr_of(&out));
+    assert!(seen.lock().unwrap().is_empty(), "{err}");
 
     // No policy: unchanged behavior, git follows the redirect.
     let sb = Sandbox::new();
     sb.ok(&["init", "--target", "claude"]);
-    let out = run(&sb);
+    let out = local_http_command(&sb, &["add", &url, "--branch", "main"])
+        .output()
+        .unwrap();
     assert!(!out.status.success(), "the redirect target is a 404");
-    assert!(denied_hits() > 0, "{}", stderr_of(&out));
+    assert!(hits("/denied/") > 0, "{}", stderr_of(&out));
+}
+
+/// Simulate a setting in the user's own git config (environment config sits
+/// above the global/system files, like a user's `~/.gitconfig` entry would).
+fn with_user_git_config(cmd: &mut Command, key: &str, value: &str) {
+    cmd.env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", key)
+        .env("GIT_CONFIG_VALUE_0", value);
 }
 
 /// Dumb-HTTP `objects/info/http-alternates` are another way for a server to
@@ -8141,13 +8188,10 @@ fn policy_blocks_dumb_http_alternates_to_unchecked_destinations() {
     )
     .unwrap();
     let url = format!("http://127.0.0.1:{port}/allowed/repo.git");
-    let run = |sb: &Sandbox| {
-        local_http_command(sb, &["add", &url, "--branch", "main", "--name", "greet"])
-            .env("GIT_CONFIG_COUNT", "1")
-            .env("GIT_CONFIG_KEY_0", "http.followRedirects")
-            .env("GIT_CONFIG_VALUE_0", "true")
-            .output()
-            .unwrap()
+    let run = |sb: &Sandbox, key: &str| {
+        let mut cmd = local_http_command(sb, &["add", &url, "--branch", "main", "--name", "greet"]);
+        with_user_git_config(&mut cmd, key, "true");
+        cmd.output().unwrap()
     };
     let denied_hits = || {
         seen.lock()
@@ -8159,24 +8203,31 @@ fn policy_blocks_dumb_http_alternates_to_unchecked_destinations() {
 
     // Sanity: with no policy the alternate is followed and the add succeeds.
     sb.ok(&["init", "--target", "claude"]);
-    let out = run(&sb);
+    let out = run(&sb, "http.followRedirects");
     assert!(out.status.success(), "{}", stderr_of(&out));
     assert!(denied_hits() > 0);
 
-    // Under a policy allowing only `/allowed/*`, the alternate is never used.
-    let sb = Sandbox::new();
-    sb.ok(&["init", "--target", "claude"]);
-    set_project_policy(&sb, &[&format!("127.0.0.1:{port}/allowed/*")]);
-    seen.lock().unwrap().clear();
-    let out = run(&sb);
-    assert!(!out.status.success());
-    assert!(
-        seen.lock()
-            .unwrap()
-            .iter()
-            .any(|p| p.starts_with("/allowed/")),
-        "{}",
-        stderr_of(&out)
-    );
-    assert_eq!(denied_hits(), 0, "{}", stderr_of(&out));
+    // Under a policy allowing only `/allowed/*` the alternate is never used,
+    // whether the user enables redirects generically or just for this URL.
+    for key in [
+        "http.followRedirects".to_string(),
+        format!("http.http://127.0.0.1:{port}/allowed/.followRedirects"),
+        format!("http.{url}.followRedirects"),
+    ] {
+        let sb = Sandbox::new();
+        sb.ok(&["init", "--target", "claude"]);
+        set_project_policy(&sb, &[&format!("127.0.0.1:{port}/allowed/*")]);
+        seen.lock().unwrap().clear();
+        let out = run(&sb, &key);
+        assert!(!out.status.success(), "{key}");
+        assert!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|p| p.starts_with("/allowed/")),
+            "{key}: {}",
+            stderr_of(&out)
+        );
+        assert_eq!(denied_hits(), 0, "{key}: {}", stderr_of(&out));
+    }
 }

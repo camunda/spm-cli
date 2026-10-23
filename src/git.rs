@@ -110,19 +110,68 @@ fn git_command(args: &[&str]) -> Command {
 }
 
 fn git(args: &[&str], cwd: Option<&Path>) -> Result<String> {
-    run_git(args, cwd, false)
+    run_git(&[], args, cwd, false)
 }
 
 /// Like [`git`], but tags any failure as a *remote-stage* failure so the
 /// transport fallback classifier may consider it (see
 /// [`is_connectivity_failure`]). Use only for commands that actually contact
 /// the remote — `ls-remote` and `fetch` — never for local store/config steps.
-fn git_remote(args: &[&str], cwd: Option<&Path>) -> Result<String> {
-    run_git(args, cwd, true)
+/// `url` is the remote being contacted (for `fetch`, what `origin` points at).
+fn git_remote(url: &str, args: &[&str], cwd: Option<&Path>) -> Result<String> {
+    let pin = redirect_pin(url, cwd)?;
+    let pin: Vec<&str> = pin.iter().map(String::as_str).collect();
+    run_git(&pin, args, cwd, true)
 }
 
-fn run_git(args: &[&str], cwd: Option<&Path>, remote: bool) -> Result<String> {
-    let mut cmd = git_command(args);
+/// Under a source policy, make sure git won't follow HTTP redirects (or
+/// dumb-HTTP `http-alternates`, which git gates on the same setting) for `url`.
+///
+/// The generic `-c http.followRedirects=false` from [`git_command`] loses to a
+/// URL-scoped `http.<url>.followRedirects` in the user's git config, because
+/// git applies the most specific URL match. So pin the key for this exact URL
+/// (no config entry can match it more specifically, and command-line config
+/// wins ties), then ask git for the value it will actually use and refuse
+/// unless it is `false` — that also covers a URL `-c` can't carry (one with
+/// `=`, which ends a `-c` key). Returns the extra `-c` arguments to pass.
+fn redirect_pin(url: &str, cwd: Option<&Path>) -> Result<Vec<String>> {
+    let http = url.split_once("://").is_some_and(|(scheme, _)| {
+        matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https")
+    });
+    if !http || !crate::policy::restricts() {
+        return Ok(Vec::new());
+    }
+    let mut pin = Vec::new();
+    if !url.contains('=') {
+        pin.push("-c".to_string());
+        pin.push(format!("http.{url}.followRedirects=false"));
+    }
+    let mut args: Vec<&str> = pin.iter().map(String::as_str).collect();
+    args.extend([
+        "config",
+        "--bool",
+        "--get-urlmatch",
+        "http.followRedirects",
+        url,
+    ]);
+    let mut cmd = git_command(&args);
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+    let out = cmd.output().context("failed to spawn `git config`")?;
+    if !out.status.success() || String::from_utf8_lossy(&out.stdout).trim() != "false" {
+        bail!(
+            "refusing to contact {url}: a source policy is in force, but git config enables \
+             `http.followRedirects` for this URL and spm can't override it; remove that setting \
+             (see `git config --get-urlmatch http.followRedirects {url}`)"
+        );
+    }
+    Ok(pin)
+}
+
+fn run_git(pre: &[&str], args: &[&str], cwd: Option<&Path>, remote: bool) -> Result<String> {
+    let full: Vec<&str> = pre.iter().chain(args).copied().collect();
+    let mut cmd = git_command(&full);
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
@@ -367,7 +416,7 @@ pub fn ls_remote(url: &str, refspecs: &[&str]) -> Result<String> {
 fn ls_remote_once(url: &str, refspecs: &[&str]) -> Result<String> {
     let mut args = vec!["ls-remote", url];
     args.extend_from_slice(refspecs);
-    let out = git_remote(&args, None)?;
+    let out = git_remote(url, &args, None)?;
     if out.is_empty() {
         bail!("ref `{}` not found in {url}", refspecs.join(" "));
     }
@@ -402,7 +451,7 @@ pub fn remote_refs(url: &str, refspecs: &[&str]) -> Result<BTreeMap<String, Stri
     with_transport(transport(), url, |u| {
         let mut args = vec!["ls-remote", u];
         args.extend_from_slice(refspecs);
-        Ok(parse_ref_shas(&git_remote(&args, None)?))
+        Ok(parse_ref_shas(&git_remote(u, &args, None)?))
     })
 }
 
@@ -439,7 +488,7 @@ pub fn default_branch(url: &str) -> Result<String> {
 }
 
 fn default_branch_once(url: &str) -> Result<String> {
-    git_remote(&["ls-remote", "--symref", url, "HEAD"], None)
+    git_remote(url, &["ls-remote", "--symref", url, "HEAD"], None)
 }
 
 /// Extract the branch name from the `ref: refs/heads/<name>\tHEAD` line that
@@ -481,8 +530,9 @@ fn fetch_commit_once(url: &str, sha: &str, dest: &Path) -> Result<()> {
         git(&["remote", "set-url", "origin", url], Some(dest))?;
     }
 
-    if git_remote(&["fetch", "--depth", "1", "origin", sha], Some(dest)).is_err() {
-        git_remote(&["fetch", "origin"], Some(dest)).with_context(|| format!("fetching {url}"))?;
+    if git_remote(url, &["fetch", "--depth", "1", "origin", sha], Some(dest)).is_err() {
+        git_remote(url, &["fetch", "origin"], Some(dest))
+            .with_context(|| format!("fetching {url}"))?;
     }
     git(&["checkout", "--detach", sha], Some(dest))
         .with_context(|| format!("checking out {sha} in {}", dest.display()))?;
