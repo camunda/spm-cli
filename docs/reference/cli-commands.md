@@ -230,8 +230,9 @@ spm install                               # re-run after further edits
 Drops a link (or, with `--all`, every link in the scope) and re-materializes
 the locked version from `ai.lock`. `ai.json` and `ai.lock` are untouched. The
 dropped working copy stays protected: if a target's output has come to overlap
-it (e.g. through a symlink), `unlink` refuses instead of risking deleting it —
-remove the overlap and retry.
+it (e.g. through a symlink), `unlink` — like `clean` and `target remove`, which
+apply the same check to every recorded link — refuses instead of risking
+deleting it; remove the overlap and retry.
 
 ### `spm install`
 

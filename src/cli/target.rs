@@ -135,8 +135,21 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
             }
         }
     }
-    for t in &removed {
-        let v = vendor::for_target(t)?;
+    // Neither the deletions nor the settings/`ai.json` writes below may touch a
+    // linked working copy.
+    let removed_vendors = removed
+        .iter()
+        .map(|t| vendor::for_target(t))
+        .collect::<Result<Vec<_>>>()?;
+    super::sync::guard_working_copies(
+        scope,
+        &dir,
+        &removed_vendors,
+        &Default::default(),
+        &managed,
+        &managed_plugins,
+    )?;
+    for v in &removed_vendors {
         let mut candidates = v.clean_paths(scope, &managed)?;
         candidates.extend(v.plugin_clean_paths(scope, &managed_plugins)?);
         let mut deletable = Vec::new();

@@ -571,28 +571,11 @@ fn plan(
         .map(|p| p.name.clone())
         .chain(previously_managed_plugins.iter().cloned())
         .collect();
-    // Guard the working copy of every link — active ones, and any the links
-    // file on disk still records (one being dropped by `spm unlink`, re-pointed
-    // by `spm link`, or ignored as undeclared): it is still the user's data
-    // even when spm no longer copies from it. A recorded dir that is gone has
-    // nothing left to protect.
-    let mut guarded: Vec<(&str, std::path::PathBuf, &str, bool)> = linked
-        .iter()
-        .map(|(n, l)| (n.as_str(), l.dir.clone(), l.display.as_str(), true))
-        .collect();
-    let on_disk = Links::load(scope).unwrap_or_default();
-    for name in on_disk.links.keys() {
-        if let Ok(Some(l)) = on_disk.resolve(scope, name) {
-            if !guarded.iter().any(|(_, d, ..)| *d == l.dir) {
-                guarded.push((name, l.dir, on_disk.links[name].as_str(), false));
-            }
-        }
-    }
-    reject_link_overlaps(
+    guard_working_copies(
         scope,
         &dir,
         &vendors,
-        &guarded,
+        &linked,
         &output_skills,
         &output_plugins,
     )?;
@@ -711,6 +694,36 @@ fn resolve_links(
     Ok(out)
 }
 
+/// Before `vendors` write or delete anything for `skills`/`plugins`, reject
+/// any overlap with a linked working copy: each `active` link, plus every one
+/// the links file on disk still records (one being dropped by `spm unlink`,
+/// re-pointed by `spm link`, or ignored as undeclared) — it is still the
+/// user's data even when spm no longer copies from it. A recorded dir that is
+/// gone has nothing left to protect. Every command that writes target output
+/// or deletes it (`sync`, `clean`, `target remove`) must call this first.
+pub(super) fn guard_working_copies(
+    scope: &Scope,
+    manifest_dir: &std::path::Path,
+    vendors: &[Box<dyn Vendor>],
+    active: &BTreeMap<String, Linked>,
+    skills: &[String],
+    plugins: &[String],
+) -> Result<()> {
+    let mut guarded: Vec<(&str, PathBuf, &str, bool)> = active
+        .iter()
+        .map(|(n, l)| (n.as_str(), l.dir.clone(), l.display.as_str(), true))
+        .collect();
+    let on_disk = Links::load(scope).unwrap_or_default();
+    for name in on_disk.links.keys() {
+        if let Ok(Some(l)) = on_disk.resolve(scope, name) {
+            if !guarded.iter().any(|(_, d, ..)| *d == l.dir) {
+                guarded.push((name, l.dir, on_disk.links[name].as_str(), false));
+            }
+        }
+    }
+    reject_link_overlaps(scope, manifest_dir, vendors, &guarded, skills, plugins)
+}
+
 /// Reject a linked working copy that overlaps any location a target writes or
 /// deletes. A source inside the output (e.g. linking Codex's own
 /// `.agents/skills/<name>`) would be wiped before it is copied — losing
@@ -787,7 +800,7 @@ fn reject_link_overlaps(
             String::new()
         };
         bail!(
-            "{clash}; refusing to sync, as that could modify or delete the working copy — \
+            "{clash}; refusing to continue, as that could modify or delete the working copy — \
              {relink}remove whatever makes them overlap (e.g. a symlink) and retry"
         );
     }

@@ -10206,7 +10206,7 @@ fn unlink_still_protects_the_dropped_working_copy() {
     assert!(fails(&sb, &["install"]).contains("overlaps"));
     let err = fails(&sb, &["unlink", "greet"]);
     assert!(err.contains("overlaps"), "{err}");
-    assert!(err.contains("refusing to sync"), "{err}");
+    assert!(err.contains("refusing to continue"), "{err}");
     assert!(read_path(&wc.join("SKILL.md")).contains("WIP"), "wiped");
     assert!(sb.read(".spm/links.json").contains("greet"), "link dropped");
 
@@ -10214,4 +10214,53 @@ fn unlink_still_protects_the_dropped_working_copy() {
     sb.ok(&["unlink", "greet"]);
     assert!(read_path(&wc.join("SKILL.md")).contains("WIP"));
     assert!(read_path(&skills.join("spm-managed-skills/greet/SKILL.md")).contains("Greet warmly."));
+}
+
+/// `clean` and `target remove` delete target output too, so they share the
+/// linked-working-copy guard: when output has come to overlap a linked dir,
+/// they refuse before deleting or writing anything.
+#[cfg(unix)]
+#[test]
+fn clean_and_target_remove_never_delete_a_linked_working_copy() {
+    for cmd in [&["clean"][..], &["target", "remove", "copilot"][..]] {
+        let sb = Sandbox::new();
+        sb.ok(&["init", "--target", "copilot,claude"]);
+        sb.ok(&[
+            "add",
+            &sb.skill_url(),
+            "--branch",
+            "main",
+            "--name",
+            "greet",
+        ]);
+        let wc = sb.root.join("wc/spm-managed-skills");
+        std::fs::create_dir_all(&wc).unwrap();
+        std::fs::write(wc.join("SKILL.md"), "---\nname: greet\n---\nWIP\n").unwrap();
+        sb.ok(&["link", "greet", "../wc/spm-managed-skills"]);
+        let skills = sb.project.join(".agents/skills");
+        std::fs::remove_dir_all(&skills).unwrap();
+        symlink(sb.root.join("wc"), &skills);
+        let (manifest, settings) = (
+            snapshot(&sb, "ai.json").unwrap(),
+            snapshot(&sb, ".claude/settings.local.json").unwrap(),
+        );
+
+        let err = fails(&sb, cmd);
+        assert!(err.contains("overlaps"), "{cmd:?}: {err}");
+        assert!(
+            read_path(&wc.join("SKILL.md")).contains("WIP"),
+            "{cmd:?} wiped the working copy"
+        );
+        assert_eq!(snapshot(&sb, "ai.json").unwrap(), manifest, "{cmd:?}");
+        assert_eq!(
+            snapshot(&sb, ".claude/settings.local.json").unwrap(),
+            settings,
+            "{cmd:?}"
+        );
+        assert!(sb.claude_market_dir().exists(), "{cmd:?} cleaned claude");
+
+        std::fs::remove_file(&skills).unwrap();
+        sb.ok(cmd);
+        assert!(read_path(&wc.join("SKILL.md")).contains("WIP"));
+    }
 }

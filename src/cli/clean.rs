@@ -12,8 +12,20 @@ pub(super) fn clean(scope: &Scope) -> Result<()> {
     let manifest = Manifest::load(&dir, scope)?;
     let lock = Lockfile::load_or_default(&dir)?;
     let (managed, managed_plugins) = managed_names(&lock, &Links::load(scope)?);
-    for target in &manifest.targets {
-        let vendor = vendor::for_target(target)?;
+    let vendors = manifest
+        .targets
+        .iter()
+        .map(|t| vendor::for_target(t))
+        .collect::<Result<Vec<_>>>()?;
+    super::sync::guard_working_copies(
+        scope,
+        &dir,
+        &vendors,
+        &Default::default(),
+        &managed,
+        &managed_plugins,
+    )?;
+    for vendor in &vendors {
         vendor.clean(scope, &managed)?;
         vendor.clean_plugins(scope, &managed_plugins)?;
     }
