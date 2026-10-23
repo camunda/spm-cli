@@ -11413,12 +11413,18 @@ fn link_queued_behind_remove_sees_the_removal() {
 /// it, every command that would write them refuses, leaving the links intact.
 #[test]
 fn patched_files_aliased_to_the_links_file_are_rejected() {
+    // By a symlink, and by a hard link (no path relation at all; Unix only, as
+    // Windows has no std file ids).
+    let kinds: &[bool] = if cfg!(unix) { &[false, true] } else { &[false] };
     // Each with a target whose removal patches it (spm's `.gitignore` is
     // always patched).
-    for (alias, removed) in [
-        (".gitignore", "copilot"),
-        (".claude/settings.local.json", "claude"),
-    ] {
+    for (&hard, (alias, removed)) in kinds.iter().flat_map(|h| {
+        [
+            (".gitignore", "copilot"),
+            (".claude/settings.local.json", "claude"),
+        ]
+        .map(|a| (h, a))
+    }) {
         let sb = Sandbox::new();
         sb.ok(&["init", "--target", "copilot,claude"]);
         sb.ok(&[
@@ -11435,7 +11441,11 @@ fn patched_files_aliased_to_the_links_file_are_rejected() {
         let before = read_path(&links_file);
         let aliased = sb.project.join(alias);
         std::fs::remove_file(&aliased).unwrap();
-        symlink(&links_file, &aliased);
+        if hard {
+            std::fs::hard_link(&links_file, &aliased).unwrap();
+        } else {
+            symlink(&links_file, &aliased);
+        }
         for args in [
             &["install"][..],
             &["update"],
@@ -11446,9 +11456,13 @@ fn patched_files_aliased_to_the_links_file_are_rejected() {
             let err = fails(&sb, args);
             assert!(
                 err.contains("is the same file as"),
-                "{alias} {args:?}: {err}"
+                "{alias} hard={hard} {args:?}: {err}"
             );
-            assert_eq!(read_path(&links_file), before, "{alias} {args:?}");
+            assert_eq!(
+                read_path(&links_file),
+                before,
+                "{alias} hard={hard} {args:?}"
+            );
         }
     }
 }

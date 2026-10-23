@@ -209,7 +209,8 @@ spm install                               # re-run after further edits
 - A linked entry is copied from the directory (skipping `.git`; symlinks may
   not escape the directory) and still passes the
   [content scan](/guide/how-it-works). Each sync first snapshots it into a
-  temporary directory and scans and materializes that snapshot, so edits made
+  private temporary directory (owner-only on Unix, one numbered slot per link)
+  and scans and materializes that snapshot, so edits made
   while the sync runs can't reach a target unscanned (a directory containing
   that temporary directory can't be linked). It is not fetched into the store; with
   `"resolveTransitive": true` its transitive dependencies still come from its
@@ -233,7 +234,7 @@ spm install                               # re-run after further edits
   a global link (or another project's) pointing into this project's output
   makes this project's syncs, `clean` and `target remove` refuse until it is
   unlinked where it was linked. Neither may a file spm or a target patches in
-  place (e.g. `.gitignore`, Claude's settings) be a symlink to a links file.
+  place (e.g. `.gitignore`, Claude's settings) be a symlink or (on Unix) a hard link to a links file.
   These checks hold even when the linked directory has since been deleted, and
   they can't race: `link`/`unlink` serialize with every command that rewrites
   target output via a machine-wide lock (`$SPM_HOME/links.lock`), and commands

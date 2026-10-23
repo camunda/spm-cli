@@ -186,12 +186,26 @@ impl Snapshots {
             .map(|d| d.as_nanos())
             .unwrap_or_default();
         let root = std::env::temp_dir().join(format!("spm-links-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(&root).with_context(|| format!("creating {}", root.display()))?;
+        // A fresh directory only its owner can enter: the copies may come from
+        // a working copy other users can't read.
+        let builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        let builder = {
+            let mut b = builder;
+            std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
+            b
+        };
+        builder
+            .create(&root)
+            .with_context(|| format!("creating {}", root.display()))?;
         let snapshots = Self {
             root: std::fs::canonicalize(&root)
                 .with_context(|| format!("resolving {}", root.display()))?,
         };
-        for (name, l) in linked.iter_mut() {
+        // Numbered slots, not names: names that differ only in case (e.g. a
+        // skill `Foo` and a plugin `foo`) must not share one on a
+        // case-insensitive filesystem.
+        for (slot, (name, l)) in linked.iter_mut().enumerate() {
             if crate::fsutil::contains(&l.dir, &snapshots.root) {
                 bail!(
                     "linked directory `{}` for `{name}` contains spm's temporary directory \
@@ -200,7 +214,7 @@ impl Snapshots {
                     snapshots.root.display()
                 );
             }
-            let content = snapshots.root.join(name);
+            let content = snapshots.root.join(slot.to_string());
             crate::fsutil::copy_tree(&l.dir, &content, &l.dir)
                 .with_context(|| format!("snapshotting linked `{name}` ({})", l.display))?;
             l.content = content;
@@ -979,15 +993,27 @@ fn reject_link_overlaps(
         for h in &hops {
             state.push(identity(h)?);
         }
-        if let Some((owner, p, _, through)) = outputs.iter().find(|(_, p, out, through)| {
-            (!through || p != links_file) && state.iter().any(|s| s.starts_with(out))
-        }) {
-            let (relation, effect) = if *through {
+        // A hard link shares no path component with the links file, so only
+        // the files' own identities show it.
+        let hit = outputs
+            .iter()
+            .find(|(_, p, out, through)| {
+                (!through || p != links_file) && state.iter().any(|s| s.starts_with(out))
+            })
+            .map(|(owner, p, _, through)| (*owner, p.as_path(), *through))
+            .or_else(|| {
+                patched
+                    .iter()
+                    .find(|(_, p)| p != links_file && same_file(p, links_file))
+                    .map(|(owner, p)| (*owner, p.as_path(), true))
+            });
+        if let Some((owner, p, through)) = hit {
+            let (relation, effect) = if through {
                 ("is the same file as", "writes in place")
             } else {
                 ("lies inside", "writes or deletes")
             };
-            let owner = if *owner == "spm" {
+            let owner = if owner == "spm" {
                 "spm".to_string()
             } else {
                 format!("target `{owner}`")
@@ -1145,6 +1171,23 @@ fn hard_linked_into<'a>(
     Ok(None)
 }
 
+/// Whether `a` and `b` are the same existing file, however reached (a symlink
+/// or a hard link). Windows has no stable std API for file ids, so there only
+/// the path checks apply.
+#[cfg(unix)]
+fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn same_file(_a: &std::path::Path, _b: &std::path::Path) -> bool {
+    false
+}
+
 #[cfg(not(unix))]
 fn hard_linked_into<'a>(
     _dir: &std::path::Path,
@@ -1280,4 +1323,70 @@ fn reject_case_folding_collisions<'a>(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fresh source dir under the system temp dir holding `files`.
+    fn source(label: &str, files: &[(&str, &str)]) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("spm-snapshot-src-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for (rel, body) in files {
+            let p = dir.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        }
+        std::fs::canonicalize(dir).unwrap()
+    }
+
+    fn linked(dir: &std::path::Path) -> Linked {
+        Linked {
+            dir: dir.to_path_buf(),
+            content: dir.to_path_buf(),
+            display: dir.display().to_string(),
+        }
+    }
+
+    /// Each link gets its own slot, even when names only differ in case (a
+    /// skill `Foo` and a plugin `foo`), which would share a directory on a
+    /// case-insensitive filesystem; the root is private and removed on drop.
+    #[test]
+    fn snapshots_are_private_distinct_and_temporary() {
+        let skill = source("skill", &[("SKILL.md", "skill")]);
+        let plugin = source("plugin", &[(".claude-plugin/plugin.json", "{}")]);
+        let mut map = BTreeMap::from([
+            ("Foo".to_string(), linked(&skill)),
+            ("foo".to_string(), linked(&plugin)),
+        ]);
+        let snapshots = Snapshots::take(&mut map).unwrap().unwrap();
+        let (s, p) = (&map["Foo"].content, &map["foo"].content);
+        assert_eq!(
+            std::fs::read_to_string(s.join("SKILL.md")).unwrap(),
+            "skill"
+        );
+        assert!(
+            !s.join(".claude-plugin").exists(),
+            "plugin merged into skill"
+        );
+        assert!(!p.join("SKILL.md").exists(), "skill merged into plugin");
+        assert!(p.join(".claude-plugin/plugin.json").is_file());
+        assert_eq!(map["Foo"].dir, skill, "the working copy stays protected");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&snapshots.root)
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+        let root = snapshots.root.clone();
+        drop(snapshots);
+        assert!(!root.exists());
+        std::fs::remove_dir_all(skill).unwrap();
+        std::fs::remove_dir_all(plugin).unwrap();
+    }
 }
