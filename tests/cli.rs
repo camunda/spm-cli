@@ -13856,6 +13856,16 @@ fn doctor_flags_a_dangling_store_symlink() {
     assert!(c["fix"].as_str().unwrap().contains("remove"), "{c}");
     let out = sb.spm(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
     assert!(!out.status.success());
+
+    // A dangling ancestor (here SPM_HOME itself) blocks creating the store too.
+    std::fs::remove_dir_all(&sb.spm_home).unwrap();
+    std::os::unix::fs::symlink(sb.root.join("gone"), &sb.spm_home).unwrap();
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(!ok, "{doc:#}");
+    let c = check(&doc, "store", "error");
+    assert!(c["fix"].as_str().unwrap().contains("remove"), "{c}");
+    let out = sb.spm(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    assert!(!out.status.success());
 }
 
 /// A regular file as SPM_HOME can't hold a store, however permissive.
@@ -14126,6 +14136,33 @@ fn doctor_compares_skill_entries_exactly_when_only_a_plugin_is_not_in_the_store(
     }
 }
 
+/// An unwalked subtree can only add to entries, never change the lock's outer
+/// shape, so the partial comparison must still reject a stray top-level field.
+#[test]
+fn doctor_rejects_extra_top_level_lock_fields_when_a_root_is_not_in_the_store() {
+    let sb = Sandbox::new();
+    let alpha = transitive_root(&sb, "alpha");
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{"alpha":{{"git":"{alpha}","branch":"main"}}}}}}"#
+        ),
+    );
+    sb.ok(&["install"]);
+    remove_store_checkout(&sb, "alpha-");
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(ok, "only unverified: {doc:#}");
+    check(&doc, "lockfile", "warn");
+
+    edit_lock(&sb, |l| l["metadata"] = serde_json::json!(true));
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(!ok, "{doc:#}");
+    let c = check(&doc, "lockfile", "error");
+    assert!(c["details"].to_string().contains("metadata"), "{c}");
+    assert!(!sb.spm(&["install", "--locked"]).status.success());
+}
+
 #[test]
 fn doctor_flags_missing_stale_and_unloadable_skills() {
     let sb = Sandbox::new();
@@ -14217,6 +14254,49 @@ fn doctor_checks_gitignore_for_an_empty_claude_install() {
     assert!(ok, "{doc:#}");
     let c = check(&doc, "gitignore", "warn");
     assert_eq!(c["details"], serde_json::json!(["claude: .spm/"]), "{c}");
+}
+
+/// The entries being present isn't enough: a later re-include rule, or a
+/// managed file committed anyway, still exposes spm's output to git — and
+/// `spm install` can't fix either.
+#[test]
+fn doctor_flags_spm_output_that_git_would_still_commit() {
+    let sb = Sandbox::new();
+    git_in(&sb.project, &["init", "-q"]);
+    sb.ok(&["init", "--target", "claude,gemini"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let ignored = sb.read(".gitignore") + ".claude/settings.local.json\n";
+    std::fs::write(sb.project.join(".gitignore"), &ignored).unwrap();
+    let all_ok =
+        |doc: &serde_json::Value| checks(doc, "gitignore").iter().all(|c| c["status"] == "ok");
+    let (_, doc) = doctor(&sb, &[]);
+    assert!(all_ok(&doc), "{doc:#}");
+
+    std::fs::write(sb.project.join(".gitignore"), ignored.clone() + "!.spm/\n").unwrap();
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(ok, "{doc:#}");
+    let c = check(&doc, "gitignore", "warn");
+    assert!(c["details"].to_string().contains("claude: .spm"), "{c}");
+    assert!(c["fix"].as_str().unwrap().contains(".gitignore"), "{c}");
+    std::fs::write(sb.project.join(".gitignore"), &ignored).unwrap();
+
+    git_in(&sb.project, &["add", "-f", ".gemini/skills/greet/SKILL.md"]);
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(ok, "{doc:#}");
+    let c = check(&doc, "gitignore", "warn");
+    assert!(
+        c["details"]
+            .to_string()
+            .contains("gemini: .gemini/skills/greet"),
+        "{c}"
+    );
+    assert_eq!(c["fix"], "git rm -r --cached .gemini/skills/greet", "{c}");
+    git_in(
+        &sb.project,
+        &["rm", "-r", "-q", "--cached", ".gemini/skills/greet"],
+    );
+    let (_, doc) = doctor(&sb, &[]);
+    assert!(all_ok(&doc), "{doc:#}");
 }
 
 /// Claude's settings.local.json holds a machine-specific path: flag it when

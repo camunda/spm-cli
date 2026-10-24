@@ -496,7 +496,8 @@ It checks:
 - **git** is installed (and its version) and the **store** (`$SPM_HOME/store`)
   is writable by you (asked of the OS, never by writing; not checked on
   Windows) — a store that doesn't exist yet is fine if it can be created, but
-  a dangling symlink in its place or a non-directory `SPM_HOME` is an error;
+  a dangling symlink in its place or on its path, or a non-directory
+  `SPM_HOME`, is an error;
 - **`ai.json`** exists, is valid and declares known **targets**;
 - the **source policy**: the machine policy (`SPM_POLICY` or
   `$SPM_HOME/policy.json`) parses, and every declared source, linked dir and
@@ -516,7 +517,9 @@ It checks:
   installing) and names [installed in both scopes](#scope-project-default-vs-global-g) are
   warnings;
 - project scope: the **`.gitignore`** entries `spm install` adds are present
-  (also after an install with nothing declared, e.g. Claude's empty marketplace), and
+  (also after an install with nothing declared, e.g. Claude's empty marketplace)
+  and actually apply — a later rule re-including the output (e.g. `!.spm/`) or
+  a committed file under it is a warning, with the fix — and
   `.claude/settings.local.json` (which holds a machine-specific path) is
   gitignored and not committed;
 - every installed skill has a **`SKILL.md` with `name` and `description`**

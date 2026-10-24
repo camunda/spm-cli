@@ -913,8 +913,27 @@ fn verified_lock_drift(
 ) -> Result<Vec<String>> {
     use serde_json::Value;
     let mut drift = Vec::new();
-    if on_disk.get("id").and_then(Value::as_str) != Some(lock.id.as_str()) {
-        drift.push("ai.lock project `id` differs from what spm would write".to_string());
+    // An unwalked subtree only adds entries: every other top-level field (the
+    // project `id`, any stray key) must match exactly.
+    let outer = |v: Value| -> serde_json::Map<String, Value> {
+        let mut fields = match v {
+            Value::Object(m) => m,
+            _ => serde_json::Map::new(),
+        };
+        fields.remove("skills");
+        fields.remove("plugins");
+        fields
+    };
+    let (ours, theirs) = (outer(serde_json::to_value(lock)?), outer(on_disk.clone()));
+    let mut keys: Vec<&String> = ours.keys().chain(theirs.keys()).collect();
+    keys.sort();
+    keys.dedup();
+    for key in keys {
+        if ours.get(key) != theirs.get(key) {
+            drift.push(format!(
+                "ai.lock top-level `{key}` differs from what spm would write"
+            ));
+        }
     }
     let unwalked = |r: &str| {
         unverified.iter().any(|u| u == r)

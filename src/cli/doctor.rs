@@ -273,26 +273,28 @@ fn check_store() -> Check {
     } else {
         ""
     };
-    if !store.exists() && std::fs::symlink_metadata(&store).is_ok() {
-        // Something (e.g. a dangling symlink) occupies the path, so install
-        // can't create the store there.
-        return Check::error(
-            "store",
-            format!(
-                "store {}{from} is a symlink that doesn't resolve",
-                store.display()
-            ),
-        )
-        .fix(format!(
-            "remove {} or point SPM_HOME elsewhere",
-            store.display()
-        ));
-    }
     if !store.exists() {
         // `spm install` creates it, if it can create it in its nearest
-        // existing ancestor.
-        let parent = store.ancestors().skip(1).find(|a| a.exists());
-        if let Some(parent) = parent {
+        // occupied ancestor (the store path itself may be occupied too).
+        let occupied = store
+            .ancestors()
+            .find(|a| std::fs::symlink_metadata(a).is_ok());
+        if let Some(parent) = occupied {
+            if !parent.exists() {
+                // Only a dangling symlink occupies a path that doesn't exist.
+                return Check::error(
+                    "store",
+                    format!(
+                        "store {}{from} can't be created: {} is a symlink that doesn't resolve",
+                        store.display(),
+                        parent.display()
+                    ),
+                )
+                .fix(format!(
+                    "remove {} or point SPM_HOME elsewhere",
+                    parent.display()
+                ));
+            }
             if !parent.is_dir() {
                 return Check::error(
                     "store",
@@ -617,6 +619,9 @@ fn check_gitignore(
 ) -> Vec<Check> {
     let mut checks = Vec::new();
     let mut missing = Vec::new();
+    // Output git would still pick up despite the entries: re-included by a
+    // later rule, or committed (ignore rules don't apply to tracked files).
+    let (mut exposed, mut tracked) = (Vec::new(), Vec::new());
     let mut relevant = false;
     let names: Vec<String> = report.expected.iter().map(|e| e.name.clone()).collect();
     let declares_any = !names.is_empty() || !report.plugins.is_empty();
@@ -645,19 +650,72 @@ fn check_gitignore(
         }
         relevant = true;
         let owned: Vec<String> = names.iter().cloned().chain(stale).collect();
-        match gitignore::missing(root, &v.gitignore_entries(&owned)) {
-            Ok(m) => missing.extend(m.into_iter().map(|e| format!("{target}: {e}"))),
-            Err(e) => missing.push(format!("{target}: {e:#}")),
+        let entries_present = match gitignore::missing(root, &v.gitignore_entries(&owned)) {
+            Ok(m) => {
+                let present = m.is_empty();
+                missing.extend(m.into_iter().map(|e| format!("{target}: {e}")));
+                present
+            }
+            Err(e) => {
+                missing.push(format!("{target}: {e:#}"));
+                false
+            }
+        };
+        let outputs = [
+            v.clean_paths(scope, &owned),
+            v.plugin_clean_paths(scope, &[]),
+        ]
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|p| p.exists());
+        for path in outputs {
+            let Ok(rel) = path.strip_prefix(root) else {
+                continue;
+            };
+            let rel = rel.to_string_lossy().replace('\\', "/");
+            if git::is_tracked(root, &rel) == Some(true) {
+                tracked.push((target.clone(), rel));
+            } else if entries_present && git::is_ignored(root, &format!("{rel}/")) == Some(false) {
+                exposed.push(format!("{target}: {rel}/"));
+            }
         }
     }
     if relevant {
-        checks.push(if missing.is_empty() {
-            Check::ok("gitignore", "spm's output is gitignored")
-        } else {
-            Check::warn("gitignore", ".gitignore is missing spm's entries")
-                .details(missing)
-                .fix(sync::install_command(scope))
-        });
+        if !missing.is_empty() {
+            checks.push(
+                Check::warn("gitignore", ".gitignore is missing spm's entries")
+                    .details(missing)
+                    .fix(sync::install_command(scope)),
+            );
+        }
+        if !exposed.is_empty() {
+            checks.push(
+                Check::warn("gitignore", "a .gitignore rule re-includes spm's output")
+                    .details(exposed)
+                    .fix("remove the .gitignore rule that re-includes it (e.g. `!.spm/`)"),
+            );
+        }
+        if !tracked.is_empty() {
+            // Targets sharing a dir report the same path; untrack it once.
+            let paths: Vec<&str> = tracked
+                .iter()
+                .map(|(_, p)| p.as_str())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            checks.push(
+                Check::warn(
+                    "gitignore",
+                    "spm's output is committed, so its .gitignore rules don't apply",
+                )
+                .details(tracked.iter().map(|(t, p)| format!("{t}: {p}")).collect())
+                .fix(format!("git rm -r --cached {}", paths.join(" "))),
+            );
+        }
+        if checks.is_empty() {
+            checks.push(Check::ok("gitignore", "spm's output is gitignored"));
+        }
     }
     // Claude's settings.local.json holds a machine-specific marketplace path.
     let settings = ".claude/settings.local.json";
