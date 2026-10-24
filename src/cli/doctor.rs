@@ -409,8 +409,8 @@ fn check_machine_policy() -> Check {
     }
 }
 
-/// Every declared source and linked dir against the effective policy — the
-/// same rule `spm install` enforces before contacting anything.
+/// Every declared source, linked dir and locked transitive source against the
+/// effective policy — the same rule `spm install` enforces before fetching.
 fn check_policy(root: &Path, manifest: &Manifest, links: &Links) -> Check {
     let policy = match Policy::load(manifest, &Manifest::path_in(root)) {
         Ok(p) => p,
@@ -424,7 +424,22 @@ fn check_policy(root: &Path, manifest: &Manifest, links: &Links) -> Check {
         .iter()
         .filter(|(n, _)| manifest.skills.contains_key(*n) || manifest.plugins.contains_key(*n))
         .map(|(n, p)| (n.as_str(), p.as_str()));
-    let denied = sync::denied_sources(manifest, &policy, declared);
+    let mut denied = sync::denied_sources(manifest, &policy, declared);
+    // `install --locked` fetches locked transitive pins once their root is,
+    // so they are gated too, even when doctor can't walk that root. An
+    // unreadable lock is reported by the lockfile check.
+    if let Ok(lock) = Lockfile::load_or_default(root) {
+        for (kind, entries) in [("skill", &lock.skills), ("plugin", &lock.plugins)] {
+            for (name, l) in entries {
+                if manifest.skills.contains_key(name) || manifest.plugins.contains_key(name) {
+                    continue;
+                }
+                if let Err(e) = policy.check(&l.git) {
+                    denied.push(format!("locked {kind} `{name}`: {e:#}"));
+                }
+            }
+        }
+    }
     if denied.is_empty() {
         Check::ok("policy", "every source is allowed by the source policy")
     } else {
@@ -464,15 +479,15 @@ fn check_links(scope: &Scope, manifest: &Manifest, links: Result<Links>) -> Vec<
                 Err(e) => Check::error("links", format!("{e:#}")).fix(unlink),
                 Ok(linked) => {
                     let display = linked.as_ref().map(|l| l.display.as_str()).unwrap_or("");
-                    // Resolving only canonicalizes it: install must also list
-                    // it and read inside it (`dir/.` needs search permission).
+                    // Resolving only canonicalizes it: install must also read
+                    // everything it snapshots, by the very same traversal.
                     match linked
                         .as_ref()
-                        .map(|l| std::fs::read_dir(&l.dir).and(std::fs::read_dir(l.dir.join("."))))
+                        .map(|l| crate::fsutil::check_readable(&l.dir, &l.dir))
                     {
                         Some(Err(e)) => Check::error(
                             "links",
-                            format!("`{name}` is linked to {display}, which can't be read: {e}"),
+                            format!("`{name}` is linked to {display}, which can't be read: {e:#}"),
                         )
                         .fix(format!("make {display} readable, or {unlink}")),
                         _ => Check::warn(

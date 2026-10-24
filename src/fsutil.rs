@@ -70,13 +70,55 @@ pub(crate) fn contains(boundary: &Path, candidate: &Path) -> bool {
 /// contains in-repo symlinks materializes identically. The containment check
 /// compares canonical paths, which is cross-platform safe.
 pub fn copy_tree(src: &Path, dst: &Path, boundary: &Path) -> Result<()> {
+    walk_tree(src, boundary, &mut |entry| match entry {
+        Entry::Dir(rel) => Ok(std::fs::create_dir_all(dst.join(rel))?),
+        Entry::File { from, rel } => {
+            std::fs::copy(from, dst.join(rel))?;
+            Ok(())
+        }
+    })
+}
+
+/// Check, without writing anything, that everything [`copy_tree`] would copy
+/// from `src` can be read: each directory listed and each file opened.
+pub fn check_readable(src: &Path, boundary: &Path) -> Result<()> {
+    walk_tree(src, boundary, &mut |entry| {
+        if let Entry::File { from, .. } = entry {
+            std::fs::File::open(from).with_context(|| format!("reading `{}`", from.display()))?;
+        }
+        Ok(())
+    })
+}
+
+/// What [`walk_tree`] reaches, with paths relative to the walk's root.
+pub enum Entry<'a> {
+    /// A directory to materialize (the root itself is `""`).
+    Dir(&'a Path),
+    /// A regular file to materialize, read from `from` (a symlink's target).
+    File { from: &'a Path, rel: &'a Path },
+}
+
+/// The single traversal behind [`copy_tree`] (see there for the rules:
+/// `.git` skipped, symlinks followed only inside `boundary`, cycles and
+/// non-regular files skipped).
+pub fn walk_tree(
+    src: &Path,
+    boundary: &Path,
+    visit: &mut dyn FnMut(Entry) -> Result<()>,
+) -> Result<()> {
     let boundary = std::fs::canonicalize(boundary)
         .with_context(|| format!("resolving checkout boundary `{}`", boundary.display()))?;
     let mut stack: Vec<PathBuf> = Vec::new();
-    copy_dir(src, dst, &boundary, &mut stack)
+    walk_dir(src, Path::new(""), &boundary, &mut stack, visit)
 }
 
-fn copy_dir(src: &Path, dst: &Path, boundary: &Path, stack: &mut Vec<PathBuf>) -> Result<()> {
+fn walk_dir(
+    src: &Path,
+    rel: &Path,
+    boundary: &Path,
+    stack: &mut Vec<PathBuf>,
+    visit: &mut dyn FnMut(Entry) -> Result<()>,
+) -> Result<()> {
     // Track the canonical path of every directory currently on the recursion
     // stack so a symlink pointing back at an ancestor can't spin forever.
     let src_canon = std::fs::canonicalize(src)
@@ -91,7 +133,7 @@ fn copy_dir(src: &Path, dst: &Path, boundary: &Path, stack: &mut Vec<PathBuf>) -
         );
         return Ok(());
     }
-    // Detect an in-boundary symlink cycle *before* creating the destination, so
+    // Detect an in-boundary symlink cycle *before* visiting the directory, so
     // a skipped cycle entry (e.g. `loop -> .`) does not leave an empty
     // placeholder directory in the materialized output.
     if stack.contains(&src_canon) {
@@ -101,10 +143,10 @@ fn copy_dir(src: &Path, dst: &Path, boundary: &Path, stack: &mut Vec<PathBuf>) -
         );
         return Ok(());
     }
-    std::fs::create_dir_all(dst)?;
+    visit(Entry::Dir(rel))?;
     stack.push(src_canon);
 
-    for entry in std::fs::read_dir(src)? {
+    for entry in std::fs::read_dir(src).with_context(|| format!("listing `{}`", src.display()))? {
         let entry = entry?;
         let name = entry.file_name();
         if name == ".git" {
@@ -113,7 +155,7 @@ fn copy_dir(src: &Path, dst: &Path, boundary: &Path, stack: &mut Vec<PathBuf>) -
         // `file_type()` reflects the entry itself (does not follow symlinks).
         let ft = entry.file_type()?;
         let from = entry.path();
-        let to = dst.join(&name);
+        let to = rel.join(&name);
         if ft.is_symlink() {
             match resolve_within_canonical(boundary, &from) {
                 Some(target) => {
@@ -122,9 +164,12 @@ fn copy_dir(src: &Path, dst: &Path, boundary: &Path, stack: &mut Vec<PathBuf>) -
                         format!("resolving symlink target `{}`", target.display())
                     })?;
                     if meta.is_dir() {
-                        copy_dir(&target, &to, boundary, stack)?;
+                        walk_dir(&target, &to, boundary, stack, visit)?;
                     } else if meta.is_file() {
-                        std::fs::copy(&target, &to)?;
+                        visit(Entry::File {
+                            from: &target,
+                            rel: &to,
+                        })?;
                     }
                     // Non-regular symlink targets are skipped (see below).
                 }
@@ -138,9 +183,12 @@ fn copy_dir(src: &Path, dst: &Path, boundary: &Path, stack: &mut Vec<PathBuf>) -
             continue;
         }
         if ft.is_dir() {
-            copy_dir(&from, &to, boundary, stack)?;
+            walk_dir(&from, &to, boundary, stack, visit)?;
         } else if ft.is_file() {
-            std::fs::copy(&from, &to)?;
+            visit(Entry::File {
+                from: &from,
+                rel: &to,
+            })?;
         }
         // Non-regular files (FIFOs, sockets, device nodes) are skipped rather
         // than copied: `std::fs::copy` would error and abort the whole install,

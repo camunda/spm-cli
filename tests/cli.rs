@@ -14470,6 +14470,72 @@ fn doctor_flags_an_unreadable_linked_dir() {
             "{c}"
         );
     }
+    // A readable link can still hold content install can't snapshot.
+    std::fs::create_dir_all(dev.join("nested")).unwrap();
+    std::fs::write(dev.join("nested/notes.md"), "n").unwrap();
+    std::fs::write(dev.join("secret.md"), "s").unwrap();
+    for path in [dev.join("secret.md"), dev.join("nested")] {
+        let set = |mode| std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode));
+        set(0o000).unwrap();
+        let (ok, doc) = doctor(&sb, &[]);
+        let install_ok = sb.spm(&["install"]).status.success();
+        set(0o755).unwrap();
+        assert!(!install_ok, "{}", path.display());
+        assert!(!ok, "{}: {doc:#}", path.display());
+        let c = check(&doc, "links", "error");
+        assert!(
+            c["message"].as_str().unwrap().contains("can't be read"),
+            "{c}"
+        );
+    }
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(ok, "{doc:#}");
+}
+
+/// A locked transitive child is fetched by `install --locked` once its root
+/// is, so policy must cover it even when doctor can't walk the root.
+#[test]
+fn doctor_checks_policy_for_locked_transitive_sources() {
+    const DEP_URL: &str = "https://example.test/org/dep.git";
+    let sb = Sandbox::new();
+    let dep = make_repo(
+        &sb.root.join("dep"),
+        &[("SKILL.md", "---\nname: dep\ndescription: D.\n---\n")],
+    );
+    let root = make_repo(
+        &sb.root.join("alpha"),
+        &[
+            ("SKILL.md", "---\nname: alpha\ndescription: R.\n---\n"),
+            (
+                "ai.json",
+                &format!(r#"{{"skills":{{"dep":{{"git":"{DEP_URL}","branch":"main"}}}}}}"#),
+            ),
+        ],
+    );
+    let remotes = [(DEP_URL, dep.as_str())];
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{"alpha":{{"git":"{root}","branch":"main"}}}}}}"#
+        ),
+    );
+    let out = sb.spm_remotes(&["install"], &remotes);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    remove_store_checkout(&sb, "alpha-");
+    set_project_policy(&sb, &["file://*"]);
+    let out = sb.spm_remotes(&["install", "--locked"], &remotes);
+    assert!(!out.status.success());
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(!ok, "{doc:#}");
+    let c = check(&doc, "policy", "error");
+    let details = c["details"].to_string();
+    assert!(details.contains(DEP_URL), "{c}");
+    assert!(!details.contains("skill `alpha`"), "{c}");
 }
 
 #[test]

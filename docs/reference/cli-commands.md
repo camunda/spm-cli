@@ -499,11 +499,12 @@ It checks:
   a dangling symlink in its place or a non-directory `SPM_HOME` is an error;
 - **`ai.json`** exists, is valid and declares known **targets**;
 - the **source policy**: the machine policy (`SPM_POLICY` or
-  `$SPM_HOME/policy.json`) parses, and every declared source and linked dir is
-  allowed — the same rule `spm install` enforces;
+  `$SPM_HOME/policy.json`) parses, and every declared source, linked dir and
+  locked transitive source is allowed — the same rule `spm install` enforces;
 - **links**: an active [`spm link`](#spm-link-name-dir) override is a warning
   (the working copy replaces the locked version), a link whose directory is gone
-  or can't be read is an error, a link to an undeclared name is a warning;
+  or holds anything install can't read is an error, a link to an undeclared
+  name is a warning;
 - **`ai.lock`** exists and matches `ai.json` by exactly the rules of
   [`spm install --locked`](#spm-install-locked), including transitive pins. Offline,
   a dependency not in the store can't be fully verified (its nested `ai.json`,
