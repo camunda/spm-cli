@@ -502,7 +502,7 @@ It checks:
   allowed — the same rule `spm install` enforces;
 - **links**: an active [`spm link`](#spm-link-name-dir) override is a warning
   (the working copy replaces the locked version), a link whose directory is gone
-  is an error, a link to an undeclared name is a warning;
+  or can't be read is an error, a link to an undeclared name is a warning;
 - **`ai.lock`** exists and matches `ai.json` by exactly the rules of
   [`spm install --locked`](#spm-install-locked), including transitive pins. Offline,
   a dependency not in the store can't be fully verified (its nested `ai.json`,
@@ -513,7 +513,7 @@ It checks:
   warnings;
 - project scope: the **`.gitignore`** entries `spm install` adds are present, and
   `.claude/settings.local.json` (which holds a machine-specific path) is
-  gitignored;
+  gitignored and not committed;
 - every installed skill has a **`SKILL.md` with `name` and `description`**
   frontmatter, which agents discover skills by: the frontmatter must be valid
   YAML and both must be non-blank strings;

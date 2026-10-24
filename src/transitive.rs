@@ -128,9 +128,10 @@ pub struct Output {
     /// (and their nested dependencies) could not be verified offline.
     pub unverified: Vec<String>,
     /// [`Ctx::check`] only: synthesized names of misses that may be artifacts
-    /// of an [`Output::unverified`] subtree. The lock pins the same identity
-    /// under a name this walk never reached, so the unwalked subtree could
-    /// claim it first, under that name. These are not in `lock_misses`.
+    /// of an [`Output::unverified`] subtree. The lock has no entry under the
+    /// miss's own name but pins the same identity under a name this walk never
+    /// reached, so the unwalked subtree could claim it first, under that name.
+    /// These are not in `lock_misses`.
     pub uncertain_misses: Vec<String>,
 }
 
@@ -466,7 +467,7 @@ pub fn expand(direct: &BTreeMap<String, LockedSkill>, ctx: &Ctx) -> Result<Outpu
             .collect()
     };
     for (key, name, problem) in w.misses {
-        if claimable.contains(&key) {
+        if claimable.contains(&key) && !ctx.prev.contains_key(&name) {
             out.uncertain_misses.push(name);
         } else {
             out.lock_misses.push((name, problem));

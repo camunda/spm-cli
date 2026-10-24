@@ -802,13 +802,14 @@ fn plan(
         // missed (a hand-edited `bundled_skills`/`requested_by`/store key, ...),
         // `--locked` must never install a set that differs from the committed
         // lock. Compared as JSON values, so line endings/formatting don't matter.
-        // An unverified transitive subtree was not walked, so the lock built
-        // here lacks it: the comparison would only report that.
-        let partial = manifest.resolve_transitive && !unverified.is_empty();
-        if mismatches.is_empty() && !partial {
+        if mismatches.is_empty() {
             let on_disk: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(Lockfile::path_in(&dir))?)?;
-            if on_disk != serde_json::to_value(&lock)? {
+            // An unverified transitive subtree was not walked, so the lock
+            // built here lacks it: only the entries it did build are compared.
+            if manifest.resolve_transitive && !unverified.is_empty() {
+                mismatches.extend(verified_lock_drift(&on_disk, &lock, &unverified)?);
+            } else if on_disk != serde_json::to_value(&lock)? {
                 mismatches.push(
                     "ai.lock differs from what spm would write (e.g. a plugin's bundled skills \
                      or a transitive skill's requesters changed)"
@@ -893,6 +894,72 @@ pub(super) fn check_lock(
         LockMode::Check,
     )?;
     Ok(plan.verdict)
+}
+
+/// The whole-lock backstop of `--locked` for a walk that left `unverified`
+/// subtrees unwalked: every entry the walk built must equal its `on_disk`
+/// counterpart, except that an unwalked subtree may add requesters (an
+/// unverified skill, or a pin the walk didn't reach) and `also_satisfies`
+/// evidence. Entries the walk didn't build are judged by the miss and stale
+/// checks instead.
+fn verified_lock_drift(
+    on_disk: &serde_json::Value,
+    lock: &Lockfile,
+    unverified: &[String],
+) -> Result<Vec<String>> {
+    use serde_json::Value;
+    let mut drift = Vec::new();
+    if on_disk.get("id").and_then(Value::as_str) != Some(lock.id.as_str()) {
+        drift.push("ai.lock project `id` differs from what spm would write".to_string());
+    }
+    let unwalked = |r: &str| {
+        unverified.iter().any(|u| u == r)
+            || (on_disk["skills"].get(r).is_some() && !lock.skills.contains_key(r))
+    };
+    let list = |v: &Value, key: &str| {
+        v.get(key)
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let maps = [
+        ("skill", "skills", &lock.skills),
+        ("plugin", "plugins", &lock.plugins),
+    ];
+    for (kind, map, built) in maps {
+        for (name, entry) in built {
+            let Some(disk) = on_disk[map].get(name) else {
+                continue;
+            };
+            let mut disk = disk.clone();
+            let entry = serde_json::to_value(entry)?;
+            for key in ["requested_by", "also_satisfies"] {
+                let (ours, theirs) = (list(&entry, key), list(&disk, key));
+                let added_by_unwalked = ours.iter().all(|v| theirs.contains(v))
+                    && theirs
+                        .iter()
+                        .filter(|v| !ours.contains(v))
+                        .all(|v| key == "also_satisfies" || v.as_str().is_some_and(unwalked));
+                if added_by_unwalked {
+                    match entry.get(key) {
+                        Some(v) => disk[key] = v.clone(),
+                        None => {
+                            if let Some(fields) = disk.as_object_mut() {
+                                fields.remove(key);
+                            }
+                        }
+                    }
+                }
+            }
+            if disk != entry {
+                drift.push(format!(
+                    "ai.lock entry for {kind} `{name}` differs from what spm would write (e.g. \
+                     a plugin's bundled skills or a transitive skill's requesters changed)"
+                ));
+            }
+        }
+    }
+    Ok(drift)
 }
 
 /// Describe each dependency of `manifest` — and each linked directory in

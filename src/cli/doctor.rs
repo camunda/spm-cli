@@ -407,14 +407,25 @@ fn check_links(scope: &Scope, manifest: &Manifest, links: Result<Links>) -> Vec<
                     format!("`{name}` is linked but not declared in ai.json (ignored)"),
                 )
                 .fix(unlink),
-                Ok(linked) => Check::warn(
-                    "links",
-                    format!(
-                        "`{name}` is linked to {} — the working copy replaces the locked version",
-                        linked.map(|l| l.display).unwrap_or_default()
-                    ),
-                )
-                .fix(format!("{unlink} when done")),
+                Ok(linked) => {
+                    let display = linked.as_ref().map(|l| l.display.as_str()).unwrap_or("");
+                    // Resolving only canonicalizes it: install must also read it.
+                    match linked.as_ref().map(|l| std::fs::read_dir(&l.dir)) {
+                        Some(Err(e)) => Check::error(
+                            "links",
+                            format!("`{name}` is linked to {display}, which can't be read: {e}"),
+                        )
+                        .fix(format!("make {display} readable, or {unlink}")),
+                        _ => Check::warn(
+                            "links",
+                            format!(
+                                "`{name}` is linked to {display} — the working copy replaces the \
+                                 locked version"
+                            ),
+                        )
+                        .fix(format!("{unlink} when done")),
+                    }
+                }
             }
         })
         .collect()
@@ -546,14 +557,28 @@ fn check_gitignore(
     }
     // Claude's settings.local.json holds a machine-specific marketplace path.
     let settings = ".claude/settings.local.json";
-    if manifest.targets.iter().any(|t| t == "claude")
-        && root.join(settings).exists()
-        && git::is_ignored(root, settings) == Some(false)
-    {
-        checks.push(
-            Check::warn("gitignore", format!("{settings} is not gitignored"))
-                .fix(format!("add {settings} to .gitignore")),
-        );
+    if manifest.targets.iter().any(|t| t == "claude") && root.join(settings).exists() {
+        let untrack = format!("git rm --cached {settings}");
+        match (
+            git::is_ignored(root, settings),
+            git::is_tracked(root, settings) == Some(true),
+        ) {
+            (Some(false), tracked) => checks.push(
+                Check::warn("gitignore", format!("{settings} is not gitignored")).fix(if tracked {
+                    format!("add {settings} to .gitignore, then {untrack}")
+                } else {
+                    format!("add {settings} to .gitignore")
+                }),
+            ),
+            (Some(true), true) => checks.push(
+                Check::warn(
+                    "gitignore",
+                    format!("{settings} is committed, so its .gitignore rule doesn't apply"),
+                )
+                .fix(untrack),
+            ),
+            _ => {}
+        }
     }
     checks
 }

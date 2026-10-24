@@ -13825,35 +13825,46 @@ fn remove_store_checkout(sb: &Sandbox, prefix: &str) {
     std::fs::remove_dir_all(entry).unwrap();
 }
 
-/// A root missing from the store leaves only *its* subtree unverified: a pin
-/// missing for an unrelated root's child is still proven drift, so doctor must
-/// flag it, as `install --locked` does.
+/// A root skill repo `name` whose nested `ai.json` depends on its own
+/// `<name>-dep` repo, both on `main`; returns the root's URL.
+fn transitive_root(sb: &Sandbox, name: &str) -> String {
+    let dep = make_repo(
+        &sb.root.join(format!("{name}-dep")),
+        &[(
+            "SKILL.md",
+            &format!("---\nname: {name}-dep\ndescription: D.\n---\n"),
+        )],
+    );
+    make_repo(
+        &sb.root.join(name),
+        &[
+            (
+                "SKILL.md",
+                &format!("---\nname: {name}\ndescription: R.\n---\n"),
+            ),
+            (
+                "ai.json",
+                &format!(r#"{{"skills":{{"{name}-dep":{{"git":"{dep}","branch":"main"}}}}}}"#),
+            ),
+        ],
+    )
+}
+
+fn edit_lock(sb: &Sandbox, edit: impl FnOnce(&mut serde_json::Value)) {
+    let path = sb.project.join("ai.lock");
+    let mut lock: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    edit(&mut lock);
+    std::fs::write(&path, serde_json::to_string_pretty(&lock).unwrap()).unwrap();
+}
+
+/// A root missing from the store leaves only *its* subtree unverified: drift in
+/// an unrelated root's child pin (removed, or its selector changed) is still
+/// proven, so doctor must flag it, as `install --locked` does.
 #[test]
 fn doctor_keeps_lock_drift_of_an_independent_root_when_another_is_not_in_the_store() {
     let sb = Sandbox::new();
-    let root = |name: &str| {
-        let dep = make_repo(
-            &sb.root.join(format!("{name}-dep")),
-            &[(
-                "SKILL.md",
-                &format!("---\nname: {name}-dep\ndescription: D.\n---\n"),
-            )],
-        );
-        make_repo(
-            &sb.root.join(name),
-            &[
-                (
-                    "SKILL.md",
-                    &format!("---\nname: {name}\ndescription: R.\n---\n"),
-                ),
-                (
-                    "ai.json",
-                    &format!(r#"{{"skills":{{"{name}-dep":{{"git":"{dep}","branch":"main"}}}}}}"#),
-                ),
-            ],
-        )
-    };
-    let (alpha, beta) = (root("alpha"), root("beta"));
+    let (alpha, beta) = (transitive_root(&sb, "alpha"), transitive_root(&sb, "beta"));
     sb.ok(&["init", "--target", "copilot"]);
     write_manifest(
         &sb,
@@ -13862,23 +13873,62 @@ fn doctor_keeps_lock_drift_of_an_independent_root_when_another_is_not_in_the_sto
         ),
     );
     sb.ok(&["install"]);
-    let lock_path = sb.project.join("ai.lock");
-    let mut lock: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&lock_path).unwrap()).unwrap();
-    let skills = lock["skills"].as_object_mut().unwrap();
-    let beta_child = skills
+    let installed = sb.read("ai.lock");
+    let lock: serde_json::Value = serde_json::from_str(&installed).unwrap();
+    let beta_child = lock["skills"]
+        .as_object()
+        .unwrap()
         .iter()
         .find(|(_, l)| l["requested_by"] == serde_json::json!(["beta"]))
         .map(|(n, _)| n.clone())
         .unwrap();
-    skills.remove(&beta_child);
-    std::fs::write(&lock_path, serde_json::to_string_pretty(&lock).unwrap()).unwrap();
     remove_store_checkout(&sb, "alpha-");
 
+    for change in ["selector", "removal"] {
+        std::fs::write(sb.project.join("ai.lock"), &installed).unwrap();
+        edit_lock(&sb, |l| match change {
+            "selector" => l["skills"][&beta_child]["reference"] = "branch:dev".into(),
+            _ => {
+                l["skills"].as_object_mut().unwrap().remove(&beta_child);
+            }
+        });
+        let (ok, doc) = doctor(&sb, &[]);
+        assert!(!ok, "{doc:#}");
+        let c = check(&doc, "lockfile", "error");
+        assert!(c["details"].to_string().contains(&beta_child), "{c}");
+        assert!(!sb.spm(&["install", "--locked"]).status.success());
+        remove_store_checkout(&sb, "alpha-");
+    }
+}
+
+/// A missing checkout leaves only what it contributes unverified: a cached
+/// plugin's hand-edited `bundled_skills` is still drift the whole-lock
+/// backstop of `install --locked` rejects, so doctor must flag it too.
+#[test]
+fn doctor_compares_verified_lock_entries_when_another_root_is_not_in_the_store() {
+    let sb = Sandbox::new();
+    sb.add_plugin();
+    let alpha = transitive_root(&sb, "alpha");
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{"alpha":{{"git":"{alpha}","branch":"main"}}}},"plugins":{{"ds":{{"git":"{}","branch":"main","path":"pkg"}}}}}}"#,
+            sb.skill_url()
+        ),
+    );
+    sb.ok(&["install"]);
+    remove_store_checkout(&sb, "alpha-");
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(ok, "only unverified: {doc:#}");
+
+    edit_lock(&sb, |l| {
+        l["plugins"]["ds"]["bundled_skills"] = serde_json::json!([])
+    });
     let (ok, doc) = doctor(&sb, &[]);
     assert!(!ok, "{doc:#}");
     let c = check(&doc, "lockfile", "error");
-    assert!(c["details"].to_string().contains(&beta_child), "{c}");
+    assert!(c["details"].to_string().contains("`ds`"), "{c}");
     assert!(!sb.spm(&["install", "--locked"]).status.success());
 }
 
@@ -13982,6 +14032,27 @@ fn doctor_warns_when_claude_local_settings_are_not_gitignored() {
             .all(|c| c["status"] == "ok"),
         "{doc:#}"
     );
+
+    // Committed before the rule existed: the rule doesn't apply to it, so
+    // the fix is to untrack it.
+    git_in(&sb.project, &["add", "-f", ".claude/settings.local.json"]);
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(ok);
+    assert_eq!(
+        check(&doc, "gitignore", "warn")["fix"],
+        "git rm --cached .claude/settings.local.json"
+    );
+    git_in(
+        &sb.project,
+        &["rm", "-q", "--cached", ".claude/settings.local.json"],
+    );
+    let (_, doc) = doctor(&sb, &[]);
+    assert!(
+        checks(&doc, "gitignore")
+            .iter()
+            .all(|c| c["status"] == "ok"),
+        "{doc:#}"
+    );
 }
 
 #[test]
@@ -14034,6 +14105,31 @@ fn doctor_reports_links() {
     let (ok, doc) = doctor(&sb, &[]);
     assert!(!ok);
     assert_eq!(check(&doc, "links", "error")["fix"], "spm unlink greet");
+}
+
+/// A linked directory that still resolves but can't be read fails `spm
+/// install`, so it is an error, not just an active link.
+#[cfg(unix)]
+#[test]
+fn doctor_flags_an_unreadable_linked_dir() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let dev = local_skill_checkout(&sb, "dev", "LOCAL");
+    sb.ok(&["link", "greet", "../dev"]);
+    let set = |mode| std::fs::set_permissions(&dev, std::fs::Permissions::from_mode(mode));
+    set(0o000).unwrap();
+    let (ok, doc) = doctor(&sb, &[]);
+    let install_ok = sb.spm(&["install"]).status.success();
+    set(0o755).unwrap();
+    assert!(!install_ok);
+    assert!(!ok, "{doc:#}");
+    let c = check(&doc, "links", "error");
+    assert!(
+        c["message"].as_str().unwrap().contains("can't be read"),
+        "{c}"
+    );
 }
 
 #[test]

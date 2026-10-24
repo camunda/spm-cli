@@ -497,17 +497,32 @@ pub fn version() -> Result<String> {
     git(&["--version"], None)
 }
 
-/// Whether git ignores `path` (relative to `dir`) in the work tree containing
-/// `dir` — a tracked file counts as not ignored. `None` when `dir` is not in a
-/// git work tree or git can't tell.
+/// Whether an ignore rule of the work tree containing `dir` matches `path`
+/// (relative to `dir`), tracked or not — see [`is_tracked`] for whether the
+/// rule applies. `None` when `dir` is not in a git work tree or git can't tell.
 pub fn is_ignored(dir: &Path, path: &str) -> Option<bool> {
-    let out = git_command(&["check-ignore", "-q", "--", path])
+    let out = git_command(&["check-ignore", "-q", "--no-index", "--", path])
         .current_dir(dir)
         .output()
         .ok()?;
     match out.status.code() {
         Some(0) => Some(true),
         Some(1) => Some(false),
+        _ => None,
+    }
+}
+
+/// Whether `path` (relative to `dir`) is tracked by git (in the index), so
+/// ignore rules don't apply to it. `None` when `dir` is not in a git work tree.
+pub fn is_tracked(dir: &Path, path: &str) -> Option<bool> {
+    let out = git_command(&["ls-files", "--error-unmatch", "--", path])
+        .current_dir(dir)
+        .output()
+        .ok()?;
+    match out.status.code() {
+        Some(0) => Some(true),
+        // Not tracked, or not in a work tree: only the former is an answer.
+        Some(1) => is_ignored(dir, path).map(|_| false),
         _ => None,
     }
 }
