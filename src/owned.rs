@@ -242,7 +242,8 @@ impl Ownership {
     /// plugin output lives only in spm-owned locations, so the new plugins are
     /// recorded up front. Once a target is written it holds exactly the new
     /// set. Targets not installed now (e.g. ones another branch's `ai.json`
-    /// declares) keep their record.
+    /// declares) keep their record, minus the names an install removed from a
+    /// skills dir they share.
     pub fn install(
         &self,
         scope: &Scope,
@@ -255,7 +256,25 @@ impl Ownership {
             record.insert(t.clone(), self.for_target(t));
         }
         for (i, target) in targets.iter().enumerate() {
-            let prior = self.for_target(target);
+            // As recorded now: a target sharing a dir already written lost
+            // the names removed from it.
+            let prior = record.get(target).cloned().unwrap_or_default();
+            // Targets sharing this skills dir (see `adopt_shared`) hold the
+            // same physical entries: a name this install removes from it is
+            // gone for them too, so they stop claiming it now — while this
+            // target keeps it until written, so it is never left unowned.
+            if let Some(ours) = skills_dir_identity(scope, target)? {
+                for (other, owned) in record.iter_mut() {
+                    if other != target
+                        && owned.skills.iter().any(|n| !desired.skills.contains(n))
+                        && skills_dir_identity(scope, other)?.as_ref() == Some(&ours)
+                    {
+                        owned
+                            .skills
+                            .retain(|n| !prior.skills.contains(n) || desired.skills.contains(n));
+                    }
+                }
+            }
             let mut ahead = prior.clone();
             ahead.plugins.extend(desired.plugins.iter().cloned());
             record.insert(target.clone(), ahead);
@@ -641,6 +660,25 @@ mod tests {
             loaded,
             Ownership::Legacy(Owned::from_lock(&lock_with(&["a"])))
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_name_removed_from_a_shared_dir_is_not_reclaimed_by_an_alias() {
+        // codex and amp share `.agents/skills/`: once codex removed `old`
+        // there, amp failing part-way must not record it as its own again.
+        let (root, scope, _home) = sandbox("alias");
+        make_skills_dir(&scope, "codex");
+        let mut before = Ownership::Recorded(BTreeMap::new());
+        before.grant("codex", &Owned::from_lock(&lock_with(&["old"])));
+        before.grant("amp", &Owned::from_lock(&lock_with(&["old"])));
+        before.save(&scope).unwrap();
+        let targets = ["codex".to_string(), "amp".to_string()];
+        let err = installed_err(&scope, &before, &targets, &lock_with(&["fresh"]), 1);
+        assert!(err.contains("boom"), "{err}");
+        let after = Ownership::load(&scope, &Lockfile::default(), &[], &targets).unwrap();
+        assert_eq!(after.for_target("codex").skills, set(&["fresh"]));
+        assert_eq!(after.for_target("amp").skills, set(&["touched"]));
         std::fs::remove_dir_all(root).unwrap();
     }
 

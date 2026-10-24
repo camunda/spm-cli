@@ -13346,3 +13346,37 @@ fn ownership_records_never_overwrite_an_aliased_links_file() {
         assert!(!links_file.exists(), "{args:?} wrote state");
     }
 }
+
+/// Targets sharing a skills dir (codex and amp: `.agents/skills/`) hold one
+/// physical set: once one of them removes a name from it, the other no longer
+/// owns that name there either — even when the install fails before reaching
+/// it. Otherwise a later `clean` would delete the user's own skill created
+/// under that name since.
+#[test]
+fn a_shared_dir_rename_failing_part_way_leaves_no_stale_alias_claim() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex,cursor,amp"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "old"]);
+    // Rename it in ai.json; cursor then fails on a file already at `fresh`.
+    let mut doc: serde_json::Value = serde_json::from_str(&sb.read("ai.json")).unwrap();
+    let spec = doc["skills"]["old"].take();
+    doc["skills"] = serde_json::json!({ "fresh": spec });
+    write_manifest(&sb, &serde_json::to_string_pretty(&doc).unwrap());
+    std::fs::write(sb.project.join(".cursor/skills/fresh"), "mine").unwrap();
+    fails(&sb, &["install"]);
+    let old = sb.project.join(".agents/skills/old");
+    assert!(!old.exists(), "codex removed `old` from the shared dir");
+
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::write(
+        old.join("SKILL.md"),
+        "---\nname: old\ndescription: Mine.\n---\n",
+    )
+    .unwrap();
+    std::fs::remove_file(sb.project.join(".cursor/skills/fresh")).unwrap();
+    sb.ok(&["clean"]);
+    assert!(
+        old.join("SKILL.md").exists(),
+        "clean deleted the user's skill"
+    );
+}
