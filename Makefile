@@ -1,12 +1,12 @@
 # spm — common developer tasks.
-# `make check` mirrors the CI gate (fmt + clippy + test).
+# `make check` mirrors the CI gate (fmt + clippy + test + action tests).
 
 CARGO   ?= cargo
 PREFIX  ?= /usr/local
 BINDIR  ?= $(PREFIX)/bin
 
 .DEFAULT_GOAL := build
-.PHONY: build release test fmt fmt-check lint check run install uninstall clean bump bump-pr coverage coverage-check
+.PHONY: build release test test-action fmt fmt-check lint check run install uninstall clean bump bump-pr coverage coverage-check
 
 # Minimum line coverage (%). CI fails if `cargo test` drops below this.
 COVERAGE_MIN ?= 95
@@ -23,6 +23,10 @@ release:
 test:
 	$(CARGO) test --all
 
+## test-action: test the GitHub Actions (needs Node 24) against the debug build
+test-action: build
+	node --test "action/test/*.test.mjs"
+
 ## fmt:        format the code
 fmt:
 	$(CARGO) fmt --all
@@ -35,8 +39,8 @@ fmt-check:
 lint:
 	$(CARGO) clippy --all-targets -- -D warnings
 
-## check:      full CI gate — fmt-check + lint + test
-check: fmt-check lint test
+## check:      full CI gate — fmt-check + lint + test + test-action
+check: fmt-check lint test test-action
 
 ## coverage:   print a per-file line-coverage report (needs cargo-llvm-cov)
 coverage:

@@ -1,0 +1,56 @@
+name: "spm update"
+description: "Open one pull request per outdated spm skill or plugin, with the version change and the content scan of the new code."
+author: "Camunda"
+branding:
+  icon: "git-pull-request"
+  color: "orange"
+
+# Needs `spm` on PATH (run `camunda/spm-cli@<ref>` first), a checkout of the
+# branch to update, and `contents: write` + `pull-requests: write`. Run it in a
+# workflow `concurrency` group with `cancel-in-progress: false` so two runs
+# never publish the same update at once (see docs/guide/ci.md).
+inputs:
+  token:
+    description: >-
+      Token used to open and update the pull requests. Pull requests opened with
+      the default `github.token` do not trigger other workflows; pass a GitHub
+      App or personal access token (and give the same token to
+      `actions/checkout`, which is what `git push` uses) to get CI on them.
+    required: false
+    default: ${{ github.token }}
+  working-directory:
+    description: "Directory holding ai.json and ai.lock, relative to the current directory."
+    required: false
+    default: "."
+  base:
+    description: "Branch the pull requests target. Defaults to the checked-out branch."
+    required: false
+    default: ""
+  labels:
+    description: "Labels added to every update pull request (comma- or newline-separated)."
+    required: false
+    default: "dependencies"
+  blocked-label:
+    description: >-
+      Label added when the content scan reports a blocking (high/critical)
+      finding in the new code, and removed once it no longer does. Empty to
+      disable.
+    required: false
+    default: "spm-scan-blocked"
+  dry-run:
+    description: "Compute the updates and print the pull request bodies without pushing or calling the GitHub API."
+    required: false
+    default: "false"
+
+outputs:
+  outdated:
+    description: "Number of outdated dependencies `spm outdated` reported."
+  pull-requests:
+    description: >-
+      JSON array of the pull requests touched by this run:
+      `[{name, kind, branch, result, number, url, blocking}]`, where `result` is
+      `created`, `updated`, `unchanged` or `declined`.
+
+runs:
+  using: "node24"
+  main: "main.mjs"

@@ -20,7 +20,7 @@ spm status [-g] [--json]                           # check skills are materializ
 spm outdated [name] [-g] [--json] [--exit-code]       # report newer upstream versions (read-only)
 spm clean [-g]                                     # remove generated vendor config
 spm prune [--yes]                                  # wipe the global fetch cache ($SPM_HOME/store, default ~/.spm/store)
-spm scan [path] [--json]                           # scan skill content for suspicious patterns (default: .)
+spm scan [path] [--within <dir>] [--json]          # scan skill content for suspicious patterns (default: .)
 ```
 
 Four commands have short aliases that behave identically, including `-g`:
@@ -369,6 +369,12 @@ will not adopt it:
   leaf: newer tag — bump it in the upstream ai.json of middle; publish a new middle version and bump middle in the upstream ai.json of root; then run `spm update`
   ```
 
+`outdated` reports the pins in `ai.lock`. When a direct dependency's `ai.json`
+entry no longer matches its pin (its `git`, selector or `path` was edited
+without re-locking), its row is marked `(ai.json changed)` and a warning says
+what changed: run `spm install` to re-lock it first, since the row's status
+describes the old request.
+
 In global scope the suggested commands carry `-g`. If any row errored, the
 summary says the check is incomplete instead of claiming everything is up to
 date.
@@ -410,6 +416,14 @@ Runs spm's deterministic **content scanner** over a path — a single file or a
 directory (default: the current directory) — and prints every finding. **Exits
 non-zero** when any blocking (high/critical) finding is present, so it works as a
 CI gate on skill sources.
+
+Symlinks are followed only when they resolve inside the scanned path. With
+`--within <dir>`, a symlink is followed when it resolves anywhere inside `<dir>`,
+which must contain the path (the path may itself be a symlink resolving inside
+`<dir>`). That is the boundary the install gate uses for a
+dependency at a repository subdirectory (its checkout root), so
+`spm scan <checkout>/plugins/kit --within <checkout>` sees exactly what
+installing that plugin would materialize.
 
 The same scan runs automatically as a **pre-materialize gate**: every skill and
 plugin is scanned from its store checkout — fetched only when its pin is new or
@@ -549,6 +563,9 @@ with `-g` for `list`, `status` and `outdated`). With it:
                                             // any alsoSatisfies entry
       "transitive": false,
       "requestedBy": [],                    // direct requester(s) of a transitive skill
+      "drift": null,                        // for a direct entry whose ai.json request no
+                                            // longer matches this pin: what changed, e.g.
+                                            // "`tag:v1.0.0` -> `version:^1`"
       "alsoSatisfies": [                    // other selectors this deduplicated entry
         {                                   // satisfies (ai.lock `also_satisfies`)
           "selector": { "branch": "main" },

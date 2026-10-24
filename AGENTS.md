@@ -49,7 +49,10 @@ generated source to regenerate.
 | `tests/cli.rs` | End-to-end tests against the real binary with an isolated `SPM_HOME` per test. |
 | `schema/ai.schema.json` | Source of truth for the `ai.json` shape (draft-07); embedded by `src/schema.rs`. |
 | `docs/` | VitePress documentation site (published to GitHub Pages). User-facing docs live here — keep it in sync with `README.md` when behavior changes (`reference/` for CLI/`ai.json`/`ai.lock`/schema, `guide/` for concepts/targets). |
-| `npm/` | npm distribution: `build.mjs` generates the launcher + 5 platform packages from the crate version. |
+| `npm/` | npm distribution: `build.mjs` generates the launcher + 5 platform packages from the crate version. `targets.mjs` (release targets + asset names) and `crate.mjs` (crate version) are the single sources shared with the GitHub Actions. |
+| `action.yml`, `action/` | Setup GitHub Action (`camunda/spm-cli@v0`): `action/lib/setup.mjs` downloads a release binary and verifies it against `SHA256SUMS`. Dependency-free Node 24 (`action/lib/core.mjs` is the runner toolkit). `action/stage-release.mjs` writes `SHA256SUMS` in `release.yml`. |
+| `update/` | Update GitHub Action (`camunda/spm-cli/update@v0`): entry point for `action/lib/update.mjs`, which opens one PR per outdated dependency (`action/lib/report.mjs` builds branch names + PR bodies, `action/lib/github.mjs` is the REST client). |
+| `action/test/` | `node --test` suites for both actions, against the real debug `spm`, throwaway git repos and a fake GitHub API; `release.test.mjs` guards release-workflow drift (targets, tag triggers, action inputs/outputs). |
 | `Makefile` | Convenience shortcuts over `cargo` (`make check` mirrors the CI gate). |
 | `.cargo-husky/hooks/` | Pre-commit hook (fmt + clippy) auto-installed via `cargo-husky` on first `cargo test`/`build`. |
 | `.github/workflows/` | `ci.yml` (fmt + clippy + test + MSRV), `release.yml`, `publish.yml`. |
@@ -63,17 +66,20 @@ the CI gate exactly** — run it before pushing.
 make build        # debug build (cargo build)
 make release      # optimized (LTO, stripped) build
 make test         # cargo test --all (end-to-end suite)
+make test-action  # cargo build + node --test the GitHub Actions (Node 24)
 make fmt          # cargo fmt --all
 make fmt-check    # fail if not formatted
 make lint         # cargo clippy --all-targets -- -D warnings
-make check        # fmt-check + lint + test  ← the full CI gate
+make check        # fmt-check + lint + test + test-action  ← the full CI gate
 make run ARGS=".." # cargo run -- $(ARGS)
 make install      # release build → $(PREFIX)/bin/spm  (default /usr/local)
 ```
 
 CI (`.github/workflows/ci.yml`) runs the same gate on Linux, macOS, and Windows
 (`cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`,
-`cargo test --all`), plus an **MSRV** job that runs `cargo check --locked
+`cargo test --all`, `node --test "action/test/*.test.mjs"`), an `action-e2e`
+job that runs both actions with `uses: ./` and `uses: ./update`, plus an
+**MSRV** job that runs `cargo check --locked
 --all-targets` on Rust **1.97** to guard the published minimum toolchain. When
 you touch dependencies or use newer std/APIs, keep the MSRV job green (or bump
 `rust-version` in `Cargo.toml` and `.tool-versions` deliberately).

@@ -5,7 +5,8 @@
 | Channel | Package / artifact | Workflow | Auth |
 | --- | --- | --- | --- |
 | **npm** (recommended for users) | `@camunda8/spm` + `@camunda8/spm-<os>-<cpu>` (×5) | [`release.yml`](.github/workflows/release.yml) → `npm` job | OIDC Trusted Publishing |
-| **GitHub Release** | `spm-<target>[.exe]` binaries | [`release.yml`](.github/workflows/release.yml) → `build` job | `GITHUB_TOKEN` |
+| **GitHub Release** | `spm-<target>[.exe]` binaries + `SHA256SUMS` | [`release.yml`](.github/workflows/release.yml) → `build` + `checksums` jobs | `GITHUB_TOKEN` |
+| **GitHub Action** | `camunda/spm-cli@v0` (+ `/update`) | moving `v0` tag, moved by hand (below) | admin |
 | **crates.io** | `spm-cli` crate (binary `spm`) | [`publish.yml`](.github/workflows/publish.yml) | OIDC Trusted Publishing |
 
 **The crate version in `Cargo.toml` is the single source of truth.** The npm
@@ -99,13 +100,28 @@ issue; the summary:
 
    ```bash
    git tag vX.Y.Z
-   git push origin main --tags
+   git push origin vX.Y.Z
    ```
+4. Once the release workflow is green (its `checksums` job has attached
+   `SHA256SUMS`), move the GitHub Action's major tag to it — **stable releases
+   only**, never a pre-release:
+
+   ```bash
+   git tag -f v0 vX.Y.Z
+   git push -f origin v0
+   ```
+
+   Workflows using `camunda/spm-cli@v0` then install vX.Y.Z (the setup action
+   defaults to the version in the `Cargo.toml` at its ref). Only `vX.Y.Z` tags
+   trigger `release.yml`/`publish.yml` (`tags: v*.*.*`), so moving `v0` publishes
+   nothing; `action/test/release.test.mjs` guards those triggers. On the first
+   1.0 release, start a `v1` tag the same way.
 
 The tag push fans out to:
 
 - **`release.yml`** → builds the 5 target binaries, attaches them to the GitHub
-  Release, then the `npm` job packages and publishes all six npm packages, and
+  Release, the `checksums` job attaches `SHA256SUMS` over them (and verifies it
+  against the downloaded assets), then the `npm` job packages and publishes all six npm packages, and
   finally the `release-notes` job fills in the release description (see below).
 - **`publish.yml`** → publishes the `spm-cli` crate to crates.io.
 
@@ -182,10 +198,15 @@ npm i -g @camunda8/spm && spm --version
 # crates.io
 cargo install spm-cli && spm --version
 
-# GitHub Release (internal repo → authenticated download)
+# GitHub Release, checked against SHA256SUMS
 gh release download vX.Y.Z --repo camunda/spm-cli \
-  --pattern 'spm-aarch64-apple-darwin' --output spm && ./spm --version
+  --pattern 'spm-aarch64-apple-darwin' --pattern SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
 ```
+
+The GitHub Action runs the same download-and-verify on every platform; after
+moving `v0`, a workflow with `- uses: camunda/spm-cli@v0` followed by
+`- run: spm --version` should print the new version.
 
 Check all six npm packages resolved to the new version:
 

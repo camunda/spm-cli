@@ -330,7 +330,10 @@ marked `transitive; via <requester>`, and the fix belongs in that requester's
 own `ai.json`, not this one. With a name, only that entry is checked.
 A deduplicated entry shared through different selectors has every selector
 checked the same way (including newer semver tags); drift in a secondary one
-shows as `also <selector>: <status>`.
+shows as `also <selector>: <status>`. It reports the pins in `ai.lock`: a direct
+entry whose `ai.json` request changed since (selector, `git` or `path`) is
+marked `ai.json changed`, with a warning (`drift` in `--json`); run
+`spm install` to re-lock before acting on that row.
 
 It exits 0 even when things are outdated; `--exit-code` makes it exit non-zero
 when anything is outdated. Any `error` row always makes it exit non-zero.
@@ -386,12 +389,18 @@ re-fetched by the next `spm install`. It has no `-g` flag.
 ### `spm scan`
 
 ```bash
-spm scan [path] [--json]
+spm scan [path] [--within <dir>] [--json]
 ```
 
 Runs spm's deterministic content scanner over a file or directory (default
 `.`) and prints every finding. It exits non-zero when any finding is high or
 critical severity. See [Content scan](#content-scan).
+
+Symlinks are followed only when they resolve inside the scanned path. Pass
+`--within <dir>` (a directory containing the path, such as the repository root
+of a plugin kept in a subdirectory) to follow symlinks anywhere inside `<dir>`,
+the same boundary the install gate uses. The path may then itself be a symlink
+that resolves inside `<dir>`.
 
 ### Machine-readable output (`--json`)
 

@@ -195,6 +195,12 @@ enum Command {
         /// Path to scan — a file or directory (defaults to the current directory).
         #[arg(default_value = ".")]
         path: String,
+        /// Follow symlinks that resolve anywhere inside DIR (which must contain
+        /// the path, itself possibly a symlink into DIR), as the install gate
+        /// does with a dependency's checkout root. By default only symlinks
+        /// resolving inside the path are followed.
+        #[arg(long, value_name = "DIR")]
+        within: Option<String>,
         #[command(flatten)]
         output: JsonArg,
     },
@@ -338,6 +344,14 @@ pub fn run() -> Result<()> {
         }
         Command::Clean { scope } => clean::clean(&scope.resolve(&cwd)),
         Command::Prune { yes } => clean::prune(yes),
-        Command::Scan { path, output } => scan::scan_cmd(Path::new(&path), output.json),
+        Command::Scan {
+            path,
+            within,
+            output,
+        } => scan::scan_cmd(
+            Path::new(&path),
+            within.as_deref().map(Path::new),
+            output.json,
+        ),
     }
 }

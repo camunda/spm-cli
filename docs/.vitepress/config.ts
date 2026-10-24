@@ -64,6 +64,7 @@ export default defineConfig({
           { text: "Source Policy", link: "/guide/source-policy" },
           { text: "Worktrees & Fresh Clones", link: "/guide/worktrees" },
           { text: "Authoring Skills", link: "/guide/authoring-skills" },
+          { text: "CI & Automated Updates", link: "/guide/ci" },
           { text: "Agent Skill", link: "/guide/agent-skill" },
           { text: "Design Notes", link: "/guide/design-notes" },
         ],

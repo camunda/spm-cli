@@ -20,6 +20,8 @@
 import { readFileSync, writeFileSync, mkdirSync, copyFileSync, chmodSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { TARGETS } from "./targets.mjs";
+import { crateVersion } from "./crate.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..");
@@ -37,16 +39,6 @@ const COMMON = {
   publishConfig: { access: "public" },
 };
 
-// The distribution matrix: rust target -> npm (os, cpu) + binary filename.
-// `os`/`cpu` must match Node's process.platform / process.arch so npm installs
-// exactly the right optional dependency and the launcher can resolve it.
-const TARGETS = [
-  { rustTarget: "x86_64-unknown-linux-gnu", os: "linux", cpu: "x64", exe: "spm" },
-  { rustTarget: "aarch64-unknown-linux-gnu", os: "linux", cpu: "arm64", exe: "spm" },
-  { rustTarget: "x86_64-apple-darwin", os: "darwin", cpu: "x64", exe: "spm" },
-  { rustTarget: "aarch64-apple-darwin", os: "darwin", cpu: "arm64", exe: "spm" },
-  { rustTarget: "x86_64-pc-windows-msvc", os: "win32", cpu: "x64", exe: "spm.exe" },
-];
 
 function parseArgs(argv) {
   const args = { out: join(repoRoot, "npm", "dist") };
@@ -60,12 +52,6 @@ function parseArgs(argv) {
   return args;
 }
 
-function crateVersion() {
-  const cargo = readFileSync(join(repoRoot, "Cargo.toml"), "utf8");
-  const m = cargo.match(/\[package\][\s\S]*?\bversion\s*=\s*"([^"]+)"/);
-  if (!m) throw new Error("could not read version from Cargo.toml");
-  return m[1];
-}
 
 function platformPkgName(t) {
   return `${SCOPE}/spm-${t.os}-${t.cpu}`;
@@ -79,7 +65,7 @@ function writeJson(path, value) {
 function main() {
   const args = parseArgs(process.argv.slice(2));
   if (!args.binDir) throw new Error("--bin-dir is required");
-  const version = args.version ?? crateVersion();
+  const version = args.version ?? crateVersion(repoRoot);
   const binDir = resolve(args.binDir);
   const out = resolve(args.out);
 

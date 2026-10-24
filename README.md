@@ -350,7 +350,7 @@ spm status [-g] [--json]                           # check skills are materializ
 spm outdated [name] [-g] [--json] [--exit-code]       # report newer upstream versions (read-only)
 spm clean [-g]                                     # remove generated vendor config
 spm prune [--yes]                                  # wipe the global fetch cache ($SPM_HOME/store, default ~/.spm/store)
-spm scan [path] [--json]                           # scan skill content for suspicious patterns (default: .)
+spm scan [path] [--within <dir>] [--json]          # scan skill content for suspicious patterns (default: .)
 ```
 
 `list`, `status`, `outdated` and `scan` accept `--json` for scripts, CI and agents: stdout
@@ -420,6 +420,35 @@ spm scan ./my-skill    # scan a specific path
 
 To override the gate for content you trust (or a false positive), set
 `SPM_ALLOW_SUSPICIOUS=1` — findings are then printed as warnings but never block.
+
+## CI & automated updates (GitHub Actions)
+
+Install spm in a workflow (checksum-verified, Linux/macOS/Windows) and open one
+pull request per outdated skill on a schedule — each with the version change and
+the `spm scan` findings of the new code:
+
+```yaml
+# .github/workflows/spm-update.yml
+on:
+  schedule: [{ cron: "0 6 * * 1" }]
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: write
+concurrency: { group: "spm-update-${{ github.ref }}", cancel-in-progress: false }
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: camunda/spm-cli@v0          # installs spm
+      - uses: camunda/spm-cli/update@v0   # one PR per outdated skill/plugin
+```
+
+Blocking scan findings label the PR `spm-scan-blocked`; closing a PR skips that
+version. See [CI & Automated Updates](https://camunda.github.io/spm-cli/guide/ci)
+for the inputs, tokens (PRs opened with `github.token` don't trigger CI) and a
+Renovate alternative.
 
 ## Global skills (`-g` / `--global`)
 
