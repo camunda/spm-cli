@@ -1,12 +1,36 @@
 use crate::links::{Linked, Links, StateLock};
 use crate::lockfile::{LockedSkill, Lockfile};
 use crate::manifest::{Manifest, SkillSpec};
+use crate::owned::{Owned, Ownership};
 use crate::scope::Scope;
 use crate::vendor::{MaterializedPlugin, MaterializedSkill, Vendor};
 use crate::{resolver, store, transitive};
 use anyhow::{anyhow, bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+
+/// What a sync writes once everything is resolved and checked.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Apply {
+    /// Materialize into every target, then write `ai.lock`.
+    Install,
+    /// `--lock-only`: write `ai.lock` only. Only the entries this run
+    /// (re)resolves are fetched and scanned; every entry reused from `ai.lock`
+    /// is carried over as is, without touching its remote or the store (with
+    /// `resolveTransitive` on, skills are still walked to read their nested
+    /// `ai.json`). Nothing is materialized.
+    LockOnly,
+}
+
+impl Apply {
+    pub(super) fn from_lock_only(lock_only: bool) -> Self {
+        if lock_only {
+            Apply::LockOnly
+        } else {
+            Apply::Install
+        }
+    }
+}
 
 /// Core pipeline shared by add/remove/update/install:
 /// resolve manifest -> ai.lock -> populate store -> materialize vendor config.
@@ -24,6 +48,7 @@ pub(super) fn sync(
     force_refresh: bool,
     only: Option<&str>,
     locked: bool,
+    apply: Apply,
 ) -> Result<usize> {
     let state_lock = StateLock::acquire(scope, false)?;
     let dir = scope.manifest_dir()?;
@@ -32,7 +57,7 @@ pub(super) fn sync(
     let mode = if locked {
         LockMode::Locked
     } else {
-        LockMode::Write
+        LockMode::Write(apply)
     };
     plan(
         scope,
@@ -71,8 +96,9 @@ pub(super) fn sync_with_links(scope: &Scope, state_lock: StateLock, links: Links
 /// How a sync may treat `ai.lock`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LockMode {
-    /// Re-resolve what changed or is unpinned, then write `ai.lock`.
-    Write,
+    /// Re-resolve what changed or is unpinned, then write `ai.lock` — and,
+    /// unless [`Apply::LockOnly`], materialize into the targets.
+    Write(Apply),
     /// `spm install --locked`: install exactly `ai.lock`, never write it.
     Locked,
     /// `spm link`/`spm unlink`: like [`LockMode::Locked`] — they promise to
@@ -126,6 +152,7 @@ pub(super) fn save_and_sync(
     scope: &Scope,
     state_lock: StateLock,
     manifest: &Manifest,
+    apply: Apply,
 ) -> Result<usize> {
     let dir = scope.manifest_dir()?;
     let path = Manifest::path_in(&dir);
@@ -140,7 +167,7 @@ pub(super) fn save_and_sync(
         Links::load(scope)?,
         false,
         None,
-        LockMode::Write,
+        LockMode::Write(apply),
     )?;
     std::fs::write(&path, &text).with_context(|| format!("writing {}", path.display()))?;
     plan.apply(scope).map_err(|err| {
@@ -164,14 +191,14 @@ struct Plan {
     lock: Lockfile,
     materialized: Vec<MaterializedSkill>,
     plugins: Vec<MaterializedPlugin>,
-    previously_managed: Vec<String>,
-    previously_managed_plugins: Vec<String>,
+    previously_owned: Ownership,
     locked: bool,
     /// The `spm link` overrides to persist after applying (with `managed`
     /// refreshed), or `None` when the links file is already up to date.
     links: Option<Links>,
     _snapshots: Option<Snapshots>,
     _state_lock: StateLock,
+    apply: Apply,
 }
 
 /// Private copies of the linked directories, made with the same safe-copy
@@ -254,7 +281,11 @@ fn plan(
     if mode == LockMode::Links && !state_lock.is_exclusive() {
         bail!("internal error: editing links requires the exclusive links lock");
     }
-    let locked = mode != LockMode::Write;
+    let (locked, apply) = match mode {
+        LockMode::Write(apply) => (false, apply),
+        LockMode::Locked | LockMode::Links => (true, Apply::Install),
+    };
+    let lock_only = apply == Apply::LockOnly;
     let dir = scope.manifest_dir()?;
     if manifest.targets.is_empty() {
         bail!("ai.json declares no targets");
@@ -262,7 +293,13 @@ fn plan(
     // Source policy: judge every direct source before any network access, and
     // report all denied ones at once.
     let policy = crate::policy::activate(manifest, &dir)?;
-    let mut linked = resolve_links(scope, manifest, &links)?;
+    // `ai.lock` never depends on links, and a lock-only sync writes nothing
+    // else, so it ignores them (a missing linked directory can't block it).
+    let mut linked = if lock_only {
+        BTreeMap::new()
+    } else {
+        resolve_links(scope, manifest, &links)?
+    };
     let denied: Vec<String> = manifest
         .skills
         .iter()
@@ -314,31 +351,10 @@ fn plan(
     // walked (their transitive subtree is never visited).
     let mut skipped_roots: BTreeSet<String> = BTreeSet::new();
 
-    // Skill names spm materialized on the previous sync. Captured before the
-    // resolve loop mutates `prev`, so global/shared-dir vendors (which share a
-    // directory with the user's own skills) can purge only the entries spm
-    // previously owned but that were since dropped from the manifest.
-    //
-    // Plugin-bundled skills are flattened into the same shared skills dirs via
-    // `materialize`, so the previous set must include them too — otherwise
-    // removing a plugin (or shrinking its bundled skill set) would orphan those
-    // skill dirs in shared locations.
-    //
-    // Skills last materialized from a *linked* plugin's working tree are not in
-    // `ai.lock` (it records the locked commit's bundled skills), so the links
-    // file remembers them for the same purpose.
-    let previously_managed: Vec<String> = prev
-        .skills
-        .keys()
-        .cloned()
-        .chain(
-            prev.plugins
-                .values()
-                .flat_map(|l| l.bundled_skills.iter().cloned()),
-        )
-        .chain(links.managed.iter().cloned())
-        .collect();
-    let previously_managed_plugins: Vec<String> = prev.plugins.keys().cloned().collect();
+    // What spm owns in each target before this sync (see `crate::owned`):
+    // global/shared-dir vendors share a directory with the user's own skills,
+    // so they purge only entries spm put there that are no longer wanted.
+    let previously_owned = Ownership::load(scope, &prev, &links.managed, &manifest.targets)?;
 
     // Stable, path-independent project id: reuse the locked one, else mint & persist.
     let id = if prev.id.is_empty() {
@@ -374,6 +390,9 @@ fn plan(
         );
     }
 
+    // Direct entries (re)resolved by this run rather than reused from ai.lock:
+    // the only ones a lock-only sync fetches.
+    let mut fresh: BTreeSet<String> = BTreeSet::new();
     for (name, spec) in &manifest.skills {
         spec.version()?; // validates selectors
         let refresh = force_refresh && only.is_none_or(|o| o == name);
@@ -423,6 +442,9 @@ fn plan(
                 locked.also_satisfies = evidence;
             }
         }
+        if how == "resolved" {
+            fresh.insert(name.clone());
+        }
         let short = &locked.commit[..locked.commit.len().min(8)];
         let reference = locked.display_reference();
         println!("  {name:<width$}  {reference} @ {short}  ({how})");
@@ -451,12 +473,17 @@ fn plan(
                 "resolved",
             ),
         };
-        // A linked plugin is not fetched when its pin is reused, so its locked
-        // bundled-skill list is carried forward rather than re-enumerated from
-        // the (unfetched) checkout — keeping `ai.lock` unaffected by the link.
-        if how == "resolved" || !linked.contains_key(name) {
+        if how == "resolved" {
+            fresh.insert(name.clone());
+        }
+        // A reused pin is the same commit, so its bundled skills are too. They
+        // are carried forward rather than re-enumerated from a checkout when
+        // that checkout is not used: by a lock-only sync (which does not fetch
+        // the plugin again) or for a linked plugin (keeping `ai.lock`
+        // unaffected by the link).
+        if how == "resolved" || !(lock_only || linked.contains_key(name)) {
             locked.bundled_skills.clear();
-        } else {
+        } else if linked.contains_key(name) {
             reused_linked_plugins.insert(name.clone());
         }
         locked.also_satisfies.clear();
@@ -502,6 +529,10 @@ fn plan(
     }
     let mut linked_plugin_skills: Vec<String> = Vec::new();
     for (name, locked) in &mut lock.plugins {
+        if lock_only && !fresh.contains(name) {
+            println!("  {name:<width$}  unchanged (lock only, not fetched)");
+            continue;
+        }
         let link = linked.get(name);
         // A linked plugin only needs its locked checkout to record the commit's
         // bundled skills in `ai.lock` when its pin was freshly resolved.
@@ -579,8 +610,23 @@ fn plan(
     if !manifest.skills.is_empty() {
         println!("fetching skills into store");
     }
+    // Lock-only without transitive resolution: a reused skill is a leaf whose
+    // pin is carried over as is, so only the (re)resolved ones are walked. With
+    // it on, every skill is walked: its nested `ai.json` shapes the lock.
+    let walked: BTreeMap<String, LockedSkill> = if lock_only && !manifest.resolve_transitive {
+        for name in lock.skills.keys().filter(|n| !fresh.contains(*n)) {
+            println!("  {name:<width$}  unchanged (lock only, not fetched)");
+        }
+        lock.skills
+            .iter()
+            .filter(|(n, _)| fresh.contains(*n))
+            .map(|(n, l)| (n.clone(), l.clone()))
+            .collect()
+    } else {
+        lock.skills.clone()
+    };
     let expansion = transitive::expand(
-        &lock.skills,
+        &walked,
         &transitive::Ctx {
             prev: &prev.skills,
             resolve_transitive: manifest.resolve_transitive,
@@ -648,7 +694,9 @@ fn plan(
     // even skills-only targets get them. A bundled skill name that collides with
     // a standalone skill (or another plugin's skill) is a hard error: silently
     // overwriting a skill's content by manifest-key ordering is exactly the kind
-    // of drift AGENTS.md's "no drift surfaces" rule forbids.
+    // of drift AGENTS.md's "no drift surfaces" rule forbids. A lock-only sync
+    // materializes nothing and fetches just some plugins, so the names it
+    // carries over unfetched are checked from the lock below.
     for s in plugin_skills {
         if materialized.iter().any(|m| m.name == s.name) {
             bail!(
@@ -669,26 +717,44 @@ fn plan(
     // materialized set (direct, transitive, and plugin-bundled skills) and,
     // separately, across plugins — before any vendor writes a byte.
     reject_case_folding_collisions("skill", materialized.iter().map(|m| m.name.as_str()))?;
-    reject_case_folding_collisions("plugin", plugins.iter().map(|p| p.name.as_str()))?;
+    // From the lock, not the fetched `plugins`: a lock-only sync fetches only
+    // the plugins it (re)resolves, yet must not write a lock an install rejects.
+    reject_case_folding_collisions("plugin", lock.plugins.keys().map(String::as_str))?;
     reject_locked_skill_collisions(&lock)?;
-    let output_skills: Vec<String> = materialized
-        .iter()
-        .map(|m| m.name.clone())
-        .chain(previously_managed.iter().cloned())
-        .collect();
-    let output_plugins: Vec<String> = plugins
-        .iter()
-        .map(|p| p.name.clone())
-        .chain(previously_managed_plugins.iter().cloned())
-        .collect();
+    // Each target writes what it held before plus the new set — its own names
+    // only, so another target's leftovers don't count as its output. A
+    // lock-only sync writes no target output — only `ai.json`, `ai.lock` and
+    // machine-local state — so only those writes are guarded.
+    let (guarded_vendors, outputs): (&[Box<dyn Vendor>], Vec<Owned>) = if lock_only {
+        (&[], Vec::new())
+    } else {
+        let outputs = manifest
+            .targets
+            .iter()
+            .map(|t| {
+                let mut owned = previously_owned.for_target(t);
+                owned
+                    .skills
+                    .extend(materialized.iter().map(|m| m.name.clone()));
+                owned.plugins.extend(plugins.iter().map(|p| p.name.clone()));
+                owned
+            })
+            .collect();
+        (&vendors, outputs)
+    };
     guard_working_copies(
         scope,
         &dir,
-        &vendors,
+        guarded_vendors,
         &linked,
-        &output_skills,
-        &output_plugins,
+        &outputs,
         snapshots.as_ref().map(|s| s.root.as_path()),
+        Writes {
+            lock_only,
+            // A lock-only sync freezes only a legacy assumption (see
+            // `Plan::apply`); any other sync records what it installs.
+            ownership: !lock_only || matches!(previously_owned, Ownership::Legacy(_)),
+        },
     )?;
     if locked {
         // Backstop for the whole defect class: whatever the specific checks above
@@ -737,12 +803,12 @@ fn plan(
         lock,
         materialized,
         plugins,
-        previously_managed,
-        previously_managed_plugins,
+        previously_owned,
         locked,
         links,
         _snapshots: snapshots,
         _state_lock: state_lock,
+        apply,
     })
 }
 
@@ -751,14 +817,25 @@ impl Plan {
     /// persist `ai.lock`. Returns the number of locked skills + plugins.
     fn apply(self, scope: &Scope) -> Result<usize> {
         let lock = &self.lock;
+        if self.apply == Apply::LockOnly {
+            // Nothing is installed or removed now: the targets keep what they
+            // hold, and the next install or clean must still know it is spm's.
+            self.previously_owned.freeze(scope, &self.targets)?;
+            lock.save(&self.dir)?;
+            println!(
+                "wrote ai.lock only; run `{}` to install into the targets",
+                install_command(scope)
+            );
+            return Ok(lock.skills.len() + lock.plugins.len());
+        }
         if self.declares_any {
             println!("materializing: {}", self.targets.join(", "));
         }
-        // Skills copied from a linked plugin's working tree are owned only via
-        // the links file. Record the planned ones alongside the previous ones
-        // before any vendor writes, so a failure part-way through never leaves
-        // an agent-discovered skill that no later sync or `clean` knows to
-        // remove; the final links file (below) narrows it once all succeeded.
+        // Skills copied from a linked plugin's working tree are listed in the
+        // links file (an spm without an ownership record falls back to it).
+        // Record the planned ones alongside the previous ones before any
+        // vendor writes; the final links file (below) narrows it once all
+        // succeeded. Each target's record claims them as they are written.
         if let Some(links) = &self.links {
             let on_disk = Links::load(scope)?;
             let mut pending = on_disk.clone();
@@ -769,20 +846,22 @@ impl Plan {
                 pending.save(scope)?;
             }
         }
-        for vendor in &self.vendors {
-            vendor.materialize(
-                scope,
-                &lock.id,
-                &self.materialized,
-                &self.previously_managed,
-            )?;
-            vendor.materialize_plugins(
-                scope,
-                &lock.id,
-                &self.plugins,
-                &self.previously_managed_plugins,
-            )?;
-        }
+        let desired = Owned {
+            skills: self.materialized.iter().map(|m| m.name.clone()).collect(),
+            plugins: self.plugins.iter().map(|p| p.name.clone()).collect(),
+        };
+        self.previously_owned
+            .install(scope, &self.targets, &desired, |i, owned, claim| {
+                let vendor = &self.vendors[i];
+                vendor.materialize(
+                    scope,
+                    &lock.id,
+                    &self.materialized,
+                    &owned.skill_names(),
+                    claim,
+                )?;
+                vendor.materialize_plugins(scope, &lock.id, &self.plugins, &owned.plugin_names())
+            })?;
         // Only persist `ai.lock` once every fallible step (resolution, fetching,
         // collision checks, and vendor materialization) has succeeded —
         // otherwise a failed `install` could leave behind a lockfile pointing at
@@ -840,7 +919,8 @@ struct Guarded {
     active: bool,
 }
 
-/// Before `vendors` write or delete anything for `skills`/`plugins`, reject
+/// Before `vendors` write or delete anything — each only for its own
+/// `outputs` entry (the names it holds or is about to write) — reject
 /// any overlap with a linked working copy: each `active` link, plus every one
 /// recorded on this machine — in this scope's links file (one being dropped by
 /// `spm unlink`, re-pointed by `spm link`, or ignored as undeclared) and in
@@ -848,16 +928,19 @@ struct Guarded {
 /// project's into another's). Each is still the user's data even when this
 /// command doesn't copy from it. A recorded dir that is gone has nothing left
 /// to protect. Every command that writes target output or deletes it (`sync`,
-/// `clean`, `target remove`) must call this first.
+/// `clean`, `target remove`) must call this first. A lock-only sync writes
+/// just `ai.json` and `ai.lock` (pass no `vendors`), plus the ownership record
+/// when it freezes a legacy one (see [`Writes`]), so only those count.
 pub(super) fn guard_working_copies(
     scope: &Scope,
     manifest_dir: &std::path::Path,
     vendors: &[Box<dyn Vendor>],
     active: &BTreeMap<String, Linked>,
-    skills: &[String],
-    plugins: &[String],
+    outputs: &[Owned],
     snapshot: Option<&std::path::Path>,
+    writes: Writes,
 ) -> Result<()> {
+    assert_eq!(vendors.len(), outputs.len(), "one output set per vendor");
     let mut guarded: Vec<Guarded> = active
         .iter()
         .map(|(n, l)| Guarded {
@@ -873,7 +956,7 @@ pub(super) fn guard_working_copies(
     // "nothing to protect". Only a dir that is gone (or no longer a dir) is
     // skipped, so `spm unlink` can always drop a dead link.
     let own_file = Links::path(scope)?;
-    let mut state_files = vec![own_file.clone()];
+    let mut state_files = vec![StateFile::links(own_file.clone())];
     for rec in Links::all_recorded()? {
         let own = rec.file == own_file;
         let (base, origin) = if own {
@@ -882,7 +965,7 @@ pub(super) fn guard_working_copies(
             (rec.base, format!(" (linked {})", rec.origin))
         };
         if !own {
-            state_files.push(rec.file);
+            state_files.push(StateFile::links(rec.file));
         }
         for (name, display) in rec.links.links {
             let recorded = base.join(&display);
@@ -921,6 +1004,16 @@ pub(super) fn guard_working_copies(
             }
         }
     }
+    state_files.extend(
+        Ownership::all_paths(scope)?
+            .into_iter()
+            .map(|path| StateFile {
+                path,
+                what: "the ownership record",
+                loss: "lose the record of which skills spm installed (so cleanup could \
+                       delete skills it never installed)",
+            }),
+    );
     reject_link_overlaps(
         scope,
         manifest_dir,
@@ -929,20 +1022,61 @@ pub(super) fn guard_working_copies(
         Kept {
             state_files: &state_files,
             snapshot,
+            writes,
         },
-        skills,
-        plugins,
+        outputs,
     )
+}
+
+/// A machine-local state file spm alone keeps, which the targets' writes and
+/// deletions must never reach.
+struct StateFile {
+    path: PathBuf,
+    /// How messages name it (`the links file`).
+    what: &'static str,
+    /// What wiping it costs (`drop your links`).
+    loss: &'static str,
+}
+
+impl StateFile {
+    fn links(path: PathBuf) -> Self {
+        Self {
+            path,
+            what: "the links file",
+            loss: "drop your links",
+        }
+    }
+}
+
+/// Which of spm's own state files a guarded command writes besides `ai.json`
+/// and `ai.lock` (see [`guard_working_copies`]).
+#[derive(Clone, Copy)]
+pub(super) struct Writes {
+    /// Writes only `ai.json` and `ai.lock` (and maybe the ownership record):
+    /// neither the links file (nor its removal) nor `.gitignore`.
+    pub lock_only: bool,
+    /// Saves the ownership record.
+    pub ownership: bool,
+}
+
+impl Writes {
+    /// An install, `clean` or `target remove`: every state file.
+    pub const ALL: Self = Self {
+        lock_only: false,
+        ownership: true,
+    };
 }
 
 /// What the targets' writes and deletions must leave alone besides working
 /// copies (see [`reject_link_overlaps`]).
 struct Kept<'a> {
-    /// The links files this command must not wipe (this scope's first, which
-    /// it also writes).
-    state_files: &'a [PathBuf],
+    /// The state files this command must not wipe: every links file (this
+    /// scope's first, which it also writes) and every ownership record.
+    state_files: &'a [StateFile],
     /// Where this command copied linked content to materialize it from.
     snapshot: Option<&'a std::path::Path>,
+    /// Which state files this command writes itself.
+    writes: Writes,
 }
 
 /// Reject a linked working copy that overlaps any location a target writes or
@@ -958,23 +1092,31 @@ struct Kept<'a> {
 /// through would break — or, once regenerated, silently re-point — the link.
 ///
 /// Nor may the targets wipe what `kept` lists: a links file (dropping every
-/// link), or the snapshot before they copy from it.
+/// link), an ownership record, or the snapshot before they copy from it.
 fn reject_link_overlaps(
     scope: &Scope,
     manifest_dir: &std::path::Path,
     vendors: &[Box<dyn Vendor>],
     guarded: &[Guarded],
     kept: Kept,
-    skills: &[String],
-    plugins: &[String],
+    names: &[Owned],
 ) -> Result<()> {
     use crate::pathid::{deletion_target, identity, resolve, NodeId};
     let Kept {
         state_files,
         snapshot,
+        writes,
     } = kept;
-    // Nothing to protect: no working copy, and no links file to lose.
-    if guarded.is_empty() && !state_files.iter().any(|f| f.symlink_metadata().is_ok()) {
+    let lock_only = writes.lock_only;
+    // Nothing to protect: no working copy, no state file to lose, and none
+    // about to be created (an ownership record written for the first time
+    // must not land in a target's output either).
+    if guarded.is_empty()
+        && !writes.ownership
+        && !state_files
+            .iter()
+            .any(|f| f.path.symlink_metadata().is_ok())
+    {
         return Ok(());
     }
     // (owner, path as spelled, physical identity, written through?)
@@ -982,16 +1124,19 @@ fn reject_link_overlaps(
     let mut patched: Vec<(&str, PathBuf)> = vec![
         ("spm", Manifest::path_in(manifest_dir)),
         ("spm", Lockfile::path_in(manifest_dir)),
-        ("spm", Links::path(scope)?),
     ];
-    if let Scope::Project { root } = scope {
-        patched.push(("spm", root.join(".gitignore")));
+    if !lock_only {
+        patched.push(("spm", Links::path(scope)?));
+        if let Scope::Project { root } = scope {
+            patched.push(("spm", root.join(".gitignore")));
+        }
     }
-    for v in vendors {
-        let mut paths = v.clean_paths(scope, skills)?;
-        paths.extend(v.skill_paths(scope, skills)?);
-        paths.extend(v.plugin_clean_paths(scope, plugins)?);
-        paths.extend(v.plugin_paths(scope, plugins)?);
+    for (v, owned) in vendors.iter().zip(names) {
+        let (skills, plugins) = (owned.skill_names(), owned.plugin_names());
+        let mut paths = v.clean_paths(scope, &skills)?;
+        paths.extend(v.skill_paths(scope, &skills)?);
+        paths.extend(v.plugin_clean_paths(scope, &plugins)?);
+        paths.extend(v.plugin_paths(scope, &plugins)?);
         for p in paths {
             let id = identity(&deletion_target(&p)?)?;
             outputs.push((v.name(), p, id, false));
@@ -1002,12 +1147,33 @@ fn reject_link_overlaps(
         let id = identity(&resolve(p, &mut Vec::new())?)?;
         outputs.push((owner, p.clone(), id, true));
     }
-    // The links file itself must survive the targets' cleanup: inside their
-    // output (by its entry or where it points) it would be wiped, silently
-    // dropping every link. Nor may any other file spm or a target patches in
-    // place (`.gitignore`, a settings file, ...) resolve to it: that write would
-    // corrupt it.
-    for links_file in state_files {
+    // spm's own state writes count too, so none lands on another state file
+    // (e.g. `$SPM_HOME/owned` aliasing `$SPM_HOME/links`). This scope's links
+    // file is also deleted once it holds nothing, which removes the entry at
+    // its path (not what a final symlink there points at).
+    if !lock_only {
+        let links_file = state_files[0].path.clone();
+        let id = identity(&deletion_target(&links_file)?)?;
+        outputs.push(("spm", links_file, id, false));
+    }
+    // Saving the ownership record replaces the entry at its path (beside a
+    // temporary file in the same dir), following its parents' symlinks only.
+    if writes.ownership {
+        let record = Ownership::path(scope)?;
+        let id = identity(&deletion_target(&record)?)?;
+        outputs.push(("spm", record, id, false));
+    }
+    // Each state file must survive the targets' cleanup: inside their output
+    // (by its entry or where it points) it would be wiped, silently dropping
+    // every link or the record of what spm installed. Nor may any other file
+    // spm or a target patches in place (`.gitignore`, a settings file, ...)
+    // resolve to it: that write would corrupt it.
+    for StateFile {
+        path: links_file,
+        what,
+        loss,
+    } in state_files
+    {
         // Its entry, where it points, and every symlink on the way: deleting
         // any of those loses the file (or access to it) just the same.
         let mut hops = Vec::new();
@@ -1022,8 +1188,9 @@ fn reject_link_overlaps(
         // the files' own identities show it.
         let hit = outputs
             .iter()
-            .find(|(_, p, out, through)| {
-                (!through || p != links_file) && state.iter().any(|s| s.starts_with(out))
+            .find(|(_, p, out, _)| {
+                // Only a state file's own write (at its own path) is meant.
+                p != links_file && state.iter().any(|s| s.starts_with(out))
             })
             .map(|(owner, p, _, through)| (*owner, p.as_path(), *through))
             .or_else(|| {
@@ -1044,9 +1211,8 @@ fn reject_link_overlaps(
                 format!("target `{owner}`")
             };
             bail!(
-                "the links file `{}` {relation} `{}`, which {owner} {effect}; refusing to \
-                 continue, as that would drop your links — remove whatever puts it there (e.g. \
-                 a symlink) and retry",
+                "{what} `{}` {relation} `{}`, which {owner} {effect}; refusing to continue, as \
+                 that would {loss} — remove whatever puts it there (e.g. a symlink) and retry",
                 links_file.display(),
                 p.display()
             );
@@ -1068,11 +1234,6 @@ fn reject_link_overlaps(
             );
         }
     }
-    // This scope's links file is also deleted once it holds nothing, which
-    // removes the entry at its path (not what a final symlink there points at).
-    let links_file = state_files[0].clone();
-    let id = identity(&deletion_target(&links_file)?)?;
-    outputs.push(("spm", links_file, id, false));
     for g in guarded {
         let (name, display, active) = (&g.name, &g.display, g.active);
         let src = identity(&g.dir)?;

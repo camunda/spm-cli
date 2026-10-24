@@ -18,6 +18,94 @@ pub enum NodeId {
     Name(String),
 }
 
+/// A directory's own file identity, independent of the route to it: moved,
+/// or reached through other symlinks, it stays the same; a different
+/// directory created at the same path gets a new one. Device and inode on
+/// Unix; volume serial number and file index on Windows. A filesystem may
+/// hand a deleted directory's inode to a new one (ext4 does readily), so the
+/// birth time tells such a reuse apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DirId {
+    pub volume: u64,
+    pub index: u64,
+    /// Birth time: nanoseconds since the Unix epoch on Unix, `FILETIME`
+    /// ticks on Windows.
+    pub born: u64,
+}
+
+/// The [`DirId`] of the directory `p` resolves to, if it exists and its
+/// filesystem reports a birth time — without one, a reused inode can't be
+/// told apart, so there is no reliable identity.
+pub fn dir_id(p: &Path) -> Result<Option<DirId>> {
+    let fin = resolve(p, &mut Vec::new())?;
+    match std::fs::symlink_metadata(&fin) {
+        Ok(m) if m.is_dir() => file_id(&fin),
+        Ok(_) => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(anyhow!("inspecting {}: {e}", fin.display())),
+    }
+}
+
+#[cfg(unix)]
+fn file_id(p: &Path) -> Result<Option<DirId>> {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::symlink_metadata(p).map_err(|e| anyhow!("inspecting {}: {e}", p.display()))?;
+    let born = m
+        .created()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .and_then(|d| u64::try_from(d.as_nanos()).ok());
+    Ok(born.map(|born| DirId {
+        volume: m.dev(),
+        index: m.ino(),
+        born,
+    }))
+}
+
+#[cfg(windows)]
+fn file_id(p: &Path) -> Result<Option<DirId>> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT,
+    };
+    // No access rights are needed to query the identity; backup semantics
+    // are what lets a directory be opened at all.
+    let f = std::fs::OpenOptions::new()
+        .access_mode(0)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(p)
+        .map_err(|e| anyhow!("opening {}: {e}", p.display()))?;
+    // SAFETY: an all-zero BY_HANDLE_FILE_INFORMATION is a valid value (plain
+    // integers and FILETIMEs), and the handle stays open for the whole call.
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    if unsafe { GetFileInformationByHandle(f.as_raw_handle(), &mut info) } == 0 {
+        return Err(anyhow!(
+            "inspecting {}: {}",
+            p.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    let ticks = |t: windows_sys::Win32::Foundation::FILETIME| {
+        (u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime)
+    };
+    Ok(Some(DirId {
+        volume: u64::from(info.dwVolumeSerialNumber),
+        index: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+        born: ticks(info.ftCreationTime),
+    }))
+}
+
+/// The identity of the location `p` resolves to, if it exists.
+pub fn existing_identity(p: &Path) -> Result<Option<Vec<NodeId>>> {
+    let fin = resolve(p, &mut Vec::new())?;
+    if std::fs::symlink_metadata(&fin).is_err() {
+        return Ok(None);
+    }
+    identity(&fin).map(Some)
+}
+
 /// The identity of physical path `p` as one [`NodeId`] per component from the
 /// root, so `a` is `b` or an ancestor of it iff `identity(b)` starts with
 /// `identity(a)` — regardless of how either is spelled (e.g. `.AGENTS` vs

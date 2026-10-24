@@ -1,8 +1,8 @@
-use super::clean::managed_names;
-use super::sync::save_and_sync;
+use super::sync::{save_and_sync, Apply};
 use crate::lockfile::Lockfile;
 use crate::manifest::Manifest;
-use crate::pathid::{deletion_target, identity, resolve, NodeId};
+use crate::owned::Ownership;
+use crate::pathid::{deletion_target, existing_identity, identity, resolve, NodeId};
 use crate::scope::Scope;
 use crate::vendor;
 use anyhow::{anyhow, bail, Context, Result};
@@ -61,7 +61,7 @@ pub(super) fn target_add(scope: &Scope, vendors: Vec<String>) -> Result<()> {
     }
 
     // Materialize existing skills into the newly-added vendor(s).
-    save_and_sync(scope, state_lock, &manifest)?;
+    save_and_sync(scope, state_lock, &manifest, Apply::Install)?;
     println!("added target(s): {}", added.join(", "));
     Ok(())
 }
@@ -117,7 +117,15 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
     }
 
     let lock = Lockfile::load_or_default(&dir)?;
-    let (managed, managed_plugins) = managed_names(&lock, &crate::links::Links::load(scope)?);
+    // Each target's own spm output (see `crate::owned`).
+    let mut owned = Ownership::load(
+        scope,
+        &lock,
+        &crate::links::Links::load(scope)?.managed,
+        &manifest.targets,
+    )?
+    // Exact, so each removal below can be released before it starts.
+    .exact(&manifest.targets);
     // Physical locations a remaining target still loads skills, plugins or
     // their metadata from (`content`), plus every location reaching them
     // depends on (`traversed`: symlinks, and dirs passed through before a
@@ -127,11 +135,23 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
     // `.agents/skills/<name>/`, and a vendor dir may be symlinked onto (or into)
     // another target's output. Locations are compared by filesystem identity so
     // spelling aliases (e.g. case on a case-insensitive filesystem) still match.
+    //
+    // A remaining target's record can lag behind what it loads (e.g. a `target
+    // add codex cursor` that failed at `codex` never reached `cursor`, or an
+    // install that failed after `codex` wrote the `.agents/skills/` it shares
+    // with `amp`), so each remaining target also protects where it would load
+    // the removed targets' names from. Protecting more only keeps more.
+    let mut inferred = crate::owned::Owned::default();
+    for t in &removed {
+        inferred.extend(&owned.for_target(t));
+    }
     let mut needed: Vec<(&str, Vec<NodeId>, bool)> = Vec::new();
     for t in &remaining {
         let v = vendor::for_target(t)?;
-        let mut paths = v.skill_paths(scope, &managed)?;
-        paths.extend(v.plugin_paths(scope, &managed_plugins)?);
+        let mut names = owned.for_target(t);
+        names.extend(&inferred);
+        let mut paths = v.skill_paths(scope, &names.skill_names())?;
+        paths.extend(v.plugin_paths(scope, &names.plugin_names())?);
         let (mut traversed, mut content) = (Vec::new(), Vec::new());
         let mut visited = std::collections::HashSet::new();
         for p in paths {
@@ -149,18 +169,67 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
         .iter()
         .map(|t| vendor::for_target(t))
         .collect::<Result<Vec<_>>>()?;
+    let removed_owned: Vec<_> = removed.iter().map(|t| owned.for_target(t)).collect();
     super::sync::guard_working_copies(
         scope,
         &dir,
         &removed_vendors,
         &Default::default(),
-        &managed,
-        &managed_plugins,
+        &removed_owned,
         None,
+        super::sync::Writes::ALL,
     )?;
-    for v in &removed_vendors {
-        let mut candidates = v.clean_paths(scope, &managed)?;
-        candidates.extend(v.plugin_clean_paths(scope, &managed_plugins)?);
+    for ((t, v), names) in removed.iter().zip(&removed_vendors).zip(&removed_owned) {
+        let mut candidates = v.clean_paths(scope, &names.skill_names())?;
+        candidates.extend(v.plugin_clean_paths(scope, &names.plugin_names())?);
+        let mut spans = Vec::new();
+        for p in &candidates {
+            spans.push(identity(&deletion_target(p)?)?);
+        }
+        // What a remaining target loads from inside `t`'s output — the same
+        // shared entry, or one nested in `t`'s container — or the very entry
+        // `t` loads a skill from (e.g. both reach it through symlinks) is kept
+        // (protected above) and is now that target's: hand it over so a later
+        // `clean` or install still removes it. A location a symlink nested
+        // inside `t`'s entry points at is not `t`'s output, so is never handed;
+        // nor is where `t`'s entry itself points if it is a symlink (cleanup
+        // removes just the symlink) — only its parent dirs' aliases count.
+        for x in &remaining {
+            let xv = vendor::for_target(x)?;
+            let mut handed = crate::owned::Owned::default();
+            for (name, is_plugin) in names
+                .skill_names()
+                .into_iter()
+                .map(|n| (n, false))
+                .chain(names.plugin_names().into_iter().map(|n| (n, true)))
+            {
+                let (paths, ours) = if is_plugin {
+                    (xv.plugin_paths(scope, std::slice::from_ref(&name))?, None)
+                } else {
+                    let entry = deletion_target(&v.skills_dir(scope)?.join(&name))?;
+                    let ours = if entry.symlink_metadata().is_ok() {
+                        Some(identity(&entry)?)
+                    } else {
+                        None
+                    };
+                    (vec![xv.skills_dir(scope)?.join(&name)], ours)
+                };
+                for q in paths {
+                    let Some(id) = existing_identity(&q)? else {
+                        continue;
+                    };
+                    if Some(&id) == ours.as_ref() || spans.iter().any(|s| id.starts_with(s)) {
+                        let set = if is_plugin {
+                            &mut handed.plugins
+                        } else {
+                            &mut handed.skills
+                        };
+                        set.insert(name.clone());
+                    }
+                }
+            }
+            owned.grant(x, &handed);
+        }
         let mut deletable = Vec::new();
         for p in candidates {
             let target = identity(&deletion_target(&p)?)?;
@@ -174,10 +243,17 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
                 None => deletable.push(p),
             }
         }
-        vendor::remove_paths(&deletable)?;
-        v.deregister(scope)?;
-        v.deregister_plugins(scope)?;
+        // Released before anything is deleted (see `clean`).
+        owned.clone().without(t).save(scope)?;
+        if let Err(e) = vendor::remove_paths(&deletable)
+            .and_then(|()| v.deregister(scope))
+            .and_then(|()| v.deregister_plugins(scope))
+        {
+            return Err(owned.fail(scope, &manifest.targets, e));
+        }
+        owned = owned.without(t);
     }
+    owned.save(scope)?;
 
     manifest.targets = remaining;
     manifest.save(&dir)?;

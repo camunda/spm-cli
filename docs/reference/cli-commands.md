@@ -6,12 +6,12 @@ the authoritative, version-specific usage.
 ```bash
 spm init [--target amp|claude|cline|codex|copilot|cursor|gemini|windsurf ...] [-g]  # scaffold ai.json (repeatable / comma-separated)
 spm add <git> [--tag|--branch|--commit <v>|--version "<range>"] \  # add + install a skill (no selector = default branch; github.com/owner/repo@ref also works)
-        [--path <subdir>] [--name <local-name>] [--all] [--force] [-g]  # --all: add every skill under --path
+        [--path <subdir>] [--name <local-name>] [--all] [--force] [--lock-only] [-g]  # --all: add every skill under --path
         [--plugin]                                 # --plugin: add a full plugin instead of a skill
 spm target add [vendor ...] [-g]                   # add target vendor(s); no arg = pick interactively
 spm target remove <vendor ...> [-g]               # drop target vendor(s) + clean their output; alias: rm
 spm remove <name> [--plugin] [-g]                  # drop a skill (or a plugin with --plugin); alias: rm
-spm update [name] [-g]                             # re-resolve branches/tags to latest
+spm update [name] [--lock-only] [-g]               # re-resolve branches/tags to latest; --lock-only: write ai.lock only
 spm link <name> <dir> [-g]                         # develop a declared skill/plugin from a local dir (machine-local override)
 spm unlink <name>|--all [-g]                       # drop link override(s), restore the locked version
 spm install [-g] [--locked]                        # rebuild from ai.lock (after clone); alias: i; --locked fails if ai.lock is out of sync (CI)
@@ -117,6 +117,62 @@ keeps the new entry (so spm still owns any output already written) and the
 error tells you to run `spm install` once the cause is fixed. `spm remove` and
 `spm target add` behave the same way.
 
+#### Writing only the lock (`--lock-only`)
+
+`spm add --lock-only` and `spm update --lock-only` write `ai.json`/`ai.lock`
+without installing anything, like npm's `--package-lock-only`. Only the entries
+the command re-resolves (the added or updated dependency; everything for a bare
+`spm update`) are fetched into the store and scanned. Every other `ai.lock`
+entry is kept exactly as it is — its commit, a plugin's `bundled_skills`, and
+the transitive pins below it — without contacting its remote, so an unrelated
+dependency whose remote is unreachable does not block the change. An entry
+whose `ai.json` request no longer matches its pin is still re-resolved, as in
+any sync. Nothing is written into the targets: run `spm install` to materialize
+the new lock. The lock is the same one the command writes without
+`--lock-only`. [`spm link`](#spm-link-name-dir) overrides never affect
+`ai.lock`, so they are ignored (a missing linked directory does not block it).
+
+Skills the new lock drops (say, a plugin's renamed bundled skill or a transitive
+pin that went away) stay installed until then, and spm still owns them: it keeps
+a machine-local record of what it last installed into each target
+(`$SPM_HOME/owned/<project>-<hash>.json` for a project,
+`$SPM_HOME/owned-global.json` with `-g`; never in the checkout, so a repository
+can't supply it), so the next `spm install` or `spm clean` removes exactly those from
+shared skills dirs without touching your own skills. Only an install or clean
+updates the record, so names a lock merely passed through — or a target added
+since — are never claimed. The same applies when a pulled `ai.lock` drops them.
+The record lists what was actually written (a linked plugin's working copy
+included), and a target keeps its record until it is cleaned or removed, even
+while a branch's `ai.json` omits it. Targets that share one skills dir (codex
+and amp both use `.agents/skills/`) share what spm installed there: when a
+branch switches from one to the other, the configured target takes over the
+other's names, so it removes them once they're no longer wanted. Once one of
+them removes a name from the shared dir, the others stop claiming it too, even
+if the install fails before reaching them. Likewise, when an install, `spm
+clean` or `spm target remove` fails part-way, the record drops every name whose
+entry is already gone, so a skill you create under that name afterwards is
+yours. Names are released in the record before they're removed, so if the
+record can't be written (say `$SPM_HOME` is read-only) the command stops before
+deleting anything. Targets with separate dirs never claim each other's names. The record is bound to the
+directory spm wrote into: if a target's skills dir later leads to a different
+directory (say the original was moved aside, or deleted and recreated, or
+replaced by a symlink to your own skills), nothing recorded for the original is
+removed from it. On a filesystem that reports no directory birth time spm
+can't tell a recreated directory apart, so it leaves such skills installed
+rather than risk deleting yours. `--lock-only` itself writes only
+`ai.json` and `ai.lock` (no target output, `.gitignore` or links file), so a
+[linked](#spm-link-name-dir) working copy that only those other files lead
+into does not block it.
+
+With `resolveTransitive` on, every other skill is still read (from the store, or
+fetched when missing) for its nested `ai.json`, which decides the transitive
+pins; only plugins and the targets are skipped.
+
+```bash
+spm update reviewer --lock-only
+spm add https://github.com/org/repo --tag v2.0.0 --name reviewer --force --lock-only
+```
+
 #### Adding a full plugin (`--plugin`)
 
 Beyond individual skills, spm can install a **Claude Code plugin** — one that
@@ -186,6 +242,9 @@ transitive child that root still requests by the **same** moving ref stays
 pinned. Refresh the whole graph — every transitive child — with a bare
 `spm update`. See [Transitive Skill Dependencies](/guide/transitive-dependencies).
 
+`--lock-only` rewrites `ai.lock` without installing, fetching only what it
+re-resolves — see [Writing only the lock](#writing-only-the-lock-lock-only).
+
 ### `spm link <name> <dir>`
 
 Overrides the source of an **already-declared** skill or plugin with a local
@@ -223,14 +282,18 @@ spm install                               # re-run after further edits
 - The directory may not overlap anything a target writes or deletes (e.g.
   Codex's `.agents/skills/<name>`, or the project root, which contains the
   output), nor be reached by a file spm edits in place (`ai.json`, `ai.lock`,
-  the links file, `.gitignore`, Claude's settings) through a symlink or a hard link (detected on Unix) — that would wipe or modify your working copy,
+  the links file, the ownership record, `.gitignore`, Claude's settings) through a symlink or a hard link (detected on Unix) — that would wipe or modify your working copy,
   or copy the output into itself. The path as given counts too: one that
   passes through a symlink inside the output (e.g. `.agents/skills/<name>`
   replaced by a symlink to your clone) is rejected, as syncing would replace it;
   so is a symlink inside the directory whose route passes through the output.
   Likewise, a links file that lies inside a target's output (e.g. through a
   symlinked `$SPM_HOME/links`) makes syncing, `clean` and `target remove`
-  refuse, since rebuilding that output would silently drop your links.
+  refuse, since rebuilding that output would silently drop your links. The same
+  goes for any ownership record (e.g. through a symlinked `$SPM_HOME/owned`):
+  losing it would leave cleanup trusting a newer `ai.lock` and deleting skills
+  spm never installed — this holds before the first install too, when the
+  record is yet to be written.
   This protection covers every link on the machine, whichever scope recorded it:
   a global link (or another project's) pointing into this project's output
   makes this project's syncs, `clean` and `target remove` refuse until it is
@@ -403,7 +466,9 @@ then exits non-zero regardless of `--exit-code`. Accepts `-g`, `--json` (see
 
 ### `spm clean`
 
-Removes generated vendor config from the project.
+Removes generated vendor config from the project: whatever spm last installed
+into each target, including anything the lock has since dropped (see
+[Writing only the lock](#writing-only-the-lock-lock-only)).
 
 ### `spm prune [--yes]`
 

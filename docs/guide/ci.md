@@ -71,18 +71,20 @@ gets separate branches and pull requests:
 
 | Declared as | Proposed change |
 | --- | --- |
-| `"tag": "v1.0.0"` and a newer tag exists | `tag` re-pinned to the newest tag (as `spm add --tag … --force` does). |
+| `"tag": "v1.0.0"` and a newer tag exists | `tag` re-pinned to the newest tag (as `spm add --tag … --force --lock-only` does). |
 | `"tag"` re-pointed upstream | `ai.lock` moved to the tag's new commit, with a warning in the PR (also when the tag a `version` range is locked to was re-pointed). |
-| `"branch": "main"` | `ai.lock` moved to the branch's new head (`spm update <name>`). |
+| `"branch": "main"` | `ai.lock` moved to the branch's new head (`spm update <name> --lock-only`). |
 | `"version": "^1"` | `ai.lock` moved to the highest tag in range. A newer tag **outside** the range is reported in the run summary but not proposed — widen the range by hand. |
 | `"commit"` | Never outdated. |
 
 Transitive dependencies are updated through the skill that requests them, not on
 their own. Re-runs are idempotent: an unchanged update is not re-pushed, and a
-dependency that moved again updates its existing pull request. Each update syncs the
-whole project, so a dependency whose pinned commit can't be fetched also stops
-the updates of the others until it's fixed or removed
-([#126](https://github.com/camunda/spm-cli/issues/126)).
+dependency that moved again updates its existing pull request. Each update runs
+with [`--lock-only`](/reference/cli-commands#spm-update-name): only the updated
+dependency is fetched, every other `ai.lock` entry is kept as is and nothing is
+installed, so a dependency whose remote can't be reached is reported without
+stopping the updates of the others. With `resolveTransitive` on, the other
+skills are still read (from the store, or fetched) for their nested `ai.json`.
 
 The pull request body shows the old and new version and commit, a compare link
 (for GitHub-hosted sources), any other `ai.lock` entries that changed with it

@@ -1,4 +1,4 @@
-use super::{MaterializedPlugin, MaterializedSkill, Vendor};
+use super::{Claim, MaterializedPlugin, MaterializedSkill, Vendor};
 use crate::scope::Scope;
 use crate::{fsutil, gitignore, jsonutil, paths};
 use anyhow::{Context, Result};
@@ -63,6 +63,7 @@ impl Vendor for Claude {
         _project_id: &str,
         skills: &[MaterializedSkill],
         _previously_managed: &[String],
+        claim: Claim,
     ) -> Result<()> {
         let market = marketplace(scope);
         let market_dir = managed_dir(scope)?;
@@ -75,6 +76,7 @@ impl Vendor for Claude {
         std::fs::create_dir_all(&skills_dir)?;
 
         for s in skills {
+            claim(&s.name)?;
             let dest = skills_dir.join(&s.name);
             fsutil::copy_tree(&s.path, &dest, &s.root)
                 .with_context(|| format!("copying skill `{}` into plugin", s.name))?;
@@ -127,9 +129,13 @@ impl Vendor for Claude {
         Ok(())
     }
 
+    fn skills_dir(&self, scope: &Scope) -> Result<PathBuf> {
+        Ok(managed_dir(scope)?.join("plugin").join("skills"))
+    }
+
     fn status(&self, scope: &Scope, expected: &[String]) -> Result<super::VendorStatus> {
         let market_dir = managed_dir(scope)?;
-        let skills_dir = market_dir.join("plugin").join("skills");
+        let skills_dir = self.skills_dir(scope)?;
         // The marketplace dir is spm-owned in both scopes, so stale detection is
         // always meaningful here.
         let mut st = super::classify(&skills_dir, expected, true);
@@ -424,7 +430,9 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         let scope = Scope::Project { root: tmp.clone() };
         let s = make_skill(&tmp, "greet");
-        Claude.materialize(&scope, "spm-1234", &[s], &[]).unwrap();
+        Claude
+            .materialize(&scope, "spm-1234", &[s], &[], &mut |_| Ok(()))
+            .unwrap();
 
         assert!(tmp
             .join(".spm/claude/plugin/skills/greet/SKILL.md")
@@ -449,7 +457,9 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         let scope = Scope::Project { root: tmp.clone() };
         let s = make_skill(&tmp, "greet");
-        Claude.materialize(&scope, "spm-1234", &[s], &[]).unwrap();
+        Claude
+            .materialize(&scope, "spm-1234", &[s], &[], &mut |_| Ok(()))
+            .unwrap();
         Claude.clean(&scope, &["greet".into()]).unwrap();
 
         assert!(!tmp.join(".spm/claude").exists(), "marketplace dir removed");

@@ -76,7 +76,7 @@ when `ai.json` exists leaves the file untouched and exits 0.
 spm add <git-url | github.com/<owner>/<repo>[@<ref>]> \
         [--tag <t> | --branch <b> | --commit <sha> | --version "<range>"] \
         [--path <subdir>] [--name <local-name>] [--all] [--plugin] [--force] \
-        [--protocol ssh|https] [--protocol-fallback] [-g]
+        [--lock-only] [--protocol ssh|https] [--protocol-fallback] [-g]
 ```
 
 Adds the dependency to `ai.json`, resolves it to a commit, writes `ai.lock`,
@@ -114,6 +114,10 @@ scans the content, and materializes it, all in one step. It needs an existing
   target gets only the plugin's bundled skills.
 - `--force` overwrites an existing entry of the same name and kind, for example
   to re-pin a version.
+- `--lock-only` writes `ai.json` and `ai.lock` but installs nothing. Only the
+  new entry is fetched and scanned; every other `ai.lock` entry is kept as is
+  without contacting its remote (with `resolveTransitive` on, other skills are
+  still read for their nested `ai.json`). Run `spm install` to materialize.
 
 The URL can be any form `git` understands: `https://...`, `git@host:org/repo.git`,
 `ssh://...`, `file://...`. Any git host works.
@@ -172,7 +176,7 @@ for the global scope); do exactly that. It still fetches, so it is not offline.
 ### `spm update`
 
 ```bash
-spm update [name] [--protocol ssh|https] [--protocol-fallback] [-g]
+spm update [name] [--lock-only] [--protocol ssh|https] [--protocol-fallback] [-g]
 ```
 
 Re-resolves `--tag` and `--branch` entries to their current commit, and
@@ -191,6 +195,14 @@ re-pinned child fresh), but a transitive child the root still requests by the
 **same** moving ref stays at its locked commit — the single-name update does
 **not** chase it to the branch/tag tip. Run a bare `spm update` to chase those
 too. See [Transitive dependencies](#transitive-dependencies).
+
+`--lock-only` only rewrites `ai.lock`: it fetches and scans just what it
+re-resolves, keeps every other entry exactly (so an unrelated, unreachable
+dependency does not block it), installs nothing, and ends with
+``wrote ai.lock only; run `spm install` to install into the targets``. The lock
+matches what the same command writes without `--lock-only`. Skills it drops
+from the lock stay installed until the next `spm install` (or `spm clean`),
+which removes them.
 
 ### `spm link`
 
@@ -373,8 +385,12 @@ Keep `-g` on these commands in global scope.
 spm clean [-g]
 ```
 
-Removes the generated vendor config for this scope. `ai.json` and `ai.lock`
-stay, so `spm install` restores everything.
+Removes the generated vendor config for this scope, including skills an
+earlier `--lock-only` change dropped from `ai.lock` but left installed (spm
+records what it installed into each target under
+`$SPM_HOME/owned/`, or in `$SPM_HOME/owned-global.json` with `-g`; targets
+sharing a skills dir, like codex and amp's `.agents/skills/`, share that
+record). `ai.json` and `ai.lock` stay, so `spm install` restores everything.
 
 ### `spm prune`
 

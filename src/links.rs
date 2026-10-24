@@ -76,9 +76,7 @@ impl Links {
     pub fn path(scope: &Scope) -> Result<PathBuf> {
         let home = paths::spm_home()?;
         Ok(match scope {
-            Scope::Project { root } => home
-                .join(PROJECT_DIR)
-                .join(project_file_name(&canonical_root(root)?)),
+            Scope::Project { root } => project_state_path(&home, PROJECT_DIR, root)?,
             Scope::Global => home.join(FILE),
         })
     }
@@ -357,6 +355,15 @@ fn publish((staging, dest): &(PathBuf, PathBuf), p: &Path) -> Result<()> {
         let _ = std::fs::remove_file(staging);
         format!("writing {}", p.display())
     })
+}
+
+/// Where machine-local state about the project at `root` lives: one file per
+/// project under `home/<subdir>`, named by [`project_file_name`]. Keeping it
+/// out of the checkout means a repository can never supply it.
+pub(crate) fn project_state_path(home: &Path, subdir: &str, root: &Path) -> Result<PathBuf> {
+    Ok(home
+        .join(subdir)
+        .join(project_file_name(&canonical_root(root)?)))
 }
 
 fn canonical_root(root: &Path) -> Result<PathBuf> {

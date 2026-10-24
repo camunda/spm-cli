@@ -347,10 +347,21 @@ impl Sandbox {
     }
 
     /// The project's links file under `$SPM_HOME/links/` (a path that doesn't
-    /// exist when there is none). Found rather than derived, so the tests never
-    /// duplicate how spm names it.
+    /// exist when there is none).
     fn project_links(&self) -> PathBuf {
-        let dir = self.spm_home.join("links");
+        self.project_state("links")
+    }
+
+    /// The project's ownership record under `$SPM_HOME/owned/`.
+    fn project_owned(&self) -> PathBuf {
+        self.project_state("owned")
+    }
+
+    /// The project's machine-local state file under `$SPM_HOME/<subdir>/` (a
+    /// path that doesn't exist when there is none). Found rather than derived,
+    /// so the tests never duplicate how spm names it.
+    fn project_state(&self, subdir: &str) -> PathBuf {
+        let dir = self.spm_home.join(subdir);
         let files: Vec<PathBuf> = std::fs::read_dir(&dir)
             .map(|rd| {
                 rd.map(|e| e.unwrap().path())
@@ -11018,7 +11029,8 @@ fn commands_never_wipe_a_links_file_inside_target_output() {
 /// Every working copy linked on this machine is protected, whichever scope
 /// linked it: a global link — or another project's — pointing into this
 /// project's output makes every command that would rebuild or delete that
-/// output refuse, until it's unlinked where it was linked. The global case is
+/// output refuse, until it's unlinked where it was linked (a lock-only update,
+/// which writes no output, still runs). The global case is
 /// Unix only: on Windows the home dir (global output) can't be redirected into
 /// the sandbox.
 #[test]
@@ -11092,6 +11104,9 @@ fn links_from_other_scopes_are_guarded_too() {
             assert!(err.contains(&origin), "{origin} {args:?}: {err}");
             assert!(read_path(&wc.join("SKILL.md")).contains("WIP"), "wiped");
         }
+        // A lock-only update writes no target output, so the link can't block it.
+        sb.ok(&["update", "--lock-only"]);
+        assert!(read_path(&wc.join("SKILL.md")).contains("WIP"), "wiped");
         run(&["unlink", "greet"]);
         sb.ok(&["install"]);
     }
@@ -11334,9 +11349,10 @@ fn commands_waiting_on_the_links_lock_never_restore_stale_overrides() {
 }
 
 /// Cleanup computes what it owns only once it holds the links lock, so a skill
-/// a linked plugin started bundling while it waited (recorded in the links
-/// file's `managed` list by the concurrent `link`/`install`) is cleaned up too,
-/// rather than left behind in a shared skills dir that nothing tracks anymore.
+/// a linked plugin started bundling while it waited (recorded by the
+/// concurrent `link`/`install` in the links file's `managed` list and in the
+/// target's ownership record) is cleaned up too, rather than left behind in a
+/// shared skills dir that nothing tracks anymore.
 #[test]
 fn cleanup_waiting_on_the_links_lock_removes_skills_managed_meanwhile() {
     let sb = Sandbox::new();
@@ -11363,6 +11379,13 @@ fn cleanup_waiting_on_the_links_lock_removes_skills_managed_meanwhile() {
         )
         .unwrap();
         edit_project_links(&sb, |doc| doc["managed"] = serde_json::json!(["extra"]));
+        let owned = sb.project_owned();
+        let mut record: serde_json::Value = serde_json::from_str(&read_path(&owned)).unwrap();
+        record["targets"]["codex"]["skills"]
+            .as_array_mut()
+            .unwrap()
+            .push("extra".into());
+        std::fs::write(&owned, serde_json::to_string_pretty(&record).unwrap()).unwrap();
         drop(held);
         blocked.finish();
         assert!(!extra.exists(), "{args:?}");
@@ -11831,6 +11854,1626 @@ fn a_temp_dir_inside_target_output_is_refused() {
             std::fs::read_dir(&tmp).unwrap().count(),
             0,
             "{args:?}: snapshot left"
+        );
+    }
+}
+
+/// `--lock-only` fixture: two branch skills from their own repos (`gone`, `ok`)
+/// and a branch plugin `kit` (bundling `composer`) from the sandbox repo, all
+/// installed for copilot. Returns `ok`'s repo dir.
+fn lock_only_fixture(sb: &Sandbox) -> PathBuf {
+    let gone = make_repo(
+        &sb.root.join("gone"),
+        &[("SKILL.md", "---\nname: gone\n---\nGone.\n")],
+    );
+    let ok_dir = sb.root.join("ok");
+    let ok = make_repo(&ok_dir, &[("SKILL.md", "---\nname: ok\n---\nOk v1.\n")]);
+    sb.add_plugin();
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        sb,
+        &format!(
+            r#"{{"targets":["copilot"],"skills":{{
+                "gone":{{"git":"{gone}","branch":"main"}},
+                "ok":{{"git":"{ok}","branch":"main"}}}},
+              "plugins":{{"kit":{{"git":"{u}","branch":"main","path":"pkg"}}}}}}"#,
+            u = sb.skill_url()
+        ),
+    );
+    sb.ok(&["install"]);
+    ok_dir
+}
+
+/// Commit a new `SKILL.md` body to `dir` on `main` and return the new tip.
+fn commit_skill(dir: &Path, body: &str) -> String {
+    std::fs::write(dir.join("SKILL.md"), body).unwrap();
+    git_in(dir, &["commit", "-aqm", "change"]);
+    skill_head(dir)
+}
+
+/// Make `gone` and `kit` unfetchable — remotes moved away and the store wiped,
+/// as on a fresh CI runner. `ok` stays reachable. Undone by [`restore_unrelated`].
+fn break_unrelated(sb: &Sandbox) {
+    std::fs::rename(sb.root.join("gone"), sb.root.join("gone-moved")).unwrap();
+    std::fs::rename(&sb.skill_repo, sb.root.join("skill-moved")).unwrap();
+    std::fs::remove_dir_all(sb.spm_home.join("store")).unwrap();
+}
+
+fn restore_unrelated(sb: &Sandbox) {
+    std::fs::rename(sb.root.join("gone-moved"), sb.root.join("gone")).unwrap();
+    std::fs::rename(sb.root.join("skill-moved"), &sb.skill_repo).unwrap();
+}
+
+/// Assert `after` is `before` except for the listed `(map, name)` entries,
+/// which must come from `after` — every other entry (and the project `id`) is
+/// carried over exactly, `bundled_skills`/`requested_by` included.
+fn assert_only_entries_changed(
+    before: &serde_json::Value,
+    after: &serde_json::Value,
+    changed: &[(&str, &str)],
+) {
+    let mut expected = before.clone();
+    for (map, name) in changed {
+        let entry = after[*map][*name].clone();
+        assert!(!entry.is_null(), "{map}.{name} missing from {after}");
+        expected[*map][*name] = entry;
+    }
+    assert_eq!(after, &expected, "only {changed:?} may change in ai.lock");
+}
+
+fn vendor_tree(sb: &Sandbox) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+    tree_snapshot(&sb.project.join(".agents"))
+}
+
+/// Issue #126: `update <name> --lock-only` re-resolves and fetches only that
+/// dependency, so an unrelated one whose remote is gone (and whose store entry
+/// is missing) neither blocks it nor changes in ai.lock. Nothing is installed,
+/// and the lock it writes is exactly what a full `update <name>` writes.
+#[test]
+fn update_lock_only_skips_unrelated_unreachable_dependencies() {
+    let sb = Sandbox::new();
+    let ok_dir = lock_only_fixture(&sb);
+    let before = lock_doc(&sb);
+    assert_eq!(
+        before["plugins"]["kit"]["bundled_skills"],
+        serde_json::json!(["composer"])
+    );
+    let vendor_before = vendor_tree(&sb);
+    let tip = commit_skill(&ok_dir, "---\nname: ok\n---\nOk v2.\n");
+    break_unrelated(&sb);
+
+    let out = sb.ok(&["update", "ok", "--lock-only"]);
+    assert!(out.contains("wrote ai.lock only"), "{out}");
+    assert!(out.contains("run `spm install`"), "{out}");
+    let after = lock_doc(&sb);
+    assert_eq!(after["skills"]["ok"]["commit"], tip);
+    assert_only_entries_changed(&before, &after, &[("skills", "ok")]);
+    assert_eq!(vendor_tree(&sb), vendor_before, "nothing is materialized");
+    assert_eq!(sb.store_entries(), 1, "only `ok` is fetched");
+    // Without --lock-only the unrelated, unreachable pins block the update.
+    let err = fails(&sb, &["update", "ok"]);
+    assert!(err.contains("fetching"), "{err}");
+
+    // The lock is complete: `install --locked` accepts it, and a full update of
+    // the same dependency writes the very same bytes.
+    restore_unrelated(&sb);
+    let lock_only_bytes = snapshot(&sb, "ai.lock");
+    sb.ok(&["install", "--locked"]);
+    sb.ok(&["update", "ok"]);
+    assert_eq!(snapshot(&sb, "ai.lock"), lock_only_bytes);
+    assert!(sb
+        .read(".agents/skills/spm-managed-skills/ok/SKILL.md")
+        .contains("Ok v2."));
+}
+
+/// Every form of `add --lock-only` writes ai.json + ai.lock for the new or
+/// re-pinned entry alone, without fetching unrelated, unreachable entries or
+/// installing anything.
+#[test]
+fn add_lock_only_skips_unrelated_unreachable_dependencies() {
+    struct Case {
+        label: &'static str,
+        files: &'static [(&'static str, &'static str)],
+        args: &'static [&'static str],
+        changed: &'static [(&'static str, &'static str)],
+    }
+    let cases = [
+        Case {
+            label: "new skill",
+            files: &[("SKILL.md", "---\nname: fresh\n---\nFresh.\n")],
+            args: &["--branch", "main", "--name", "fresh"],
+            changed: &[("skills", "fresh")],
+        },
+        Case {
+            label: "new plugin",
+            files: &[
+                (
+                    "pkg/.claude-plugin/plugin.json",
+                    r#"{"name":"plug","skills":"./skills/"}"#,
+                ),
+                (
+                    "pkg/skills/other/SKILL.md",
+                    "---\nname: other\n---\nOther.\n",
+                ),
+            ],
+            args: &[
+                "--branch", "main", "--path", "pkg", "--plugin", "--name", "plug",
+            ],
+            changed: &[("plugins", "plug")],
+        },
+        Case {
+            label: "--all",
+            files: &[
+                ("pack/alpha/SKILL.md", "---\nname: alpha\n---\n"),
+                ("pack/beta/SKILL.md", "---\nname: beta\n---\n"),
+            ],
+            args: &["--branch", "main", "--path", "pack", "--all"],
+            changed: &[("skills", "alpha"), ("skills", "beta")],
+        },
+    ];
+    for case in cases {
+        let label = case.label;
+        let sb = Sandbox::new();
+        lock_only_fixture(&sb);
+        let source = make_repo(&sb.root.join("new"), case.files);
+        let before = lock_doc(&sb);
+        let manifest_before: serde_json::Value = serde_json::from_str(&sb.read("ai.json")).unwrap();
+        let vendor_before = vendor_tree(&sb);
+        break_unrelated(&sb);
+
+        let mut args = vec!["add", source.as_str(), "--lock-only"];
+        args.extend_from_slice(case.args);
+        let out = sb.ok(&args);
+        assert!(out.contains("wrote ai.lock only"), "{label}: {out}");
+        let after = lock_doc(&sb);
+        assert_only_entries_changed(&before, &after, case.changed);
+        let manifest: serde_json::Value = serde_json::from_str(&sb.read("ai.json")).unwrap();
+        let mut expected = manifest_before.clone();
+        for (map, name) in case.changed {
+            assert!(manifest[*map][*name].is_object(), "{label}: {manifest}");
+            expected[*map][*name] = manifest[*map][*name].clone();
+        }
+        assert_eq!(
+            manifest, expected,
+            "{label}: only the new entries are added"
+        );
+        if label == "new plugin" {
+            assert_eq!(
+                after["plugins"]["plug"]["bundled_skills"],
+                serde_json::json!(["other"])
+            );
+        }
+        assert_eq!(
+            vendor_tree(&sb),
+            vendor_before,
+            "{label}: nothing is materialized"
+        );
+
+        restore_unrelated(&sb);
+        sb.ok(&["install", "--locked"]);
+    }
+}
+
+/// The update action's re-tag: `add --force --tag <new> --lock-only` re-pins an
+/// existing entry without fetching unrelated, unreachable ones.
+#[test]
+fn add_force_lock_only_repins_without_fetching_unrelated_dependencies() {
+    let sb = Sandbox::new();
+    let ok_dir = lock_only_fixture(&sb);
+    let ok = sb.root.join("ok").display().to_string().replace('\\', "/");
+    let tip = commit_skill(&ok_dir, "---\nname: ok\n---\nOk v2.\n");
+    git_in(&ok_dir, &["tag", "v2.0.0"]);
+    let before = lock_doc(&sb);
+    let vendor_before = vendor_tree(&sb);
+    break_unrelated(&sb);
+
+    sb.ok(&[
+        "add",
+        "--tag=v2.0.0",
+        "--name=ok",
+        "--force",
+        "--lock-only",
+        "--",
+        &format!("file://{ok}"),
+    ]);
+    let after = lock_doc(&sb);
+    assert_eq!(after["skills"]["ok"]["commit"], tip);
+    assert_eq!(after["skills"]["ok"]["reference"], "tag:v2.0.0");
+    assert_only_entries_changed(&before, &after, &[("skills", "ok")]);
+    let manifest: serde_json::Value = serde_json::from_str(&sb.read("ai.json")).unwrap();
+    assert_eq!(manifest["skills"]["ok"]["tag"], "v2.0.0");
+    assert_eq!(vendor_tree(&sb), vendor_before);
+}
+
+/// A bare `update --lock-only` refreshes every entry (so fetches them all) but
+/// still installs nothing.
+#[test]
+fn bare_update_lock_only_refreshes_everything_without_installing() {
+    let sb = Sandbox::new();
+    let ok_dir = lock_only_fixture(&sb);
+    let ok_tip = commit_skill(&ok_dir, "---\nname: ok\n---\nOk v2.\n");
+    let gone_tip = commit_skill(&sb.root.join("gone"), "---\nname: gone\n---\nGone v2.\n");
+    let vendor_before = vendor_tree(&sb);
+
+    sb.ok(&["update", "--lock-only"]);
+    let after = lock_doc(&sb);
+    assert_eq!(after["skills"]["ok"]["commit"], ok_tip);
+    assert_eq!(after["skills"]["gone"]["commit"], gone_tip);
+    assert_eq!(vendor_tree(&sb), vendor_before);
+    sb.ok(&["install", "--locked"]);
+}
+
+/// `ai.lock` never depends on `spm link` overrides and `--lock-only` writes
+/// nothing else, so it ignores them: a linked directory that has since
+/// disappeared (which fails every installing sync) does not block it, and the
+/// linked output and link state are left as they were.
+#[test]
+fn update_lock_only_ignores_links() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--name",
+        "greet",
+    ]);
+    let dev = local_skill_checkout(&sb, "dev", "LOCAL EDIT");
+    sb.ok(&["link", "greet", "../dev"]);
+    let links = read_path(&sb.project_links());
+    let installed = sb
+        .project
+        .join(".agents/skills/spm-managed-skills/greet/SKILL.md");
+    std::fs::remove_dir_all(&dev).unwrap();
+    fails(&sb, &["update", "greet"]);
+
+    let tip = commit_skill(&sb.skill_repo, "---\nname: greet\n---\nGreet v2.\n");
+    let out = sb.ok(&["update", "greet", "--lock-only"]);
+    assert!(out.contains("wrote ai.lock only"), "{out}");
+    assert_eq!(lock_doc(&sb)["skills"]["greet"]["commit"], tip);
+    assert!(read_path(&installed).contains("LOCAL EDIT"));
+    assert_eq!(read_path(&sb.project_links()), links);
+}
+
+/// An unrelated entry whose ai.json request no longer matches its pin can't be
+/// carried over: `--lock-only` re-resolves it like any sync, and fails when its
+/// remote is gone rather than keep a pin ai.json no longer asks for.
+#[test]
+fn lock_only_still_resolves_an_unrelated_entry_whose_request_changed() {
+    let sb = Sandbox::new();
+    lock_only_fixture(&sb);
+    break_unrelated(&sb);
+    let manifest = sb
+        .read("ai.json")
+        .replacen(r#""branch":"main"}"#, r#""branch":"dev"}"#, 1);
+    assert!(manifest.contains(r#""branch":"dev"}"#));
+    write_manifest(&sb, &manifest);
+    let lock_before = snapshot(&sb, "ai.lock");
+    let err = fails(&sb, &["update", "ok", "--lock-only"]);
+    assert!(err.contains("resolving skill `gone`"), "{err}");
+    assert_eq!(snapshot(&sb, "ai.lock"), lock_before);
+}
+
+/// What `--lock-only` does fetch still goes through the content scan: a
+/// blocked entry is never pinned.
+#[test]
+fn add_lock_only_still_scans_what_it_fetches() {
+    let sb = Sandbox::new();
+    sb.add_malicious_skill();
+    sb.ok(&["init", "--target", "copilot"]);
+    let manifest_before = snapshot(&sb, "ai.json");
+    let out = sb.spm(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--path",
+        "malicious",
+        "--lock-only",
+    ]);
+    let err = assert_failed_and_unchanged(&sb, &out, &manifest_before, &None);
+    assert!(err.contains("scanning skill `malicious`"), "{err}");
+}
+
+/// With `resolveTransitive`, `update <name> --lock-only` keeps every other
+/// root's transitive pins exactly, even when their branches moved — but it
+/// still walks those roots to read their nested `ai.json`, so it needs them
+/// (store or remote) and fails rather than write an unverified lock.
+#[test]
+fn update_lock_only_with_transitive_keeps_other_transitive_pins() {
+    let sb = Sandbox::new();
+    let leaf_dir = sb.root.join("leaf");
+    let leaf = make_repo(&leaf_dir, &[("SKILL.md", "---\nname: leaf\n---\nLeaf.\n")]);
+    let top_dir = sb.root.join("top");
+    let top = make_repo(
+        &top_dir,
+        &[
+            ("SKILL.md", "---\nname: top\n---\nTop.\n"),
+            (
+                "ai.json",
+                &format!(r#"{{"skills":{{"leaf":{{"git":"{leaf}","branch":"main"}}}}}}"#),
+            ),
+        ],
+    );
+    let ok_dir = sb.root.join("ok");
+    let ok = make_repo(&ok_dir, &[("SKILL.md", "---\nname: ok\n---\nOk.\n")]);
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{
+                "top":{{"git":"{top}","branch":"main"}},
+                "ok":{{"git":"{ok}","branch":"main"}}}}}}"#
+        ),
+    );
+    sb.ok(&["install"]);
+    let before = lock_doc(&sb);
+    let leaf_key = before["skills"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .find(|k| k.starts_with("top__leaf-"))
+        .unwrap()
+        .clone();
+    let vendor_before = vendor_tree(&sb);
+    commit_skill(&leaf_dir, "---\nname: leaf\n---\nLeaf v2.\n");
+    commit_skill(&top_dir, "---\nname: top\n---\nTop v2.\n");
+    let tip = commit_skill(&ok_dir, "---\nname: ok\n---\nOk v2.\n");
+
+    sb.ok(&["update", "ok", "--lock-only"]);
+    let after = lock_doc(&sb);
+    assert_eq!(after["skills"]["ok"]["commit"], tip);
+    assert_only_entries_changed(&before, &after, &[("skills", "ok")]);
+    assert_eq!(after["skills"][&leaf_key], before["skills"][&leaf_key]);
+    assert_eq!(vendor_tree(&sb), vendor_before);
+
+    std::fs::rename(&top_dir, sb.root.join("top-moved")).unwrap();
+    std::fs::remove_dir_all(sb.spm_home.join("store")).unwrap();
+    let lock_before = snapshot(&sb, "ai.lock");
+    let err = fails(&sb, &["update", "ok", "--lock-only"]);
+    assert!(err.contains("fetching skill `top`"), "{err}");
+    assert_eq!(snapshot(&sb, "ai.lock"), lock_before);
+}
+
+/// A skills dir shared with the user's own skills (Codex in a project, Copilot
+/// globally), where spm may only remove what it owns.
+fn shared_skills_dir(sb: &Sandbox, global: bool) -> PathBuf {
+    if global {
+        sb.home.join(".copilot").join("skills")
+    } else {
+        sb.project.join(".agents").join("skills")
+    }
+}
+
+/// Install plugin `kit` (bundling `old`) and transitive root `top` (pulling in
+/// `leaf`) into a shared skills dir next to a user-authored `mine`, then make
+/// lock-only updates drop `old` (now `new`) and `leaf` from ai.lock. Returns
+/// the shared dir and `leaf`'s lock key.
+fn lock_only_drops_installed_skills(sb: &Sandbox, global: bool) -> (PathBuf, String) {
+    let g: &[&str] = if global { &["-g"] } else { &[] };
+    let run = |args: &[&str]| sb.ok(&[args, g].concat());
+    let kit_dir = sb.root.join("kit");
+    let kit = make_repo(
+        &kit_dir,
+        &[
+            (
+                "pkg/.claude-plugin/plugin.json",
+                r#"{"name":"kit","version":"1.0.0","skills":"./skills/"}"#,
+            ),
+            ("pkg/skills/old/SKILL.md", "---\nname: old\n---\nOld.\n"),
+        ],
+    );
+    let leaf = make_repo(
+        &sb.root.join("leaf"),
+        &[("SKILL.md", "---\nname: leaf\n---\nLeaf.\n")],
+    );
+    let top_dir = sb.root.join("top");
+    let top = make_repo(
+        &top_dir,
+        &[
+            ("SKILL.md", "---\nname: top\n---\nTop.\n"),
+            (
+                "ai.json",
+                &format!(r#"{{"skills":{{"leaf":{{"git":"{leaf}","branch":"main"}}}}}}"#),
+            ),
+        ],
+    );
+    let target = if global { "copilot" } else { "codex" };
+    run(&["init", "--target", target]);
+    let manifest_dir = if global { &sb.spm_home } else { &sb.project };
+    std::fs::write(
+        manifest_dir.join("ai.json"),
+        format!(
+            r#"{{"targets":["{target}"],"resolveTransitive":true,
+              "skills":{{"top":{{"git":"{top}","branch":"main"}}}},
+              "plugins":{{"kit":{{"git":"{kit}","branch":"main","path":"pkg"}}}}}}"#
+        ),
+    )
+    .unwrap();
+    let dir = shared_skills_dir(sb, global);
+    std::fs::create_dir_all(dir.join("mine")).unwrap();
+    std::fs::write(dir.join("mine/SKILL.md"), "---\nname: mine\n---\nMine.\n").unwrap();
+    run(&["install"]);
+    let lock: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(manifest_dir.join("ai.lock")).unwrap())
+            .unwrap();
+    let leaf_key = lock["skills"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .find(|k| k.starts_with("top__leaf-"))
+        .unwrap()
+        .clone();
+    for name in ["old", "top", leaf_key.as_str(), "mine"] {
+        assert!(dir.join(name).join("SKILL.md").exists(), "{name} installed");
+    }
+
+    git_in(&kit_dir, &["mv", "pkg/skills/old", "pkg/skills/new"]);
+    std::fs::write(
+        kit_dir.join("pkg/skills/new/SKILL.md"),
+        "---\nname: new\n---\nNew.\n",
+    )
+    .unwrap();
+    git_in(&kit_dir, &["commit", "-aqm", "rename old to new"]);
+    git_in(&top_dir, &["rm", "-q", "ai.json"]);
+    git_in(&top_dir, &["commit", "-qm", "drop leaf"]);
+    run(&["update", "kit", "--lock-only"]);
+    run(&["update", "top", "--lock-only"]);
+    let lock = std::fs::read_to_string(manifest_dir.join("ai.lock")).unwrap();
+    assert!(
+        !lock.contains(&leaf_key) && !lock.contains("\"old\""),
+        "{lock}"
+    );
+    for name in ["old", leaf_key.as_str()] {
+        assert!(dir.join(name).exists(), "lock-only leaves {name} installed");
+    }
+    (dir, leaf_key)
+}
+
+/// A skill a lock-only update drops from ai.lock (a plugin's bundled skill or a
+/// transitive pin) is still spm's: the next `install` purges it from the
+/// shared target, and the user's own skills there are left alone.
+#[test]
+fn install_after_lock_only_update_removes_the_skills_it_dropped() {
+    let sb = Sandbox::new();
+    let (dir, leaf_key) = lock_only_drops_installed_skills(&sb, false);
+    sb.ok(&["install"]);
+    for gone in ["old", leaf_key.as_str()] {
+        assert!(!dir.join(gone).exists(), "{gone} purged");
+    }
+    for kept in ["new", "top", "mine"] {
+        assert!(dir.join(kept).join("SKILL.md").exists(), "{kept} kept");
+    }
+    // Ownership now matches the lock again: removing `kit` purges `new`.
+    sb.ok(&["remove", "--plugin", "kit"]);
+    assert!(!dir.join("new").exists());
+    assert!(dir.join("mine/SKILL.md").exists());
+    // The record is machine-local state, kept out of the checkout.
+    assert!(sb.project_owned().exists());
+    assert!(!sb.project.join(".spm").exists());
+}
+
+/// Same for `clean`: it removes what a lock-only update dropped from ai.lock,
+/// then records that spm owns nothing.
+#[test]
+fn clean_after_lock_only_update_removes_the_skills_it_dropped() {
+    let sb = Sandbox::new();
+    let (dir, leaf_key) = lock_only_drops_installed_skills(&sb, false);
+    sb.ok(&["clean"]);
+    for gone in ["old", "top", leaf_key.as_str()] {
+        assert!(!dir.join(gone).exists(), "{gone} cleaned");
+    }
+    assert!(dir.join("mine/SKILL.md").exists(), "user skill kept");
+    let record: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(sb.project_owned()).unwrap()).unwrap();
+    assert_eq!(
+        record,
+        serde_json::json!({"targets": {}}),
+        "nothing owned now"
+    );
+}
+
+/// The global scope keeps its own record (under SPM_HOME) for Copilot's flat
+/// `~/.copilot/skills`, which is shared with the user's personal skills.
+#[cfg(unix)]
+#[test]
+fn global_install_and_clean_after_lock_only_update_remove_the_skills_it_dropped() {
+    for finish in ["install", "clean"] {
+        let sb = Sandbox::new();
+        let (dir, leaf_key) = lock_only_drops_installed_skills(&sb, true);
+        assert_eq!(dir, sb.copilot_global_skills());
+        assert!(sb.spm_home.join("owned-global.json").exists());
+        assert!(!sb.project.join(".spm").exists(), "{finish}");
+        sb.ok(&[finish, "-g"]);
+        for gone in ["old", leaf_key.as_str()] {
+            assert!(!dir.join(gone).exists(), "{finish}: {gone} removed");
+        }
+        assert!(
+            dir.join("mine/SKILL.md").exists(),
+            "{finish}: user skill kept"
+        );
+        assert_eq!(dir.join("new").exists(), finish == "install");
+        let record: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(sb.spm_home.join("owned-global.json")).unwrap(),
+        )
+        .unwrap();
+        let skills = &record["targets"]["copilot"]["skills"];
+        assert_eq!(skills.is_null(), finish == "clean", "{finish}: {record}");
+    }
+}
+
+/// Ownership is what spm installed, not what intermediate locks named: after
+/// successive lock-only updates (the first bundling a name the user also
+/// authored, the next renaming it away), install and clean leave the user's
+/// skill alone and still remove what was really installed.
+#[test]
+fn successive_lock_only_updates_do_not_claim_never_installed_names() {
+    for finish in ["install", "clean"] {
+        let sb = Sandbox::new();
+        let (dir, _) = lock_only_drops_installed_skills(&sb, false);
+        let kit_dir = sb.root.join("kit");
+        // Intermediate lock: `kit` bundles `mine`, a name the user authored.
+        git_in(&kit_dir, &["mv", "pkg/skills/new", "pkg/skills/mine"]);
+        git_in(&kit_dir, &["commit", "-qm", "bundle mine"]);
+        sb.ok(&["update", "kit", "--lock-only"]);
+        assert!(sb.read("ai.lock").contains("\"mine\""));
+        git_in(&kit_dir, &["mv", "pkg/skills/mine", "pkg/skills/new"]);
+        git_in(&kit_dir, &["commit", "-qm", "bundle new"]);
+        sb.ok(&["update", "kit", "--lock-only"]);
+
+        sb.ok(&[finish]);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("mine/SKILL.md")).unwrap(),
+            "---\nname: mine\n---\nMine.\n",
+            "{finish}: user skill untouched"
+        );
+        assert!(
+            !dir.join("old").exists(),
+            "{finish}: installed `old` removed"
+        );
+    }
+}
+
+/// A target added after a lock-only update owns nothing yet: installing into it
+/// must not delete a user's same-named skill that spm only ever installed into
+/// another target (and the lock no longer requests). The original target is
+/// still purged.
+#[test]
+fn target_added_after_lock_only_update_does_not_purge_other_targets_names() {
+    let sb = Sandbox::new();
+    let (dir, _) = lock_only_drops_installed_skills(&sb, false);
+    let cursor = sb.project.join(".cursor/skills");
+    std::fs::create_dir_all(cursor.join("old")).unwrap();
+    std::fs::write(cursor.join("old/SKILL.md"), "Mine.\n").unwrap();
+
+    sb.ok(&["target", "add", "cursor"]);
+    assert_eq!(
+        std::fs::read_to_string(cursor.join("old/SKILL.md")).unwrap(),
+        "Mine.\n"
+    );
+    assert!(cursor.join("new/SKILL.md").exists());
+    assert!(!dir.join("old").exists(), "codex's own `old` purged");
+
+    // Removing a target forgets it, so its output is never claimed again.
+    sb.ok(&["target", "remove", "cursor"]);
+    assert!(!cursor.join("new").exists());
+    assert!(cursor.join("old/SKILL.md").exists());
+    let record: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(sb.project_owned()).unwrap()).unwrap();
+    assert!(record["targets"]["cursor"].is_null(), "{record}");
+    assert!(!record["targets"]["codex"].is_null(), "{record}");
+}
+
+/// Install codex with skill `base`, then `add --lock-only` a skill `fresh`
+/// and make the next materialization fail part-way: the shared-dir vendor
+/// copies the skills before it updates the (now unreadable) `.gitignore`.
+fn partially_failed_install(sb: &Sandbox) -> (PathBuf, String) {
+    let base = make_repo(
+        &sb.root.join("base"),
+        &[("SKILL.md", "---\nname: base\n---\nBase.\n")],
+    );
+    let fresh = make_repo(
+        &sb.root.join("fresh"),
+        &[("SKILL.md", "---\nname: fresh\n---\nFresh.\n")],
+    );
+    sb.ok(&["init", "--target", "codex"]);
+    sb.ok(&["add", &base, "--branch", "main", "--name", "base"]);
+    sb.ok(&[
+        "add",
+        &fresh,
+        "--branch",
+        "main",
+        "--name",
+        "fresh",
+        "--lock-only",
+    ]);
+    let dir = sb.project.join(".agents/skills");
+    std::fs::create_dir_all(dir.join("mine")).unwrap();
+    std::fs::write(dir.join("mine/SKILL.md"), "Mine.\n").unwrap();
+    corrupt_gitignore(sb);
+    (dir, fresh)
+}
+
+/// What a failed install already wrote is recorded, so `clean` right after it
+/// (no successful install in between) still removes it.
+#[test]
+fn clean_after_a_partially_failed_install_removes_what_it_wrote() {
+    let sb = Sandbox::new();
+    let (dir, _) = partially_failed_install(&sb);
+    fails(&sb, &["install"]);
+    assert!(dir.join("fresh/SKILL.md").exists(), "copied before failing");
+    sb.ok(&["clean"]);
+    for gone in ["base", "fresh"] {
+        assert!(!dir.join(gone).exists(), "{gone} cleaned");
+    }
+    assert_eq!(sb.read(".agents/skills/mine/SKILL.md"), "Mine.\n");
+}
+
+/// Same for a target whose addition failed part-way: `target remove` right
+/// after it removes what that addition wrote. Codex installs fine; Cursor
+/// copies `base`, then fails on `fresh` (a file of the user's is in the way).
+#[test]
+fn target_remove_after_a_partially_failed_target_add_removes_what_it_wrote() {
+    let sb = Sandbox::new();
+    let (dir, _) = partially_failed_install(&sb);
+    std::fs::remove_file(sb.project.join(".gitignore")).unwrap();
+    sb.ok(&["install"]);
+    let cursor = sb.project.join(".cursor/skills");
+    std::fs::create_dir_all(cursor.join("mine")).unwrap();
+    std::fs::write(cursor.join("mine/SKILL.md"), "Mine.\n").unwrap();
+    std::fs::write(cursor.join("fresh"), "in the way\n").unwrap();
+
+    let err = fails(&sb, &["target", "add", "cursor"]);
+    assert!(err.contains("clearing") && err.contains("fresh"), "{err}");
+    assert!(
+        cursor.join("base/SKILL.md").exists(),
+        "copied before failing"
+    );
+    sb.ok(&["target", "remove", "cursor"]);
+    assert!(!cursor.join("base").exists(), "removed from cursor");
+    assert_eq!(sb.read(".cursor/skills/mine/SKILL.md"), "Mine.\n");
+    for kept in ["base", "fresh", "mine"] {
+        assert!(
+            dir.join(kept).join("SKILL.md").exists(),
+            "codex keeps {kept}"
+        );
+    }
+}
+
+/// Targets sharing a physical skills dir (`codex` and `amp` both load
+/// `.agents/skills/`) share what one of them wrote there: when an install fails
+/// part-way — `codex` wrote `fresh`, `cursor` failed, `amp` was never reached —
+/// removing `codex` keeps `fresh` for `amp` and hands its ownership over, so a
+/// later `clean` still removes it.
+#[test]
+fn target_remove_after_a_partial_install_keeps_output_shared_with_a_remaining_target() {
+    let sb = Sandbox::new();
+    let base = make_repo(
+        &sb.root.join("base"),
+        &[("SKILL.md", "---\nname: base\n---\nBase.\n")],
+    );
+    let fresh = make_repo(
+        &sb.root.join("fresh"),
+        &[("SKILL.md", "---\nname: fresh\n---\nFresh.\n")],
+    );
+    sb.ok(&["init", "--target", "codex,cursor,amp"]);
+    sb.ok(&["add", &base, "--branch", "main", "--name", "base"]);
+    sb.ok(&[
+        "add",
+        &fresh,
+        "--branch",
+        "main",
+        "--name",
+        "fresh",
+        "--lock-only",
+    ]);
+    let cursor = sb.project.join(".cursor/skills");
+    std::fs::write(cursor.join("fresh"), "in the way\n").unwrap();
+    let err = fails(&sb, &["install"]);
+    assert!(err.contains("clearing") && err.contains("fresh"), "{err}");
+    let shared = sb.project.join(".agents/skills");
+    assert!(shared.join("fresh/SKILL.md").exists(), "codex wrote fresh");
+
+    let out = sb.ok(&["target", "remove", "codex"]);
+    assert!(out.contains("still used by target `amp`"), "{out}");
+    for kept in ["base", "fresh"] {
+        assert!(
+            shared.join(kept).join("SKILL.md").exists(),
+            "amp keeps {kept}"
+        );
+    }
+
+    std::fs::remove_file(cursor.join("fresh")).unwrap();
+    sb.ok(&["clean"]);
+    for gone in ["base", "fresh"] {
+        assert!(!shared.join(gone).exists(), "{gone} cleaned");
+    }
+}
+
+/// Shared output nested inside a removed vendor's container: `.cursor/skills`
+/// aliases Claude's marketplace, and a `target add codex cursor` that fails at
+/// `codex` never reaches `cursor`, so nothing is recorded for it. Removing
+/// Claude must still keep the marketplace `cursor` loads, and hand `cursor`
+/// ownership of what it loads there so a later `clean` removes it.
+#[test]
+fn target_remove_after_a_partial_target_add_keeps_output_nested_in_its_dir() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let greet = sb.claude_market_dir().join("plugin/skills/greet/SKILL.md");
+    assert!(greet.exists());
+    std::fs::create_dir_all(sb.project.join(".cursor")).unwrap();
+    symlink(
+        "../.spm/claude/plugin/skills",
+        sb.project.join(".cursor/skills"),
+    );
+    let blocker = sb.project.join(".agents/skills/greet");
+    std::fs::create_dir_all(blocker.parent().unwrap()).unwrap();
+    std::fs::write(&blocker, "in the way\n").unwrap();
+    let err = fails(&sb, &["target", "add", "codex", "cursor"]);
+    assert!(err.contains("clearing") && err.contains("greet"), "{err}");
+
+    let out = sb.ok(&["target", "remove", "claude"]);
+    assert!(out.contains("still used by target `cursor`"), "{out}");
+    assert!(greet.exists(), "cursor still loads greet through the alias");
+
+    std::fs::remove_file(&blocker).unwrap();
+    sb.ok(&["clean"]);
+    assert!(!greet.exists(), "cursor's greet cleaned");
+}
+
+/// An ownership record that can't be inspected stops cleanup before anything is
+/// deleted, rather than falling back to the lock — which may name a user's own,
+/// never-installed skill.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_ownership_record_stops_clean_before_deleting() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = Sandbox::new();
+    let mine = make_repo(
+        &sb.root.join("mine"),
+        &[("SKILL.md", "---\nname: mine\n---\nTheirs.\n")],
+    );
+    sb.ok(&["init", "--target", "cursor"]);
+    let user = sb.project.join(".cursor/skills/mine");
+    std::fs::create_dir_all(&user).unwrap();
+    std::fs::write(user.join("SKILL.md"), "Mine.\n").unwrap();
+    sb.ok(&[
+        "add",
+        &mine,
+        "--branch",
+        "main",
+        "--name",
+        "mine",
+        "--lock-only",
+    ]);
+
+    let spm = sb.project_owned().parent().unwrap().to_path_buf();
+    assert!(sb.project_owned().exists(), "the record exists");
+    std::fs::set_permissions(&spm, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let out = sb.spm(&["clean"]);
+    std::fs::set_permissions(&spm, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(!out.status.success(), "clean must fail");
+    assert_eq!(sb.read(".cursor/skills/mine/SKILL.md"), "Mine.\n");
+}
+
+/// Handover follows owned payloads through chained aliases: after a partial
+/// `target add codex cursor` (`cursor` aliases Claude's skills dir), Claude's
+/// `plugin/skills` is itself moved behind a symlink. Removing Claude keeps the
+/// linked payload and hands it to `cursor`, so a later `clean` removes it.
+#[test]
+fn target_remove_hands_over_payload_reached_through_chained_aliases() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    std::fs::create_dir_all(sb.project.join(".cursor")).unwrap();
+    symlink(
+        "../.spm/claude/plugin/skills",
+        sb.project.join(".cursor/skills"),
+    );
+    let blocker = sb.project.join(".agents/skills/greet");
+    std::fs::create_dir_all(blocker.parent().unwrap()).unwrap();
+    std::fs::write(&blocker, "in the way\n").unwrap();
+    fails(&sb, &["target", "add", "codex", "cursor"]);
+
+    let skills = sb.claude_market_dir().join("plugin/skills");
+    let moved = sb.project.join(".spm/shared-skills");
+    std::fs::rename(&skills, &moved).unwrap();
+    symlink("../../shared-skills", &skills);
+    let greet = moved.join("greet/SKILL.md");
+
+    let out = sb.ok(&["target", "remove", "claude"]);
+    assert!(out.contains("still used by target `cursor`"), "{out}");
+    assert!(
+        greet.exists(),
+        "cursor still loads greet through the aliases"
+    );
+
+    std::fs::remove_file(&blocker).unwrap();
+    sb.ok(&["clean"]);
+    assert!(!greet.exists(), "cursor's greet cleaned");
+}
+
+/// Claude claims each skill as it copies it into its marketplace too: when a
+/// Claude install fails after copying (here: unparsable settings), a target
+/// aliasing that marketplace inherits what was copied once Claude is removed,
+/// so a later `clean` removes it.
+#[test]
+fn a_partial_claude_install_records_the_skills_it_copied() {
+    let sb = Sandbox::new();
+    let fresh = make_repo(
+        &sb.root.join("fresh"),
+        &[("SKILL.md", "---\nname: fresh\n---\nFresh.\n")],
+    );
+    std::fs::create_dir_all(sb.project.join(".cursor")).unwrap();
+    symlink(
+        "../.spm/claude/plugin/skills",
+        sb.project.join(".cursor/skills"),
+    );
+    sb.ok(&["init", "--target", "claude,cursor"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    sb.ok(&[
+        "add",
+        &fresh,
+        "--branch",
+        "main",
+        "--name",
+        "fresh",
+        "--lock-only",
+    ]);
+    let settings = sb.project.join(".claude/settings.local.json");
+    let good = std::fs::read_to_string(&settings).unwrap();
+    std::fs::write(&settings, "{").unwrap();
+    fails(&sb, &["install"]);
+    let copied = sb.claude_market_dir().join("plugin/skills/fresh/SKILL.md");
+    assert!(copied.exists(), "copied before failing");
+
+    std::fs::write(&settings, good).unwrap();
+    let out = sb.ok(&["target", "remove", "claude"]);
+    assert!(out.contains("still used by target `cursor`"), "{out}");
+    sb.ok(&["clean"]);
+    assert!(!copied.exists(), "fresh cleaned through cursor");
+}
+
+/// Ownership is claimed name by name as the vendor reaches each entry: when
+/// removing an earlier entry fails (`a`, which can't be deleted), a later
+/// requested name the vendor never reached — the user's own `mine` — is not
+/// claimed, so a later `clean` leaves it alone.
+#[cfg(unix)]
+#[test]
+fn a_failure_before_the_vendor_reaches_a_user_skill_does_not_claim_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = Sandbox::new();
+    let repo = |name: &str| {
+        make_repo(
+            &sb.root.join(name),
+            &[("SKILL.md", &format!("---\nname: {name}\n---\n{name}.\n"))],
+        )
+    };
+    sb.ok(&["init", "--target", "codex"]);
+    sb.ok(&["add", &repo("base"), "--branch", "main", "--name", "base"]);
+    let dir = sb.project.join(".agents/skills");
+    std::fs::create_dir_all(dir.join("mine")).unwrap();
+    std::fs::write(dir.join("mine/SKILL.md"), "Mine.\n").unwrap();
+    let locked = dir.join("a/locked");
+    std::fs::create_dir_all(&locked).unwrap();
+    std::fs::write(locked.join("f"), "x\n").unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+    for name in ["a", "mine"] {
+        sb.ok(&[
+            "add",
+            &repo(name),
+            "--branch",
+            "main",
+            "--name",
+            name,
+            "--lock-only",
+        ]);
+    }
+
+    let err = fails(&sb, &["install"]);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(err.contains("removing"), "{err}");
+    sb.ok(&["clean"]);
+    assert_eq!(sb.read(".agents/skills/mine/SKILL.md"), "Mine.\n");
+    assert!(!dir.join("base").exists(), "installed `base` cleaned");
+}
+
+/// Point `ai.json`'s `targets` at `targets` without syncing (e.g. checking out
+/// a branch that declares other targets).
+fn set_targets(sb: &Sandbox, targets: &[&str]) {
+    let mut doc: serde_json::Value = serde_json::from_str(&sb.read("ai.json")).unwrap();
+    doc["targets"] = serde_json::json!(targets);
+    write_manifest(sb, &serde_json::to_string_pretty(&doc).unwrap());
+}
+
+/// An install for a branch's targets keeps the record of a target that branch
+/// omits, so returning to it still removes what spm installed there.
+#[test]
+fn install_keeps_ownership_of_a_target_the_manifest_omits() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let greet = sb.project.join(".agents/skills/greet");
+    assert!(greet.join("SKILL.md").exists());
+    set_targets(&sb, &["cursor"]);
+    sb.ok(&["install"]);
+    set_targets(&sb, &["codex"]);
+    sb.ok(&["remove", "greet"]);
+    assert!(!greet.exists(), "codex's greet removed");
+}
+
+/// `clean` forgets only the targets it cleaned: one the manifest omits keeps
+/// its record, so cleaning it later still removes its output.
+#[test]
+fn clean_keeps_ownership_of_a_target_the_manifest_omits() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let greet = sb.project.join(".agents/skills/greet");
+    assert!(greet.join("SKILL.md").exists());
+    set_targets(&sb, &["cursor"]);
+    sb.ok(&["clean"]);
+    set_targets(&sb, &["codex"]);
+    sb.ok(&["clean"]);
+    assert!(!greet.exists(), "codex's greet cleaned");
+}
+
+/// `target remove` hands a remaining target only output the removed one
+/// installed (or loads through a symlink), never a location a symlink nested
+/// inside that output points at: there, the user's own skill stays theirs.
+#[test]
+fn target_remove_does_not_hand_over_through_a_nested_link() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let user = sb.project.join(".cursor/skills/greet");
+    std::fs::create_dir_all(&user).unwrap();
+    std::fs::write(user.join("SKILL.md"), "Mine.\n").unwrap();
+    symlink(
+        "../../../.cursor/skills",
+        sb.project.join(".agents/skills/greet/link"),
+    );
+    set_targets(&sb, &["codex", "cursor"]);
+    sb.ok(&["target", "remove", "codex"]);
+    sb.ok(&["clean"]);
+    assert_eq!(sb.read(".cursor/skills/greet/SKILL.md"), "Mine.\n");
+}
+
+/// The `ds` plugin's working copy at `<root>/dev-plugin`, bundling `composer`
+/// (as locked) and an `extra` skill.
+fn dev_plugin(sb: &Sandbox) -> PathBuf {
+    let dev = sb.root.join("dev-plugin");
+    local_skill_checkout(sb, "dev-repo", "unused");
+    std::fs::rename(sb.root.join("dev-repo/pkg"), &dev).unwrap();
+    let extra = dev.join("skills/extra");
+    std::fs::create_dir_all(&extra).unwrap();
+    std::fs::write(extra.join("SKILL.md"), "---\nname: extra\n---\nExtra.\n").unwrap();
+    dev
+}
+
+fn codex_with_plugin(sb: &Sandbox) {
+    sb.add_plugin();
+    sb.ok(&["init", "--target", "codex"]);
+    write_manifest(
+        sb,
+        &format!(
+            r#"{{"targets":["codex"],"plugins":{{"ds":{{"git":"{}","branch":"main","path":"pkg"}}}}}}"#,
+            sb.skill_url()
+        ),
+    );
+    sb.ok(&["install"]);
+}
+
+/// A skill one target got from a linked plugin is that target's: adding
+/// another target after the working copy dropped it leaves the new target's
+/// same-named skill (the user's own) alone.
+#[test]
+fn target_add_keeps_a_users_skill_another_target_got_from_a_linked_plugin() {
+    let sb = Sandbox::new();
+    codex_with_plugin(&sb);
+    let dev = dev_plugin(&sb);
+    sb.ok(&["link", "ds", "../dev-plugin"]);
+    let shared = sb.project.join(".agents/skills");
+    assert!(shared.join("extra/SKILL.md").exists());
+    std::fs::remove_dir_all(dev.join("skills/extra")).unwrap();
+    let user = sb.project.join(".cursor/skills/extra");
+    std::fs::create_dir_all(&user).unwrap();
+    std::fs::write(user.join("SKILL.md"), "Mine.\n").unwrap();
+    sb.ok(&["target", "add", "cursor"]);
+    assert_eq!(sb.read(".cursor/skills/extra/SKILL.md"), "Mine.\n");
+    assert!(!shared.join("extra").exists(), "codex's extra purged");
+}
+
+/// Ownership follows what was materialized, not `ai.lock`: a locked bundled
+/// skill a linked working copy dropped is never written to a new target, so a
+/// same-named skill there stays the user's.
+#[test]
+fn a_linked_plugins_reduced_bundle_is_not_claimed_on_a_new_target() {
+    let sb = Sandbox::new();
+    codex_with_plugin(&sb);
+    let dev = dev_plugin(&sb);
+    std::fs::remove_dir_all(dev.join("skills/composer")).unwrap();
+    sb.ok(&["link", "ds", "../dev-plugin"]);
+    let user = sb.project.join(".cursor/skills/composer");
+    std::fs::create_dir_all(&user).unwrap();
+    std::fs::write(user.join("SKILL.md"), "Mine.\n").unwrap();
+    sb.ok(&["target", "add", "cursor"]);
+    sb.ok(&["clean"]);
+    assert_eq!(sb.read(".cursor/skills/composer/SKILL.md"), "Mine.\n");
+    assert!(!sb.project.join(".cursor/skills/extra").exists());
+}
+
+/// Plugin names are checked against every locked plugin, not just the ones a
+/// lock-only add fetched: `ds` next to a locked `Ds` is rejected before
+/// anything is written, as without `--lock-only`.
+#[test]
+fn add_lock_only_rejects_a_plugin_differing_only_by_case_from_a_locked_one() {
+    let sb = Sandbox::new();
+    sb.add_plugin();
+    sb.ok(&["init", "--target", "codex"]);
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--path",
+        "pkg",
+        "--plugin",
+        "--name",
+        "Ds",
+    ]);
+    let other = make_repo(
+        &sb.root.join("other"),
+        &[
+            (
+                "pkg/.claude-plugin/plugin.json",
+                r#"{"name":"other","version":"1.0.0","skills":"./skills/"}"#,
+            ),
+            ("pkg/skills/tool/SKILL.md", "---\nname: tool\n---\nTool.\n"),
+        ],
+    );
+    let (manifest, lock) = (sb.read("ai.json"), sb.read("ai.lock"));
+    for lock_only in [false, true] {
+        let mut args = vec![
+            "add", &other, "--branch", "main", "--path", "pkg", "--plugin", "--name", "ds",
+        ];
+        if lock_only {
+            args.push("--lock-only");
+        }
+        let out = sb.spm(&args);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "lock_only={lock_only}: must fail");
+        assert!(err.contains("differ only by case"), "{err}");
+        assert_eq!(sb.read("ai.json"), manifest);
+        assert_eq!(sb.read("ai.lock"), lock);
+    }
+}
+
+/// Targets sharing one skills dir (codex and amp both use `.agents/skills/`)
+/// share what spm installed there: switching a branch from one to the other
+/// still lets `remove` take out what the first installed — also after an
+/// install recorded it for the second and the branch switched back.
+#[test]
+fn a_target_sharing_a_skills_dir_removes_what_another_installed() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let greet = sb.project.join(".agents/skills/greet");
+    assert!(greet.join("SKILL.md").exists());
+    set_targets(&sb, &["amp"]);
+    sb.ok(&["remove", "greet"]);
+    assert!(!greet.exists(), "amp removed codex's greet");
+
+    set_targets(&sb, &["codex"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    set_targets(&sb, &["amp"]);
+    sb.ok(&["install"]);
+    set_targets(&sb, &["codex"]);
+    sb.ok(&["remove", "greet"]);
+    assert!(!greet.exists(), "codex removed the greet amp took over");
+}
+
+/// `clean` of a target removes what another target installed into the skills
+/// dir they share.
+#[test]
+fn clean_removes_what_a_target_sharing_the_skills_dir_installed() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let greet = sb.project.join(".agents/skills/greet");
+    assert!(greet.join("SKILL.md").exists());
+    set_targets(&sb, &["amp"]);
+    sb.ok(&["clean"]);
+    assert!(!greet.exists(), "amp's clean removed codex's greet");
+}
+
+/// What spm recorded installing is bound to the directory it wrote: once a
+/// target's skills dir is replaced (here by a symlink to the user's own skills),
+/// the names recorded for the old dir claim nothing in the new one.
+#[test]
+fn ownership_does_not_follow_a_retargeted_skills_dir() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "old"]);
+    let agents = sb.project.join(".agents");
+    assert!(agents.join("skills/old/SKILL.md").exists());
+    std::fs::rename(agents.join("skills"), agents.join("skills-moved")).unwrap();
+    let mine = sb.root.join("personal/old");
+    std::fs::create_dir_all(&mine).unwrap();
+    std::fs::write(
+        mine.join("SKILL.md"),
+        "---\nname: old\ndescription: Mine.\n---\n",
+    )
+    .unwrap();
+    symlink(sb.root.join("personal"), agents.join("skills"));
+    sb.ok(&["remove", "old"]);
+    assert!(
+        mine.join("SKILL.md").exists(),
+        "remove deleted the user's skill"
+    );
+    sb.ok(&["clean"]);
+    assert!(
+        mine.join("SKILL.md").exists(),
+        "clean deleted the user's skill"
+    );
+}
+
+/// The working-copy preflight checks each target's own output: a name only
+/// another target recorded doesn't make this target's same-named entry (here a
+/// linked working copy) count as output.
+#[test]
+fn preflight_checks_each_targets_own_recorded_names() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "old"]);
+    set_targets(&sb, &["cursor"]);
+    sb.ok(&["remove", "old"]);
+    set_targets(&sb, &["codex", "cursor"]);
+    let wc = sb.project.join(".cursor/skills/old");
+    std::fs::create_dir_all(&wc).unwrap();
+    std::fs::write(
+        wc.join("SKILL.md"),
+        "---\nname: old\ndescription: Say hello nicely.\n---\nWIP\n",
+    )
+    .unwrap();
+    let other = sb.root.join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    for args in [
+        &["init", "--target", "claude"][..],
+        &["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "old"],
+        &["link", "old", wc.to_str().unwrap()],
+    ] {
+        let out = sb.command(args).current_dir(&other).output().unwrap();
+        assert!(out.status.success(), "{args:?}: {}", stderr_of(&out));
+    }
+    sb.ok(&["install"]);
+    assert!(read_path(&wc.join("SKILL.md")).contains("WIP"), "wiped");
+    assert!(
+        !sb.project.join(".agents/skills/old").exists(),
+        "codex's old removed"
+    );
+}
+
+/// A first install from an existing lock (no ownership record yet: a fresh
+/// clone) binds what it copies to the dir it copied into as it goes, so when
+/// it fails part-way (here: `.gitignore` is a directory) a later `clean`
+/// still removes what was copied.
+#[test]
+fn a_failed_first_install_from_a_lock_records_where_it_copied() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let greet = sb.project.join(".agents/skills/greet");
+    std::fs::remove_file(sb.project_owned()).unwrap();
+    std::fs::remove_dir_all(sb.project.join(".agents")).unwrap();
+    let gitignore = sb.project.join(".gitignore");
+    let ignored = std::fs::read_to_string(&gitignore).unwrap_or_default();
+    let _ = std::fs::remove_file(&gitignore);
+    std::fs::create_dir(&gitignore).unwrap();
+    fails(&sb, &["install"]);
+    assert!(greet.join("SKILL.md").exists(), "copied before failing");
+    std::fs::remove_dir(&gitignore).unwrap();
+    std::fs::write(&gitignore, ignored).unwrap();
+    sb.ok(&["clean"]);
+    assert!(!greet.exists(), "greet cleaned");
+}
+
+/// A Claude reinstall recreates the marketplace, so even when it copies only
+/// names it already owned, it rebinds them to the new dir as it claims them:
+/// failing part-way (unparsable settings) keeps them owned, so a target
+/// aliasing the marketplace inherits them and a later `clean` removes them.
+#[test]
+fn a_failed_claude_reinstall_rebinds_the_names_it_copied() {
+    let sb = Sandbox::new();
+    std::fs::create_dir_all(sb.project.join(".cursor")).unwrap();
+    symlink(
+        "../.spm/claude/plugin/skills",
+        sb.project.join(".cursor/skills"),
+    );
+    sb.ok(&["init", "--target", "claude,cursor"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let settings = sb.project.join(".claude/settings.local.json");
+    let good = std::fs::read_to_string(&settings).unwrap();
+    std::fs::write(&settings, "{").unwrap();
+    fails(&sb, &["install"]);
+    let copied = sb.claude_market_dir().join("plugin/skills/greet/SKILL.md");
+    assert!(copied.exists(), "copied before failing");
+
+    std::fs::write(&settings, good).unwrap();
+    let out = sb.ok(&["target", "remove", "claude"]);
+    assert!(out.contains("still used by target `cursor`"), "{out}");
+    assert!(copied.exists(), "cursor still loads greet");
+    sb.ok(&["clean"]);
+    assert!(!copied.exists(), "greet cleaned through cursor");
+}
+
+/// A lock-only update writes only `ai.json` and `ai.lock`: a `.gitignore` or
+/// links file it leaves untouched may lead into a linked working copy.
+#[test]
+fn lock_only_ignores_untouched_files_leading_into_a_working_copy() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex"]);
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--name",
+        "greet",
+    ]);
+    let wc = sb.root.join("wc");
+    std::fs::create_dir_all(&wc).unwrap();
+    std::fs::write(
+        wc.join("SKILL.md"),
+        "---\nname: greet\ndescription: Say hello nicely.\n---\nWIP\n",
+    )
+    .unwrap();
+    sb.ok(&["link", "greet", wc.to_str().unwrap()]);
+    let gitignore = sb.project.join(".gitignore");
+    std::fs::rename(&gitignore, wc.join("ignored")).unwrap();
+    symlink(wc.join("ignored"), &gitignore);
+    sb.ok(&["update", "--lock-only"]);
+    assert!(read_path(&wc.join("SKILL.md")).contains("WIP"), "wiped");
+}
+
+/// The binding is to the directory itself, not its path: a new directory
+/// created where the old one was (the old moved aside) is the user's.
+#[test]
+fn ownership_does_not_carry_over_to_a_replacement_skills_dir() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "old"]);
+    let skills = sb.project.join(".agents/skills");
+    assert!(skills.join("old/SKILL.md").exists());
+    std::fs::rename(&skills, sb.project.join(".agents/skills-moved")).unwrap();
+    let mine = skills.join("old");
+    std::fs::create_dir_all(&mine).unwrap();
+    std::fs::write(
+        mine.join("SKILL.md"),
+        "---\nname: old\ndescription: Mine.\n---\n",
+    )
+    .unwrap();
+    sb.ok(&["clean"]);
+    assert!(
+        mine.join("SKILL.md").exists(),
+        "clean deleted the user's skill"
+    );
+}
+
+/// Nor does it carry over to a directory created after deleting the original,
+/// even one the filesystem hands the old one's inode (ext4 does, readily): on
+/// such filesystems the new dir is recreated until it gets that inode, setting
+/// the others aside so the allocator moves on.
+#[test]
+fn ownership_does_not_carry_over_to_a_recreated_skills_dir() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "old"]);
+    let skills = sb.project.join(".agents/skills");
+    assert!(skills.join("old/SKILL.md").exists());
+    #[cfg(unix)]
+    let ino = |p: &Path| std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(p).unwrap());
+    #[cfg(unix)]
+    let original = ino(&skills);
+    std::fs::remove_dir_all(&skills).unwrap();
+    std::fs::create_dir(&skills).unwrap();
+    #[cfg(unix)]
+    for held in 0..64 {
+        if ino(&skills) == original {
+            break;
+        }
+        std::fs::rename(&skills, sb.root.join(format!("held-{held}"))).unwrap();
+        std::fs::create_dir(&skills).unwrap();
+    }
+    let mine = skills.join("old");
+    std::fs::create_dir_all(&mine).unwrap();
+    std::fs::write(
+        mine.join("SKILL.md"),
+        "---\nname: old\ndescription: Mine.\n---\n",
+    )
+    .unwrap();
+    sb.ok(&["clean"]);
+    assert!(
+        mine.join("SKILL.md").exists(),
+        "clean deleted the user's skill"
+    );
+}
+
+/// `target remove` hands over only what the removed target's own entry is:
+/// an entry that is a symlink to the user's skill in another target's dir
+/// (cleanup removes just the symlink) does not make that skill spm's.
+#[test]
+fn target_remove_does_not_hand_over_through_an_entry_symlink() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let entry = sb.project.join(".agents/skills/greet");
+    std::fs::remove_dir_all(&entry).unwrap();
+    let mine = sb.project.join(".cursor/skills/greet");
+    std::fs::create_dir_all(&mine).unwrap();
+    std::fs::write(
+        mine.join("SKILL.md"),
+        "---\nname: greet\ndescription: Mine.\n---\n",
+    )
+    .unwrap();
+    symlink("../../.cursor/skills/greet", &entry);
+    set_targets(&sb, &["codex", "cursor"]);
+    sb.ok(&["target", "remove", "codex"]);
+    sb.ok(&["clean"]);
+    assert!(
+        mine.join("SKILL.md").exists(),
+        "clean deleted the user's skill"
+    );
+}
+
+/// The ownership record is the only proof of which skills spm installed: with
+/// `$SPM_HOME/owned` redirected into this project's output, a command that
+/// would rebuild or delete that output refuses rather than wipe the record
+/// (after which cleanup would trust a newer lock and delete skills it never
+/// installed).
+#[test]
+fn ownership_records_are_guarded_like_links_files() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot,codex"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let record = sb.project_owned();
+    assert!(record.exists(), "install recorded what it wrote");
+    let owned_dir = record.parent().unwrap().to_path_buf();
+    let state = sb.project.join(".agents/skills/spm-managed-skills/owned");
+    std::fs::rename(&owned_dir, &state).unwrap();
+    symlink(&state, &owned_dir);
+    let before = read_path(&record);
+
+    for args in [
+        &["install"][..],
+        &["update"],
+        &["clean"],
+        &["target", "remove", "copilot"],
+    ] {
+        let err = fails(&sb, args);
+        assert!(err.contains("the ownership record"), "{args:?}: {err}");
+        assert_eq!(read_path(&record), before, "{args:?}");
+    }
+}
+
+/// Saving the ownership record replaces the file at its path: with
+/// `$SPM_HOME/owned` moved into a linked working copy (and symlinked back),
+/// every command that would save it refuses before changing anything — an
+/// install, `clean`, `target remove`, and a lock-only sync freezing a legacy
+/// assumption into a record.
+#[test]
+fn ownership_records_are_never_written_into_a_working_copy() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot,codex"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let dev = local_skill_checkout(&sb, "dev", "LOCAL");
+    sb.ok(&["link", "greet", "../dev"]);
+    let record = sb.project_owned();
+    let owned_dir = record.parent().unwrap().to_path_buf();
+    let inside = dev.join("owned");
+    std::fs::rename(&owned_dir, &inside).unwrap();
+    symlink(&inside, &owned_dir);
+    let before = read_path(&record);
+    let lock = read_path(&sb.project.join("ai.lock"));
+
+    for args in [
+        &["install"][..],
+        &["clean"],
+        &["target", "remove", "copilot"],
+    ] {
+        let err = fails(&sb, args);
+        assert!(err.contains("linked directory `../dev`"), "{args:?}: {err}");
+        assert_eq!(read_path(&record), before, "{args:?}");
+    }
+    // No record yet (a legacy install): a lock-only sync would write one.
+    std::fs::remove_file(&record).unwrap();
+    let err = fails(&sb, &["update", "--lock-only"]);
+    assert!(err.contains("linked directory `../dev`"), "{err}");
+    assert!(!record.exists(), "no record written");
+    assert_eq!(read_path(&sb.project.join("ai.lock")), lock);
+}
+
+/// Before the first install there is no ownership record (nor links file) to
+/// find, yet the install creates one: with `$SPM_HOME/owned` pointing into a
+/// target's output, it refuses rather than write the record where rebuilding
+/// that output deletes it.
+#[test]
+fn a_first_install_never_records_ownership_inside_target_output() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    let state = sb.project.join(".agents/skills/spm-managed-skills/owned");
+    std::fs::create_dir_all(&state).unwrap();
+    let owned_dir = sb.project_owned().parent().unwrap().to_path_buf();
+    std::fs::create_dir_all(owned_dir.parent().unwrap()).unwrap();
+    symlink(&state, &owned_dir);
+    let err = fails(
+        &sb,
+        &["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"],
+    );
+    assert!(err.contains("the ownership record"), "{err}");
+    assert!(!sb.project_owned().exists(), "no record written");
+}
+
+/// spm's own state writes must not land on one another: with
+/// `$SPM_HOME/owned` aliasing `$SPM_HOME/links` before either file exists,
+/// saving the ownership record would write it as the links file. Every
+/// command that would save it refuses, writing neither.
+#[test]
+fn ownership_records_never_overwrite_an_aliased_links_file() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex,cursor"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    // Both name the project's file alike, each in its own dir.
+    let record = sb.project_owned();
+    let owned_dir = record.parent().unwrap();
+    let links_dir = sb.spm_home.join("links");
+    let links_file = links_dir.join(record.file_name().unwrap());
+    let links_dir = links_dir.as_path();
+    std::fs::remove_dir_all(owned_dir).unwrap();
+    std::fs::create_dir_all(links_dir).unwrap();
+    symlink(links_dir, owned_dir);
+
+    for args in [
+        &["update", "--lock-only"][..],
+        &["install"],
+        &["clean"],
+        &["target", "remove", "codex"],
+    ] {
+        let err = fails(&sb, args);
+        assert!(err.contains("the links file"), "{args:?}: {err}");
+        assert!(!links_file.exists(), "{args:?} wrote state");
+    }
+}
+
+/// Targets sharing a skills dir (codex and amp: `.agents/skills/`) hold one
+/// physical set: once one of them removes a name from it, the other no longer
+/// owns that name there either — even when the install fails before reaching
+/// it. Otherwise a later `clean` would delete the user's own skill created
+/// under that name since.
+#[test]
+fn a_shared_dir_rename_failing_part_way_leaves_no_stale_alias_claim() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex,cursor,amp"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "old"]);
+    // Rename it in ai.json; cursor then fails on a file already at `fresh`.
+    let mut doc: serde_json::Value = serde_json::from_str(&sb.read("ai.json")).unwrap();
+    let spec = doc["skills"]["old"].take();
+    doc["skills"] = serde_json::json!({ "fresh": spec });
+    write_manifest(&sb, &serde_json::to_string_pretty(&doc).unwrap());
+    std::fs::write(sb.project.join(".cursor/skills/fresh"), "mine").unwrap();
+    fails(&sb, &["install"]);
+    let old = sb.project.join(".agents/skills/old");
+    assert!(!old.exists(), "codex removed `old` from the shared dir");
+
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::write(
+        old.join("SKILL.md"),
+        "---\nname: old\ndescription: Mine.\n---\n",
+    )
+    .unwrap();
+    std::fs::remove_file(sb.project.join(".cursor/skills/fresh")).unwrap();
+    sb.ok(&["clean"]);
+    assert!(
+        old.join("SKILL.md").exists(),
+        "clean deleted the user's skill"
+    );
+}
+
+/// Create the user's own skill at `.agents/skills/<name>`, run `spm clean`,
+/// and assert it survived.
+fn assert_user_skill_survives_clean(sb: &Sandbox, name: &str) {
+    let dir = sb.project.join(".agents/skills").join(name);
+    assert!(!dir.exists(), "spm removed `{name}`");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: Mine.\n---\n"),
+    )
+    .unwrap();
+    sb.ok(&["clean"]);
+    assert!(
+        dir.join("SKILL.md").exists(),
+        "clean deleted the user's `{name}`"
+    );
+}
+
+/// An install that removed a skill's entry and then failed (here on a
+/// `.gitignore` that isn't UTF-8) no longer records it: the user's own skill
+/// created under that name since survives `clean`.
+#[test]
+fn an_install_failing_after_a_removal_releases_the_removed_name() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "old"]);
+    let mut doc: serde_json::Value = serde_json::from_str(&sb.read("ai.json")).unwrap();
+    let spec = doc["skills"]["old"].take();
+    doc["skills"] = serde_json::json!({ "fresh": spec });
+    write_manifest(&sb, &serde_json::to_string_pretty(&doc).unwrap());
+    let gitignore = sb.project.join(".gitignore");
+    let kept = std::fs::read(&gitignore).unwrap();
+    std::fs::write(&gitignore, b"\xff\xfe\n").unwrap();
+    fails(&sb, &["install"]);
+    std::fs::write(&gitignore, kept).unwrap();
+    assert_user_skill_survives_clean(&sb, "old");
+}
+
+/// A `clean` that removed codex's skills and then failed on Claude (whose
+/// settings can't be parsed) no longer records them for codex.
+#[test]
+fn a_clean_failing_part_way_releases_what_it_removed() {
+    // With a record, and without one yet (installed by an older spm).
+    for legacy in [false, true] {
+        let sb = Sandbox::new();
+        sb.ok(&["init", "--target", "codex,claude"]);
+        sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "old"]);
+        if legacy {
+            std::fs::remove_file(sb.project_owned()).unwrap();
+        }
+        let settings = sb.project.join(".claude/settings.local.json");
+        let kept = std::fs::read(&settings).unwrap();
+        std::fs::write(&settings, "not json").unwrap();
+        fails(&sb, &["clean"]);
+        std::fs::write(&settings, kept).unwrap();
+        assert_user_skill_survives_clean(&sb, "old");
+    }
+}
+
+/// Likewise for `target remove` failing after removing one target's output.
+#[test]
+fn a_target_remove_failing_part_way_releases_what_it_removed() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex,claude,cursor"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "old"]);
+    let settings = sb.project.join(".claude/settings.local.json");
+    let kept = std::fs::read(&settings).unwrap();
+    std::fs::write(&settings, "not json").unwrap();
+    fails(&sb, &["target", "remove", "codex,claude"]);
+    std::fs::write(&settings, kept).unwrap();
+    assert_user_skill_survives_clean(&sb, "old");
+}
+
+/// A command that removes entries releases them in the ownership record
+/// before deleting anything: when the record can't be written (here
+/// `$SPM_HOME/owned` is read-only), `clean` and `target remove` delete nothing,
+/// so no record can outlive what they removed.
+#[cfg(unix)]
+#[test]
+fn an_unwritable_ownership_record_stops_removals_before_they_start() {
+    use std::os::unix::fs::PermissionsExt;
+    for args in [&["clean"][..], &["target", "remove", "codex"]] {
+        let sb = Sandbox::new();
+        sb.ok(&["init", "--target", "codex,cursor"]);
+        sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "old"]);
+        let owned_dir = sb.project_owned().parent().unwrap().to_path_buf();
+        std::fs::set_permissions(&owned_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let out = sb.command(args).output().unwrap();
+        std::fs::set_permissions(&owned_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!out.status.success(), "{args:?} succeeded");
+        assert!(
+            sb.project.join(".agents/skills/old/SKILL.md").exists(),
+            "{args:?} deleted before recording it"
         );
     }
 }

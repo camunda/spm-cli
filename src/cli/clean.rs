@@ -2,6 +2,7 @@ use super::common::{confirm, human_size};
 use crate::links::Links;
 use crate::lockfile::Lockfile;
 use crate::manifest::Manifest;
+use crate::owned::Ownership;
 use crate::scope::Scope;
 use crate::vendor;
 use crate::{paths, store};
@@ -14,24 +15,42 @@ pub(super) fn clean(scope: &Scope) -> Result<()> {
     let _state_lock = crate::links::StateLock::acquire(scope, false)?;
     let manifest = Manifest::load(&dir, scope)?;
     let lock = Lockfile::load_or_default(&dir)?;
-    let (managed, managed_plugins) = managed_names(&lock, &Links::load(scope)?);
+    let ownership = Ownership::load(
+        scope,
+        &lock,
+        &Links::load(scope)?.managed,
+        &manifest.targets,
+    )?;
     let vendors = manifest
         .targets
         .iter()
         .map(|t| vendor::for_target(t))
         .collect::<Result<Vec<_>>>()?;
+    let owned: Vec<_> = manifest
+        .targets
+        .iter()
+        .map(|t| ownership.for_target(t))
+        .collect();
     super::sync::guard_working_copies(
         scope,
         &dir,
         &vendors,
         &Default::default(),
-        &managed,
-        &managed_plugins,
+        &owned,
         None,
+        super::sync::Writes::ALL,
     )?;
-    for vendor in &vendors {
-        vendor.clean(scope, &managed)?;
-        vendor.clean_plugins(scope, &managed_plugins)?;
+    // Released before anything is deleted, so the record never outlives a
+    // removal even if it can't be written afterwards; should a vendor fail,
+    // what it left in place is reclaimed (see `Ownership::fail`).
+    ownership.cleaned(&manifest.targets).save(scope)?;
+    for (vendor, names) in vendors.iter().zip(&owned) {
+        if let Err(e) = vendor
+            .clean(scope, &names.skill_names())
+            .and_then(|()| vendor.clean_plugins(scope, &names.plugin_names()))
+        {
+            return Err(ownership.fail(scope, &manifest.targets, e));
+        }
     }
     println!(
         "cleaned generated {} config for target(s): {}",
@@ -39,27 +58,6 @@ pub(super) fn clean(scope: &Scope) -> Result<()> {
         manifest.targets.join(", ")
     );
     Ok(())
-}
-
-/// The skill and plugin names spm currently owns, per `ai.lock` plus the skills
-/// last materialized from linked plugins (see [`Links::managed`]): what a
-/// vendor's `clean` / `clean_plugins` must remove.
-pub(super) fn managed_names(lock: &Lockfile, links: &Links) -> (Vec<String>, Vec<String>) {
-    // Plugin-bundled skills are flattened into the same shared skills dirs as
-    // standalone skills (see `sync`'s `previously_managed`), so they must be
-    // included here too — otherwise a clean would leave their materialized
-    // dirs behind in shared-dir/global vendors.
-    let mut managed: Vec<String> = lock.skills.keys().cloned().collect();
-    managed.extend(
-        lock.plugins
-            .values()
-            .flat_map(|l| l.bundled_skills.iter().cloned()),
-    );
-    managed.extend(links.managed.iter().cloned());
-    managed.sort();
-    managed.dedup();
-    let managed_plugins: Vec<String> = lock.plugins.keys().cloned().collect();
-    (managed, managed_plugins)
 }
 
 /// `spm prune`: wipe the whole global store (`$SPM_HOME/store`, default

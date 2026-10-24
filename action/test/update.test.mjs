@@ -732,6 +732,42 @@ test("a dependency whose remote can't be reached fails the run without blocking 
   assertCleanCheckout(sb);
 });
 
+test("on a cold store, an unreachable dependency does not stop the updates of the others (#126)", async (t) => {
+  const sb = await sandbox(t);
+  const gone = sb.upstream("gone", { tag: null });
+  const ok = sb.upstream("ok", { tag: null });
+  const tagged = sb.upstream("tagged");
+  sb.spm("add", gone.url, "--branch", "main");
+  sb.spm("add", ok.url, "--branch", "main");
+  sb.spm("add", tagged.url, "--tag", "v1.0.0");
+  sb.publish();
+  const baseLock = JSON.parse(sb.remoteFile("main", "ai.lock"));
+  // A fresh runner: nothing cached, and `gone`'s remote is unreachable.
+  rmSync(join(sb.dir, "spm-home", "store"), { recursive: true, force: true, maxRetries: 5 });
+  rmSync(gone.repo, { recursive: true, force: true, maxRetries: 5 });
+  writeFiles(ok.repo, { "a.md": "1\n" });
+  commitAll(ok.repo, "one");
+  writeFiles(tagged.repo, { "a.md": "1\n" });
+  commitAll(tagged.repo, "one");
+  git(tagged.repo, "tag", "v1.1.0");
+
+  await assert.rejects(sb.update(), /1 problem\(s\):\ngone: /);
+  assert.deepEqual(sb.gh.state.pulls.map((p) => p.head).sort(), [sb.branch("ok"), sb.branch("tagged")].sort());
+  for (const name of ["ok", "tagged"]) {
+    const lock = JSON.parse(sb.remoteFile(sb.branch(name), "ai.lock"));
+    const other = name === "ok" ? "tagged" : "ok";
+    assert.notEqual(lock.skills[name].commit, baseLock.skills[name].commit);
+    // Every other entry is carried over untouched, the unreachable one included.
+    assert.deepEqual(lock.skills.gone, baseLock.skills.gone);
+    assert.deepEqual(lock.skills[other], baseLock.skills[other]);
+  }
+  assert.equal(JSON.parse(sb.remoteFile(sb.branch("tagged"), "ai.json")).skills.tagged.tag, "v1.1.0");
+  // Nothing was installed into the checkout by the lock-only updates.
+  assert.equal(existsSync(join(sb.project, ".agents", "skills", "spm-managed-skills", "ok", "a.md")), false);
+  assert.equal(existsSync(join(sb.project, ".agents", "skills", "spm-managed-skills", "gone", "SKILL.md")), true);
+  assertCleanCheckout(sb);
+});
+
 test("a failing update is reported and the remaining dependencies still get PRs", async (t) => {
   const sb = await sandbox(t);
   const first = sb.upstream("first", { tag: null });
