@@ -18,6 +18,7 @@ spm install [-g] [--locked]                        # rebuild from ai.lock (after
 spm list [-g] [--json]                             # show skills + pinned commits; alias: ls
 spm status [-g] [--json]                           # check skills are materialized in this checkout
 spm outdated [name] [-g] [--json] [--exit-code]    # report newer upstream versions (read-only)
+spm doctor [-g] [--online] [--json]                # diagnose setup problems, with a fix per check (read-only)
 spm clean [-g]                                     # remove generated vendor config
 spm prune [--yes]                                  # wipe the global fetch cache ($SPM_HOME/store, default ~/.spm/store)
 spm scan [path] [--within <dir>] [--json]          # scan skill content for suspicious patterns (default: .)
@@ -27,10 +28,10 @@ Four commands have short aliases that behave identically, including `-g`:
 `spm i` for `spm install`, `spm rm <name>` for `spm remove <name>`, `spm ls`
 for `spm list`, and `spm target rm` for `spm target remove`.
 
-`add`, `install`, `update`, `remove`, `link`, `unlink`, `target add` and `outdated` also accept `--protocol ssh|https` and
+`add`, `install`, `update`, `remove`, `link`, `unlink`, `target add`, `outdated` and `doctor` also accept `--protocol ssh|https` and
 `--protocol-fallback` (see [Repo URLs](#repo-urls-https-ssh)).
 
-`list`, `status`, `outdated` and `scan` accept `--json` to print a machine-readable document
+`list`, `status`, `outdated`, `doctor` and `scan` accept `--json` to print a machine-readable document
 instead of text (see [Machine-readable output](#machine-readable-output-json)).
 
 ## Scope: project (default) vs. global (`-g`)
@@ -464,6 +465,70 @@ exists) fails only its own row — the rest are still checked — but the comman
 then exits non-zero regardless of `--exit-code`. Accepts `-g`, `--json` (see
 [below](#spm-outdated-json)), `--protocol` and `--protocol-fallback`.
 
+### `spm doctor`
+
+A read-only checklist of what commonly breaks a setup — **run it first when
+something doesn't work.** Each check prints `✓` (ok), `!` (warning) or `✗`
+(error), with a one-line `fix:` for anything that isn't ok:
+
+```console
+$ spm doctor
+project: /work/my-repo
+✓ git version 2.45.1
+✓ store /home/me/.spm/store is writable
+✓ ai.json is valid
+✓ targets: claude, copilot
+✓ no machine source policy
+✓ every source is allowed by the source policy
+✗ ai.lock is out of sync with ai.json (`spm install --locked` would fail)
+    skill `pdf`: changed since ai.lock was written (`tag:v1.0.0` -> `tag:v1.1.0`)
+    fix: spm install and commit ai.lock
+✗ targets are not up to date
+    copilot: missing skills: pdf
+    fix: spm install
+✓ spm's output is gitignored
+✓ every installed skill has a loadable SKILL.md
+2 errors, 0 warnings
+```
+
+It checks:
+
+- **git** is installed (and its version) and the **store** (`$SPM_HOME/store`)
+  is writable — a store that doesn't exist yet is fine;
+- **`ai.json`** exists, is valid and declares known **targets**;
+- the **source policy**: the machine policy (`SPM_POLICY` or
+  `$SPM_HOME/policy.json`) parses, and every declared source and linked dir is
+  allowed — the same rule `spm install` enforces;
+- **links**: an active [`spm link`](#spm-link-name-dir) override is a warning
+  (the working copy replaces the locked version), a link whose directory is gone
+  is an error, a link to an undeclared name is a warning;
+- **`ai.lock`** exists and matches `ai.json` by exactly the rules of
+  [`spm install --locked`](#spm-install-locked), including transitive pins. Offline,
+  a dependency not in the store can't be fully verified (its nested `ai.json`,
+  a plugin's bundled skills); it is reported as a warning rather than fetched;
+- what is **installed in each target**, as [`spm status`](#spm-status) reports it:
+  missing skills/plugins or a stale Claude marketplace pointer are errors; skills
+  spm no longer manages and names [installed in both scopes](#scope-project-default-vs-global-g) are
+  warnings;
+- project scope: the **`.gitignore`** entries `spm install` adds are present, and
+  `.claude/settings.local.json` (which holds a machine-specific path) is
+  gitignored;
+- every installed skill has a **`SKILL.md` with `name` and `description`**
+  frontmatter, which agents discover skills by;
+- environment: `SPM_ALLOW_SUSPICIOUS` turning the [content scan](#spm-scan-path)
+  into warnings, and SSH remotes with no `SSH_AUTH_SOCK` (no ssh-agent).
+
+`--online` also checks that every remote in `ai.json` and `ai.lock` answers
+`git ls-remote`, through the same source policy and `--protocol` /
+`--protocol-fallback` handling as `spm install`; when a remote only answers over
+the other protocol, the fix names the flag to pass. Without `--online` doctor
+never contacts a remote.
+
+Doctor never writes `ai.json`, `ai.lock`, links, the store or any target.
+**Exits non-zero only when a check is an error** — warnings alone exit 0 — so it
+also works as a CI or git-hook gate. `--json` prints the checks as a
+[JSON document](#spm-doctor-json).
+
 ### `spm clean`
 
 Removes generated vendor config from the project: whatever spm last installed
@@ -521,8 +586,8 @@ To override the gate for content you trust (or a false positive), set
 
 ## Machine-readable output (`--json`)
 
-`spm list`, `spm status`, `spm outdated` and `spm scan` accept `--json` (together
-with `-g` for `list`, `status` and `outdated`). With it:
+`spm list`, `spm status`, `spm outdated`, `spm doctor` and `spm scan` accept
+`--json` (together with `-g` for `list`, `status`, `outdated` and `doctor`). With it:
 
 - stdout holds **exactly one** JSON document and nothing else; errors still go
   to stderr as `error: ...`.
@@ -530,7 +595,7 @@ with `-g` for `list`, `status` and `outdated`). With it:
   on any breaking change to a shape; new fields may be added without a bump.
 - commit SHAs are always the full 40 hex characters.
 - **exit codes are unchanged.** `status` still exits non-zero when something is
-  missing, `outdated` when a remote errored (or, with `--exit-code`, when
+  missing, `doctor` when a check is an error, `outdated` when a remote errored (or, with `--exit-code`, when
   something is outdated) and `scan` still exits non-zero on a blocking finding — the document
   is printed first, so you get both the data and the status. A hard error that
   happens before a report exists (an unreadable `ai.json`, a `scan` path that
@@ -650,6 +715,36 @@ with `-g` for `list`, `status` and `outdated`). With it:
 }
 ```
 
+### `spm doctor --json`
+
+```jsonc
+{
+  "schemaVersion": 1,
+  "scope": "project",                       // or "global"
+  "root": "/work/my-repo",                  // dir holding ai.json / ai.lock
+  "online": false,                          // whether remotes were probed (--online)
+  "ok": false,                              // no check is an error ⇔ exit 0
+  "errors": 1,
+  "warnings": 0,
+  "checks": [                               // in the order they ran
+    {
+      "id": "lockfile",                     // git | store | scan | state-lock | manifest |
+                                            // targets | machine-policy | policy | links |
+                                            // lockfile | materialized | shadowing |
+                                            // gitignore | skills | ssh | remotes
+      "status": "error",                    // ok | warn | error
+      "message": "ai.lock is out of sync with ai.json (`spm install --locked` would fail)",
+      "details": [                          // omitted when empty: one line per item
+        "skill `pdf`: changed since ai.lock was written (`tag:v1.0.0` -> `tag:v1.1.0`)"
+      ],
+      "fix": "spm install and commit ai.lock" // omitted when there is nothing to fix
+    }
+  ]
+}
+```
+
+An `id` can appear more than once (e.g. one `links` check per link).
+
 ### `spm scan --json`
 
 ```jsonc
@@ -691,7 +786,7 @@ of hanging on a prompt (helpers and ssh-agent still work).
 By default spm uses the URL exactly as you gave it: an SSH URL is contacted over
 SSH and an HTTPS URL over HTTPS, and a failure is reported as-is. Two opt-in
 flags (accepted by the commands that can contact a remote: `add`, `install`,
-`update`, `remove`, `link`, `unlink`, `target add` and `outdated`) help when your preferred
+`update`, `remove`, `link`, `unlink`, `target add`, `outdated` and `doctor`) help when your preferred
 protocol isn't set up on the current machine, e.g. no SSH key in CI, or HTTPS
 blocked but SSH allowed:
 

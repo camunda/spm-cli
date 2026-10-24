@@ -97,9 +97,16 @@ impl Vendor for Claude {
 
         patch_settings(scope, &market_dir, skills)?;
         if let Scope::Project { root } = scope {
-            gitignore::ensure(root, GITIGNORE_COMMENT, GITIGNORE_ENTRY)?;
+            for entry in self.gitignore_entries(&[]) {
+                gitignore::ensure(root, GITIGNORE_COMMENT, &entry)?;
+            }
         }
         Ok(())
+    }
+
+    fn gitignore_entries(&self, _skills: &[String]) -> Vec<String> {
+        // One entry covers the skills and the full-plugin marketplace dirs.
+        vec![GITIGNORE_ENTRY.to_string()]
     }
 
     fn clean_paths(&self, scope: &Scope, _managed: &[String]) -> Result<Vec<PathBuf>> {
@@ -219,7 +226,9 @@ impl Vendor for Claude {
         jsonutil::write(&settings, &root)?;
 
         if let Scope::Project { root } = scope {
-            gitignore::ensure(root, GITIGNORE_COMMENT, GITIGNORE_ENTRY)?;
+            for entry in self.gitignore_entries(&[]) {
+                gitignore::ensure(root, GITIGNORE_COMMENT, &entry)?;
+            }
         }
         Ok(())
     }

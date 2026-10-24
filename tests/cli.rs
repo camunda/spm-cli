@@ -13546,3 +13546,512 @@ fn an_unwritable_ownership_record_stops_removals_before_they_start() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// `spm doctor`
+// ---------------------------------------------------------------------------
+
+/// Run `spm doctor --json <extra>` via `cmd`, returning (success, document).
+fn doctor_json(mut cmd: Command) -> (bool, serde_json::Value) {
+    let out = cmd.output().unwrap();
+    (out.status.success(), json_doc(&out))
+}
+
+/// `spm doctor --json <extra>` in the sandbox.
+fn doctor(sb: &Sandbox, extra: &[&str]) -> (bool, serde_json::Value) {
+    let mut args = vec!["doctor", "--json"];
+    args.extend_from_slice(extra);
+    doctor_json(sb.command(&args))
+}
+
+/// The checks with id `id`.
+fn checks<'a>(doc: &'a serde_json::Value, id: &str) -> Vec<&'a serde_json::Value> {
+    doc["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["id"] == id)
+        .collect()
+}
+
+/// The single check with id `id` and status `status`.
+fn check<'a>(doc: &'a serde_json::Value, id: &str, status: &str) -> &'a serde_json::Value {
+    let found: Vec<_> = checks(doc, id)
+        .into_iter()
+        .filter(|c| c["status"] == status)
+        .collect();
+    assert_eq!(
+        found.len(),
+        1,
+        "one {status} `{id}` check expected: {doc:#}"
+    );
+    found[0]
+}
+
+/// Every file under `dir` with its bytes (empty when `dir` is missing).
+fn tree(dir: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    let mut files = std::collections::BTreeMap::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in rd {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                files.insert(p.clone(), std::fs::read(&p).unwrap());
+            }
+        }
+    }
+    files
+}
+
+/// A healthy install passes every check, in text and JSON, and doctor writes
+/// nothing: not the project, not its targets, not the store.
+#[test]
+fn doctor_passes_a_healthy_project_and_writes_nothing() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude,copilot,gemini"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let (project, store) = (tree(&sb.project), tree(&sb.spm_home.join("store")));
+
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(ok, "{doc:#}");
+    assert_eq!(doc["ok"], true);
+    assert_eq!(doc["scope"], "project");
+    assert_eq!(doc["errors"], 0);
+    assert_eq!(doc["online"], false);
+    for id in [
+        "git",
+        "store",
+        "manifest",
+        "targets",
+        "machine-policy",
+        "policy",
+        "lockfile",
+        "materialized",
+        "gitignore",
+        "skills",
+    ] {
+        check(&doc, id, "ok");
+    }
+    assert!(checks(&doc, "remotes").is_empty(), "offline by default");
+
+    let text = sb.ok(&["doctor"]);
+    assert!(text.contains("✓ ai.lock matches ai.json"), "{text}");
+    assert!(text.contains("0 errors"), "{text}");
+
+    assert_eq!(project, tree(&sb.project), "doctor changed the project");
+    assert_eq!(
+        store,
+        tree(&sb.spm_home.join("store")),
+        "doctor changed the store"
+    );
+}
+
+#[test]
+fn doctor_without_manifest_points_at_init_for_the_scope() {
+    let sb = Sandbox::new();
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(!ok);
+    assert_eq!(check(&doc, "manifest", "error")["fix"], "spm init");
+    check(&doc, "git", "ok");
+
+    let (ok, doc) = doctor(&sb, &["-g"]);
+    assert!(!ok);
+    assert_eq!(doc["scope"], "global");
+    assert_eq!(check(&doc, "manifest", "error")["fix"], "spm init --global");
+
+    let out = sb.spm(&["doctor"]);
+    assert!(!out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("✗ no ai.json"), "{text}");
+    assert!(text.contains("fix: spm init"), "{text}");
+    assert!(stderr_of(&out).contains("spm doctor found 1 problem"));
+}
+
+#[test]
+fn doctor_reports_an_invalid_manifest() {
+    let sb = Sandbox::new();
+    write_manifest(&sb, r#"{"targets":["nope"],"skills":{}}"#);
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(!ok);
+    let c = check(&doc, "manifest", "error");
+    assert!(c["message"].as_str().unwrap().contains("nope"), "{c}");
+}
+
+/// The lock verdict is exactly `install --locked`'s: same mismatch text.
+#[test]
+fn doctor_flags_a_lock_out_of_sync_and_a_missing_lock() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let manifest = sb.read("ai.json").replace("v0.1.0", "v0.2.0");
+    write_manifest(&sb, &manifest);
+
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(!ok);
+    let c = check(&doc, "lockfile", "error");
+    assert_eq!(c["fix"], "spm install and commit ai.lock");
+    let detail = c["details"][0].as_str().unwrap();
+    let err = fails(&sb, &["install", "--locked"]);
+    assert!(err.contains(detail), "{detail} vs {err}");
+
+    std::fs::remove_file(sb.project.join("ai.lock")).unwrap();
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(!ok);
+    let c = check(&doc, "lockfile", "error");
+    assert!(c["message"].as_str().unwrap().contains("no ai.lock"), "{c}");
+}
+
+/// Offline, doctor never fetches: a dependency missing from the store is
+/// reported as unverified (a warning), and the store stays empty.
+#[test]
+fn doctor_never_fetches_and_reports_what_it_could_not_verify() {
+    let sb = Sandbox::new();
+    let leaf = make_repo(
+        &sb.root.join("leaf"),
+        &[("SKILL.md", "---\nname: leaf\ndescription: Leaf.\n---\n")],
+    );
+    let top = make_repo(
+        &sb.root.join("top"),
+        &[
+            ("SKILL.md", "---\nname: top\ndescription: Top.\n---\n"),
+            (
+                "ai.json",
+                &format!(r#"{{"skills":{{"leaf":{{"git":"{leaf}","branch":"main"}}}}}}"#),
+            ),
+        ],
+    );
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{"top":{{"git":"{top}","branch":"main"}}}}}}"#
+        ),
+    );
+    sb.ok(&["install"]);
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(ok, "{doc:#}");
+    check(&doc, "lockfile", "ok");
+
+    sb.ok(&["prune", "--yes"]);
+    assert_eq!(sb.store_entries(), 0);
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(ok, "unverified is a warning, not an error: {doc:#}");
+    check(&doc, "lockfile", "ok");
+    let c = check(&doc, "lockfile", "warn");
+    assert_eq!(c["details"], serde_json::json!(["top"]), "{c}");
+    assert_eq!(sb.store_entries(), 0, "doctor must not fetch");
+}
+
+/// A shared transitive child is named after the first root that reaches it.
+/// Offline, a root missing from the store can't be walked, so a later root
+/// reaches the child "first" under another name: that is not drift, and doctor
+/// must not call it an error that `install --locked` would never raise.
+#[test]
+fn doctor_does_not_flag_a_diamond_whose_first_root_is_not_in_the_store() {
+    let sb = Sandbox::new();
+    let shared = make_repo(
+        &sb.root.join("shared"),
+        &[("SKILL.md", "---\nname: shared\ndescription: S.\n---\n")],
+    );
+    let dep_json = format!(r#"{{"skills":{{"shared":{{"git":"{shared}","branch":"main"}}}}}}"#);
+    let root = |name: &str| {
+        make_repo(
+            &sb.root.join(name),
+            &[
+                (
+                    "SKILL.md",
+                    &format!("---\nname: {name}\ndescription: R.\n---\n"),
+                ),
+                ("ai.json", &dep_json),
+            ],
+        )
+    };
+    let (left, right) = (root("left"), root("right"));
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{"left":{{"git":"{left}","branch":"main"}},"right":{{"git":"{right}","branch":"main"}}}}}}"#
+        ),
+    );
+    sb.ok(&["install"]);
+    let store = sb.spm_home.join("store");
+    let left_entry = std::fs::read_dir(&store)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| {
+            p.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("left-")
+        })
+        .unwrap();
+    std::fs::remove_dir_all(left_entry).unwrap();
+
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(ok, "{doc:#}");
+    check(&doc, "lockfile", "ok");
+    assert_eq!(
+        check(&doc, "lockfile", "warn")["details"],
+        serde_json::json!(["left"])
+    );
+    sb.ok(&["install", "--locked"]);
+}
+
+#[test]
+fn doctor_flags_missing_stale_and_unloadable_skills() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let skills = sb.project.join(".agents/skills/spm-managed-skills");
+
+    std::fs::remove_dir_all(sb.project.join(".agents")).unwrap();
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(!ok);
+    let c = check(&doc, "materialized", "error");
+    assert_eq!(c["fix"], "spm install");
+    assert!(c["details"][0].as_str().unwrap().contains("greet"), "{c}");
+
+    sb.ok(&["install"]);
+    std::fs::create_dir_all(skills.join("old")).unwrap();
+    std::fs::write(skills.join("greet/SKILL.md"), "# Greet\n").unwrap();
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(ok, "{doc:#}");
+    let stale = check(&doc, "materialized", "warn");
+    assert!(
+        stale["details"][0].as_str().unwrap().contains("old"),
+        "{stale}"
+    );
+    let c = check(&doc, "skills", "warn");
+    assert!(
+        c["details"][0]
+            .as_str()
+            .unwrap()
+            .contains("no YAML frontmatter"),
+        "{c}"
+    );
+}
+
+#[test]
+fn doctor_flags_a_stale_claude_pointer() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let sp = sb.project.join(".claude/settings.local.json");
+    let mut settings: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+    settings["extraKnownMarketplaces"]["spm"]["source"]["path"] =
+        serde_json::Value::String(sb.root.join("elsewhere").to_string_lossy().into_owned());
+    std::fs::write(&sp, serde_json::to_string_pretty(&settings).unwrap()).unwrap();
+
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(!ok);
+    assert_eq!(check(&doc, "materialized", "error")["fix"], "spm install");
+}
+
+/// The expected entries are each vendor's own (`gitignore_entries`).
+#[test]
+fn doctor_flags_missing_gitignore_entries() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude,gemini"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    std::fs::write(sb.project.join(".gitignore"), "target/\n").unwrap();
+
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(ok, "a missing entry is a warning: {doc:#}");
+    let c = check(&doc, "gitignore", "warn");
+    assert_eq!(
+        c["details"],
+        serde_json::json!(["claude: .spm/", "gemini: .gemini/skills/greet/"]),
+        "{c}"
+    );
+    sb.ok(&["install"]);
+    let (_, doc) = doctor(&sb, &[]);
+    check(&doc, "gitignore", "ok");
+}
+
+/// Claude's settings.local.json holds a machine-specific path: flag it when
+/// git would commit it.
+#[test]
+fn doctor_warns_when_claude_local_settings_are_not_gitignored() {
+    let sb = Sandbox::new();
+    git_in(&sb.project, &["init", "-q"]);
+    sb.ok(&["init", "--target", "claude"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(ok);
+    let c = check(&doc, "gitignore", "warn");
+    assert!(
+        c["message"]
+            .as_str()
+            .unwrap()
+            .contains(".claude/settings.local.json"),
+        "{c}"
+    );
+
+    let gi = sb.read(".gitignore") + ".claude/settings.local.json\n";
+    std::fs::write(sb.project.join(".gitignore"), gi).unwrap();
+    let (_, doc) = doctor(&sb, &[]);
+    assert!(
+        checks(&doc, "gitignore")
+            .iter()
+            .all(|c| c["status"] == "ok"),
+        "{doc:#}"
+    );
+}
+
+#[test]
+fn doctor_reports_policy_problems() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+
+    let bad = sb.root.join("bad-policy.json");
+    std::fs::write(&bad, "not json").unwrap();
+    let mut cmd = sb.command(&["doctor", "--json"]);
+    cmd.env("SPM_POLICY", &bad);
+    let (ok, doc) = doctor_json(cmd);
+    assert!(!ok);
+    check(&doc, "machine-policy", "error");
+
+    let machine = sb.root.join("policy.json");
+    write_policy_file(&machine, &["file://*"]);
+    set_project_policy(&sb, &["example.test/*"]);
+    let mut cmd = sb.command(&["doctor", "--json"]);
+    cmd.env("SPM_POLICY", &machine);
+    let (ok, doc) = doctor_json(cmd);
+    assert!(!ok);
+    let layers = &check(&doc, "machine-policy", "ok")["details"];
+    assert!(layers[0].as_str().unwrap().contains("file://*"), "{layers}");
+    let c = check(&doc, "policy", "error");
+    assert!(
+        c["details"][0]
+            .as_str()
+            .unwrap()
+            .starts_with("skill `greet`"),
+        "{c}"
+    );
+}
+
+#[test]
+fn doctor_reports_links() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let dev = local_skill_checkout(&sb, "dev", "LOCAL");
+    sb.ok(&["link", "greet", "../dev"]);
+
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(ok, "an active link is a warning: {doc:#}");
+    let c = check(&doc, "links", "warn");
+    assert_eq!(c["fix"], "spm unlink greet when done");
+
+    std::fs::remove_dir_all(&dev).unwrap();
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(!ok);
+    assert_eq!(check(&doc, "links", "error")["fix"], "spm unlink greet");
+}
+
+#[test]
+fn doctor_warns_when_suspicious_content_is_allowed() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    let mut cmd = sb.command(&["doctor", "--json"]);
+    cmd.env("SPM_ALLOW_SUSPICIOUS", "1");
+    let (ok, doc) = doctor_json(cmd);
+    assert!(ok, "{doc:#}");
+    assert_eq!(
+        check(&doc, "scan", "warn")["fix"],
+        "unset SPM_ALLOW_SUSPICIOUS"
+    );
+    let (_, doc) = doctor(&sb, &[]);
+    assert!(checks(&doc, "scan").is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_warns_about_ssh_remotes_without_an_agent() {
+    let sb = Sandbox::new();
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"skills":{{"greet":{{"git":"{SSH_URL}","branch":"main"}}}}}}"#
+        ),
+    );
+    let mut cmd = sb.command(&["doctor", "--json"]);
+    cmd.env_remove("SSH_AUTH_SOCK");
+    let (_, doc) = doctor_json(cmd);
+    assert_eq!(
+        check(&doc, "ssh", "warn")["details"],
+        serde_json::json!([SSH_URL])
+    );
+
+    let mut cmd = sb.command(&["doctor", "--json"]);
+    cmd.env("SSH_AUTH_SOCK", "/tmp/agent.sock");
+    let (_, doc) = doctor_json(cmd);
+    assert!(checks(&doc, "ssh").is_empty(), "{doc:#}");
+}
+
+/// `--online` contacts nothing the source policy denies — even with no ai.lock
+/// yet, when no lock check has run.
+#[test]
+fn doctor_online_never_contacts_a_denied_source() {
+    let sb = Sandbox::new();
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"allowedSources":["example.test/*"],"skills":{{"greet":{{"git":"{}","branch":"main"}}}}}}"#,
+            sb.skill_url()
+        ),
+    );
+    let (ok, doc) = doctor(&sb, &["--online"]);
+    assert!(!ok);
+    check(&doc, "policy", "error");
+    let c = check(&doc, "remotes", "error");
+    assert!(
+        c["details"][0].as_str().unwrap().contains("not allowed"),
+        "{c}"
+    );
+}
+
+/// `--online` probes every remote; one that only answers over the other
+/// protocol gets a `--protocol` hint.
+#[test]
+fn doctor_online_probes_remotes_and_suggests_the_other_protocol() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let (ok, doc) = doctor(&sb, &["--online"]);
+    assert!(ok, "{doc:#}");
+    assert_eq!(doc["online"], true);
+    check(&doc, "remotes", "ok");
+
+    let good = sb.skill_url();
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"skills":{{"greet":{{"git":"{HTTPS_URL}","branch":"main"}}}}}}"#
+        ),
+    );
+    let remotes = [(HTTPS_URL, unreachable_url()), (SSH_URL, good.as_str())];
+    let (ok, doc) = doctor_json(sb.remote_command(&["doctor", "--json", "--online"], &remotes));
+    assert!(!ok);
+    let c = check(&doc, "remotes", "error");
+    assert!(
+        c["details"][0].as_str().unwrap().starts_with(HTTPS_URL),
+        "{c}"
+    );
+    assert!(c["fix"].as_str().unwrap().contains("--protocol ssh"), "{c}");
+
+    // With the fallback the remote is reachable, as `install` would find it.
+    let (_, doc) = doctor_json(sb.remote_command(
+        &["doctor", "--json", "--online", "--protocol-fallback"],
+        &remotes,
+    ));
+    check(&doc, "remotes", "ok");
+}

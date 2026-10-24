@@ -94,6 +94,10 @@ pub struct Ctx<'a> {
     /// edge has no matching `ai.lock` pin is recorded in [`Output::lock_misses`]
     /// (and its subtree skipped) instead of being resolved.
     pub locked: bool,
+    /// Read-only check (`spm doctor`, with `locked`): never fetch, scan or
+    /// print. A skill whose checkout is not already in the store is recorded in
+    /// [`Output::unverified`] and its subtree is not walked.
+    pub check: bool,
     /// Column width for the aligned per-skill fetch output.
     pub width: usize,
     /// The effective source policy every nested edge must pass before it is
@@ -120,6 +124,9 @@ pub struct Output {
     /// edge that would have needed a fresh resolution because `ai.lock` has no
     /// matching pin for it. That edge's subtree is not walked.
     pub lock_misses: Vec<(String, String)>,
+    /// [`Ctx::check`] only: skills whose store checkout is missing, so they
+    /// (and their nested dependencies) could not be verified offline.
+    pub unverified: Vec<String>,
 }
 
 /// One resolved identity in the global dedup/conflict map.
@@ -429,6 +436,7 @@ pub fn expand(direct: &BTreeMap<String, LockedSkill>, ctx: &Ctx) -> Result<Outpu
             transitive: Vec::new(),
             direct_also_satisfies: BTreeMap::new(),
             lock_misses: Vec::new(),
+            unverified: Vec::new(),
         },
         edges: 0,
     };
@@ -492,12 +500,23 @@ fn visit(
     // Fetch into the store and run the pre-materialize security gate BEFORE
     // reading this node's nested manifest — a blocked node aborts before any of
     // its subtree is ever fetched.
-    let ensured = store::ensure(locked).with_context(|| format!("fetching skill `{name}`"))?;
-    println!(
-        "  {name:<width$}  {}",
-        if ensured.fetched { "fetched" } else { "cached" }
-    );
-    if link.is_none() {
+    let ensured = if ctx.check {
+        match store::cached(locked).with_context(|| format!("inspecting skill `{name}`"))? {
+            Some(ensured) => ensured,
+            None => {
+                w.out.unverified.push(name.to_string());
+                return Ok(());
+            }
+        }
+    } else {
+        let ensured = store::ensure(locked).with_context(|| format!("fetching skill `{name}`"))?;
+        println!(
+            "  {name:<width$}  {}",
+            if ensured.fetched { "fetched" } else { "cached" }
+        );
+        ensured
+    };
+    if link.is_none() && !ctx.check {
         crate::skillcheck::warn_if_not_loadable(
             name,
             &locked.git,
@@ -508,9 +527,12 @@ fn visit(
         );
     }
     // A linked root's locked checkout is still the source of its nested
-    // manifest, so it passes the gate too before its subtree is walked.
-    crate::scan::enforce(name, &ensured.path, &ensured.root)
-        .with_context(|| format!("scanning skill `{name}`"))?;
+    // manifest, so it passes the gate too before its subtree is walked. A check
+    // materializes and fetches nothing, so it has nothing to gate.
+    if !ctx.check {
+        crate::scan::enforce(name, &ensured.path, &ensured.root)
+            .with_context(|| format!("scanning skill `{name}`"))?;
+    }
     if link.is_none() {
         w.out.materialized.push(MaterializedSkill {
             name: name.to_string(),

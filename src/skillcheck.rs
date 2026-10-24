@@ -51,6 +51,65 @@ pub fn warn_if_not_loadable(
     }
 }
 
+/// Why agents are unlikely to load the materialized skill in `dir`, or `None`
+/// when it looks loadable: a `SKILL.md` at its root opening with a YAML
+/// frontmatter block (`---` … `---`) that sets a non-empty `name` and
+/// `description`. Read-only; reports, never fails (`spm doctor`).
+pub fn loadability_problem(dir: &Path) -> Option<String> {
+    let text = match std::fs::read_to_string(dir.join("SKILL.md")) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Some("no SKILL.md at its root".to_string())
+        }
+        Err(e) => return Some(format!("SKILL.md can't be read: {e}")),
+    };
+    frontmatter_problem(&text)
+}
+
+/// The frontmatter half of [`loadability_problem`], on `SKILL.md` text.
+fn frontmatter_problem(text: &str) -> Option<String> {
+    let mut lines = text.trim_start_matches('\u{feff}').lines();
+    if lines.next().map(str::trim_end) != Some("---") {
+        return Some("SKILL.md has no YAML frontmatter (`---` block)".to_string());
+    }
+    let mut keys: Vec<(&str, &str)> = Vec::new();
+    let mut closed = false;
+    for line in lines {
+        if line.trim_end() == "---" {
+            closed = true;
+            break;
+        }
+        // Top-level keys only: nested or continuation lines are indented.
+        if line.starts_with([' ', '\t']) {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once(':') {
+            keys.push((key.trim(), value.trim()));
+        }
+    }
+    if !closed {
+        return Some("SKILL.md frontmatter is not closed by `---`".to_string());
+    }
+    let missing: Vec<&str> = ["name", "description"]
+        .into_iter()
+        .filter(|want| {
+            !keys.iter().any(|(k, v)| {
+                k == want && !v.trim_matches(|c| c == '"' || c == '\'').trim().is_empty()
+            })
+        })
+        .collect();
+    (!missing.is_empty()).then(|| {
+        format!(
+            "SKILL.md frontmatter has no non-empty {}",
+            missing
+                .iter()
+                .map(|k| format!("`{k}`"))
+                .collect::<Vec<_>>()
+                .join(" or ")
+        )
+    })
+}
+
 /// Render a locked `reference` (`tag:v1`, `branch:main`, `commit:<sha>`,
 /// `version:^1.2`) back into the CLI selector flag (`--tag v1`, …) so
 /// suggestions are runnable. A range is double-quoted: its `^`, `<`, `>` and
@@ -129,7 +188,34 @@ pub(crate) fn join_subpath(parent: Option<&str>, child: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{join_subpath, selector_flag};
+    use super::{frontmatter_problem, join_subpath, selector_flag};
+
+    #[test]
+    fn frontmatter_problem_requires_name_and_description() {
+        let ok = "---\nname: greet\ndescription: Say hello.\n---\nBody\n";
+        assert_eq!(frontmatter_problem(ok), None);
+        // A folded/indented description is still a value.
+        let folded = "---\nname: greet\ndescription: >\n  Say hello.\n---\n";
+        assert_eq!(frontmatter_problem(folded), None);
+        assert!(frontmatter_problem("# Greet\n")
+            .unwrap()
+            .contains("no YAML frontmatter"));
+        assert!(frontmatter_problem("---\nname: greet\n")
+            .unwrap()
+            .contains("not closed"));
+        let no_desc = frontmatter_problem("---\nname: greet\n---\n").unwrap();
+        assert!(no_desc.contains("`description`"), "{no_desc}");
+        let empty = frontmatter_problem("---\nname: \"\"\ndescription: x\n---\n").unwrap();
+        assert!(
+            empty.contains("`name`") && !empty.contains("description"),
+            "{empty}"
+        );
+        // A nested key does not count as the top-level one.
+        let nested = "---\nname: greet\nmeta:\n  description: x\n---\n";
+        assert!(frontmatter_problem(nested)
+            .unwrap()
+            .contains("`description`"));
+    }
 
     #[test]
     fn join_subpath_combines_with_forward_slash() {

@@ -375,7 +375,7 @@ impl Policy {
     /// missing default file means no machine policy; a missing file that
     /// `SPM_POLICY` explicitly names is an error, as is any unreadable or
     /// malformed policy — a broken policy must never fail open.
-    fn machine() -> Result<Policy> {
+    pub fn machine() -> Result<Policy> {
         let loc = crate::paths::policy_file()?;
         let origin = if loc.explicit {
             format!("machine policy {} (from SPM_POLICY)", loc.path.display())
@@ -400,6 +400,12 @@ impl Policy {
         Ok(Policy {
             layers: vec![Layer::new(origin, &file.allowed_sources)?],
         })
+    }
+
+    /// One line per layer in force (`the machine policy … (allows …)`); empty
+    /// when no policy applies.
+    pub fn describe(&self) -> Vec<String> {
+        self.layers.iter().map(Layer::summary).collect()
     }
 
     /// Fail unless every layer allows `git`. The error names the source, the

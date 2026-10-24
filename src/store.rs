@@ -21,70 +21,111 @@ pub struct Ensured {
 
 /// Ensure the repo@commit for `locked` is present in the global store, fetching if needed.
 pub fn ensure(locked: &LockedSkill) -> Result<Ensured> {
-    // Defense in depth: `store` and `commit` are appended into filesystem paths
-    // that get recursively removed and rewritten below. Every construction path
-    // (lockfile load, direct/plugin resolve, and transitive resolve) is expected
-    // to hand us an already-validated entry, but re-validate at this single choke
-    // point so no path can inject a separator or `..` into the store location.
-    crate::lockfile::validate_commit(&locked.commit)?;
-    crate::lockfile::validate_store_key(&locked.store)?;
-    // The source policy applies to every checkout handed out, including one
-    // already cached in the store, so a lock entry (even a hand-edited one)
-    // cannot smuggle a denied source in through the shared cache.
-    crate::policy::gate(&locked.git)?;
-    let repo_dir = paths::store_dir()?.join(&locked.store);
-
-    // The commit SHA pins the history, but not how the working tree was
-    // produced: a checkout made without a policy may hold checkout-filter (Git
-    // LFS) output fetched from somewhere no policy checked. Under a policy, only
-    // reuse a checkout that was itself made under the restricted git rules; any
-    // other is rebuilt. Such a checkout is valid for unrestricted use too, since
-    // under a policy a checkout needing a filter fails instead of skipping it.
-    let restricted = crate::policy::restricts();
-    let marker = repo_dir.join(".git").join(RESTRICTED_MARKER);
-    let fetched = !git::is_at_commit(&repo_dir, &locked.commit) || (restricted && !marker.exists());
+    let checkout = Checkout::of(locked)?;
+    let fetched = !checkout.is_current(locked);
     if fetched {
         // Stale, missing or unverified: wipe and re-fetch to keep the store
         // immutable-per-key.
+        let repo_dir = &checkout.repo_dir;
         if repo_dir.exists() {
-            std::fs::remove_dir_all(&repo_dir)?;
+            std::fs::remove_dir_all(repo_dir)?;
         }
         std::fs::create_dir_all(repo_dir.parent().unwrap())?;
-        git::fetch_commit(&locked.git, &locked.commit, &repo_dir)?;
-        if restricted {
-            std::fs::write(&marker, "").with_context(|| format!("writing {}", marker.display()))?;
+        git::fetch_commit(&locked.git, &locked.commit, repo_dir)?;
+        if checkout.restricted {
+            std::fs::write(&checkout.marker, "")
+                .with_context(|| format!("writing {}", checkout.marker.display()))?;
         }
     }
+    checkout.content(locked, fetched)
+}
 
-    let content = match &locked.path {
-        Some(sub) => repo_dir.join(sub),
-        None => repo_dir.clone(),
-    };
-    if !content.exists() {
-        bail!(
-            "path `{}` not found in {}@{}",
-            locked.path.as_deref().unwrap_or("."),
-            locked.git,
-            &locked.commit[..locked.commit.len().min(8)]
-        );
+/// The store checkout for `locked` when it is already there and usable exactly
+/// as [`ensure`] would reuse it, else `None`. Never fetches nor modifies the
+/// store: for read-only diagnostics (`spm doctor`).
+pub fn cached(locked: &LockedSkill) -> Result<Option<Ensured>> {
+    let checkout = Checkout::of(locked)?;
+    if !checkout.is_current(locked) {
+        return Ok(None);
     }
-    // Defense in depth: the subdir is validated lexically upstream, but a
-    // symlinked directory inside the repo could still resolve outside it.
-    // Canonicalize and require the content to stay within the checkout.
-    let repo_canon = repo_dir.canonicalize()?;
-    let content_canon = content.canonicalize()?;
-    if !content_canon.starts_with(&repo_canon) {
-        bail!(
-            "path `{}` escapes the repository checkout for {}",
-            locked.path.as_deref().unwrap_or("."),
-            locked.git
-        );
+    checkout.content(locked, false).map(Some)
+}
+
+/// Where `locked` lives in the store, after the checks every store access runs.
+struct Checkout {
+    repo_dir: PathBuf,
+    restricted: bool,
+    marker: PathBuf,
+}
+
+impl Checkout {
+    fn of(locked: &LockedSkill) -> Result<Self> {
+        // Defense in depth: `store` and `commit` are appended into filesystem paths
+        // that get recursively removed and rewritten by `ensure`. Every
+        // construction path (lockfile load, direct/plugin resolve, and transitive
+        // resolve) is expected to hand us an already-validated entry, but
+        // re-validate at this single choke point so no path can inject a
+        // separator or `..` into the store location.
+        crate::lockfile::validate_commit(&locked.commit)?;
+        crate::lockfile::validate_store_key(&locked.store)?;
+        // The source policy applies to every checkout handed out, including one
+        // already cached in the store, so a lock entry (even a hand-edited one)
+        // cannot smuggle a denied source in through the shared cache.
+        crate::policy::gate(&locked.git)?;
+        let repo_dir = paths::store_dir()?.join(&locked.store);
+        let marker = repo_dir.join(".git").join(RESTRICTED_MARKER);
+        Ok(Self {
+            repo_dir,
+            restricted: crate::policy::restricts(),
+            marker,
+        })
     }
-    Ok(Ensured {
-        path: content_canon,
-        root: repo_canon,
-        fetched,
-    })
+
+    /// Whether the checkout can be reused as is.
+    ///
+    /// The commit SHA pins the history, but not how the working tree was
+    /// produced: a checkout made without a policy may hold checkout-filter (Git
+    /// LFS) output fetched from somewhere no policy checked. Under a policy, only
+    /// reuse a checkout that was itself made under the restricted git rules; any
+    /// other is rebuilt. Such a checkout is valid for unrestricted use too, since
+    /// under a policy a checkout needing a filter fails instead of skipping it.
+    fn is_current(&self, locked: &LockedSkill) -> bool {
+        git::is_at_commit(&self.repo_dir, &locked.commit)
+            && (!self.restricted || self.marker.exists())
+    }
+
+    fn content(self, locked: &LockedSkill, fetched: bool) -> Result<Ensured> {
+        let repo_dir = self.repo_dir;
+        let content = match &locked.path {
+            Some(sub) => repo_dir.join(sub),
+            None => repo_dir.clone(),
+        };
+        if !content.exists() {
+            bail!(
+                "path `{}` not found in {}@{}",
+                locked.path.as_deref().unwrap_or("."),
+                locked.git,
+                &locked.commit[..locked.commit.len().min(8)]
+            );
+        }
+        // Defense in depth: the subdir is validated lexically upstream, but a
+        // symlinked directory inside the repo could still resolve outside it.
+        // Canonicalize and require the content to stay within the checkout.
+        let repo_canon = repo_dir.canonicalize()?;
+        let content_canon = content.canonicalize()?;
+        if !content_canon.starts_with(&repo_canon) {
+            bail!(
+                "path `{}` escapes the repository checkout for {}",
+                locked.path.as_deref().unwrap_or("."),
+                locked.git
+            );
+        }
+        Ok(Ensured {
+            path: content_canon,
+            root: repo_canon,
+            fetched,
+        })
+    }
 }
 
 /// A snapshot of what the global store holds, for `spm prune` to report.

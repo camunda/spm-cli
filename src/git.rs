@@ -491,6 +491,83 @@ fn default_branch_once(url: &str) -> Result<String> {
     git_remote(url, &["ls-remote", "--symref", url, "HEAD"], None)
 }
 
+/// The installed git's version line (e.g. `git version 2.45.1`), or why git
+/// could not be run.
+pub fn version() -> Result<String> {
+    git(&["--version"], None)
+}
+
+/// Whether git ignores `path` (relative to `dir`) in the work tree containing
+/// `dir` — a tracked file counts as not ignored. `None` when `dir` is not in a
+/// git work tree or git can't tell.
+pub fn is_ignored(dir: &Path, path: &str) -> Option<bool> {
+    let out = git_command(&["check-ignore", "-q", "--", path])
+        .current_dir(dir)
+        .output()
+        .ok()?;
+    match out.status.code() {
+        Some(0) => Some(true),
+        Some(1) => Some(false),
+        _ => None,
+    }
+}
+
+/// Whether contacting `url` under the process transport goes over SSH
+/// (`git@host:path`, `ssh://…`, or a URL `--protocol ssh` rewrites).
+pub fn contacts_over_ssh(url: &str) -> bool {
+    let url = transport()
+        .force
+        .and_then(|p| rewrite(url, p))
+        .unwrap_or_else(|| url.to_string());
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("ssh://") || lower.starts_with("git+ssh://") {
+        return true;
+    }
+    // scp-like `[user@]host:path` — no scheme, and a `:` before any `/`
+    // (a single letter before it is a Windows drive, not a host).
+    !url.contains("://")
+        && url
+            .split_once(':')
+            .is_some_and(|(host, _)| host.len() > 1 && !host.contains('/'))
+}
+
+/// Outcome of [`probe`].
+pub enum Reach {
+    Reachable,
+    Unreachable {
+        error: anyhow::Error,
+        /// The other protocol, when `url` could not be reached for a
+        /// connectivity or auth reason but answers over it.
+        other: Option<Protocol>,
+    },
+}
+
+/// Check that `url` answers `git ls-remote` under the process transport and
+/// source policy, without fetching anything. After a connectivity or auth
+/// failure, also try the other protocol once (through the same policy gate) so
+/// the caller can suggest `--protocol`/`--protocol-fallback`.
+pub fn probe(url: &str) -> Reach {
+    let head = |u: &str| git_remote(u, &["ls-remote", u, "HEAD"], None).map(drop);
+    let attempt = reject_option_like("repository URL", url)
+        .and_then(|()| with_transport(transport(), url, head));
+    let Err(error) = attempt else {
+        return Reach::Reachable;
+    };
+    let other = is_connectivity_failure(&error)
+        .then(|| {
+            let first = transport()
+                .force
+                .and_then(|p| rewrite(url, p))
+                .unwrap_or_else(|| url.to_string());
+            let to = protocol_of(&first)?.other();
+            let second = rewrite(&first, to)?;
+            let works = crate::policy::gate(&second).is_ok() && head(&second).is_ok();
+            works.then_some(to)
+        })
+        .flatten();
+    Reach::Unreachable { error, other }
+}
+
 /// Extract the branch name from the `ref: refs/heads/<name>\tHEAD` line that
 /// `ls-remote --symref` prints ahead of the `<sha>\tHEAD` line.
 fn parse_default_branch(out: &str) -> Option<String> {

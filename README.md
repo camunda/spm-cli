@@ -348,6 +348,7 @@ spm install [-g] [--locked]                        # rebuild from ai.lock (after
 spm list [-g] [--json]                             # show skills + pinned commits; alias: ls
 spm status [-g] [--json]                           # check skills are materialized in this checkout
 spm outdated [name] [-g] [--json] [--exit-code]    # report newer upstream versions (read-only)
+spm doctor [-g] [--online] [--json]                # diagnose setup problems, with a fix per check (read-only)
 spm clean [-g]                                     # remove generated vendor config
 spm prune [--yes]                                  # wipe the global fetch cache ($SPM_HOME/store, default ~/.spm/store)
 spm scan [path] [--within <dir>] [--json]          # scan skill content for suspicious patterns (default: .)

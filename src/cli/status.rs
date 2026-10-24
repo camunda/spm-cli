@@ -16,64 +16,64 @@ use std::path::PathBuf;
 /// [`outcome`]: StatusReport::outcome
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct StatusReport {
-    scope: &'static str,
+pub(super) struct StatusReport {
+    pub(super) scope: &'static str,
     /// Directory holding this scope's `ai.json`/`ai.lock`.
     #[serde(serialize_with = "crate::jsonutil::serialize_path")]
-    root: PathBuf,
+    pub(super) root: PathBuf,
     /// Skill names expected on disk: every `ai.lock` skill plus every
     /// plugin-bundled skill.
-    expected: Vec<ExpectedSkill>,
+    pub(super) expected: Vec<ExpectedSkill>,
     /// Plugins declared in `ai.json`.
-    plugins: Vec<String>,
+    pub(super) plugins: Vec<String>,
     /// Declared plugins with no `ai.lock` pin (never resolved here).
-    unlocked_plugins: Vec<String>,
-    collisions: Vec<Collision>,
+    pub(super) unlocked_plugins: Vec<String>,
+    pub(super) collisions: Vec<Collision>,
     /// Active `spm link` overrides (materialized from a local directory
     /// instead of the locked commit).
-    links: Vec<LinkStatus>,
-    targets: Vec<TargetStatus>,
-    complete: bool,
+    pub(super) links: Vec<LinkStatus>,
+    pub(super) targets: Vec<TargetStatus>,
+    pub(super) complete: bool,
     #[serde(skip)]
-    declared_skills: usize,
+    pub(super) declared_skills: usize,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ExpectedSkill {
-    name: String,
+pub(super) struct ExpectedSkill {
+    pub(super) name: String,
     /// Direct requester(s) of a transitively-resolved skill; empty otherwise.
-    requested_by: Vec<String>,
+    pub(super) requested_by: Vec<String>,
 }
 
 /// One `spm link` override.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct LinkStatus {
-    name: String,
+pub(super) struct LinkStatus {
+    pub(super) name: String,
     /// The linked directory, as recorded by `spm link`.
-    path: String,
+    pub(super) path: String,
     /// Whether `name` is still declared in `ai.json` (an undeclared link is
     /// ignored by syncs until `spm unlink` drops it).
-    declared: bool,
+    pub(super) declared: bool,
 }
 
 /// A skill name materialized in both scopes (they collide by name at runtime).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Collision {
-    name: String,
-    other_scope: &'static str,
+pub(super) struct Collision {
+    pub(super) name: String,
+    pub(super) other_scope: &'static str,
 }
 
 #[derive(Serialize)]
-struct TargetStatus {
-    target: String,
+pub(super) struct TargetStatus {
+    pub(super) target: String,
     /// `null` when no skills are expected.
-    skills: Option<VendorStatus>,
+    pub(super) skills: Option<VendorStatus>,
     /// `null` when no plugins are declared or the target only receives the
     /// plugins' bundled skills (already covered by `skills`).
-    plugins: Option<VendorStatus>,
+    pub(super) plugins: Option<VendorStatus>,
 }
 
 impl StatusReport {
@@ -117,7 +117,7 @@ pub(super) fn status(scope: &Scope, json: bool) -> Result<()> {
     report.outcome()
 }
 
-fn collect(scope: &Scope) -> Result<StatusReport> {
+pub(super) fn collect(scope: &Scope) -> Result<StatusReport> {
     let dir = scope.manifest_dir()?;
     let manifest = Manifest::load(&dir, scope)?;
     let lock = Lockfile::load_or_default(&dir)?;

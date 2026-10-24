@@ -9,6 +9,15 @@ use anyhow::{anyhow, bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
+/// `println!` unless `$quiet` (a read-only [`LockMode::Check`] prints nothing).
+macro_rules! say {
+    ($quiet:expr, $($arg:tt)*) => {
+        if !$quiet {
+            println!($($arg)*);
+        }
+    };
+}
+
 /// What a sync writes once everything is resolved and checked.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Apply {
@@ -104,6 +113,11 @@ enum LockMode {
     /// `spm link`/`spm unlink`: like [`LockMode::Locked`] — they promise to
     /// leave `ai.lock` byte-identical — but with their own guidance on failure.
     Links,
+    /// `spm doctor`: judge `ai.lock` by the exact [`LockMode::Locked`] rules,
+    /// read-only and offline. Nothing is fetched, scanned, printed or written,
+    /// links are ignored, and every mismatch is returned instead of raised (see
+    /// [`check_lock`]).
+    Check,
 }
 
 impl LockMode {
@@ -199,6 +213,8 @@ struct Plan {
     _snapshots: Option<Snapshots>,
     _state_lock: StateLock,
     apply: Apply,
+    /// [`LockMode::Check`] only: the verdict on `ai.lock`.
+    verdict: LockCheck,
 }
 
 /// Private copies of the linked directories, made with the same safe-copy
@@ -283,8 +299,10 @@ fn plan(
     }
     let (locked, apply) = match mode {
         LockMode::Write(apply) => (false, apply),
-        LockMode::Locked | LockMode::Links => (true, Apply::Install),
+        LockMode::Locked | LockMode::Links | LockMode::Check => (true, Apply::Install),
     };
+    let check = mode == LockMode::Check;
+    let quiet = check;
     let lock_only = apply == Apply::LockOnly;
     let dir = scope.manifest_dir()?;
     if manifest.targets.is_empty() {
@@ -295,29 +313,16 @@ fn plan(
     let policy = crate::policy::activate(manifest, &dir)?;
     // `ai.lock` never depends on links, and a lock-only sync writes nothing
     // else, so it ignores them (a missing linked directory can't block it).
-    let mut linked = if lock_only {
+    let mut linked = if lock_only || check {
         BTreeMap::new()
     } else {
         resolve_links(scope, manifest, &links)?
     };
-    let denied: Vec<String> = manifest
-        .skills
-        .iter()
-        .map(|(n, s)| ("skill", n, s))
-        .chain(manifest.plugins.iter().map(|(n, s)| ("plugin", n, s)))
-        .filter_map(|(kind, name, spec)| {
-            policy
-                .check(&spec.git)
-                .err()
-                .map(|e| format!("{kind} `{name}`: {e:#}"))
-        })
-        .chain(linked.iter().filter_map(|(name, l)| {
-            policy
-                .check_local(&l.display)
-                .err()
-                .map(|e| format!("link `{name}`: {e:#}"))
-        }))
-        .collect();
+    let denied = denied_sources(
+        manifest,
+        &policy,
+        linked.iter().map(|(n, l)| (n.as_str(), l.display.as_str())),
+    );
     if !denied.is_empty() {
         bail!(
             "{} dependenc{} not allowed by the source policy:\n{}",
@@ -350,6 +355,9 @@ fn plan(
     // `--locked` only: direct skills that failed the pin check and so are not
     // walked (their transitive subtree is never visited).
     let mut skipped_roots: BTreeSet<String> = BTreeSet::new();
+    // `LockMode::Check` only: entries whose store checkout is missing, so what
+    // they contribute to `ai.lock` could not be verified offline.
+    let mut unverified: Vec<String> = Vec::new();
 
     // What spm owns in each target before this sync (see `crate::owned`):
     // global/shared-dir vendors share a directory with the user's own skills,
@@ -380,9 +388,10 @@ fn plan(
         .unwrap_or(0);
 
     if manifest.skills.is_empty() && manifest.plugins.is_empty() {
-        println!("no skills or plugins declared");
+        say!(quiet, "no skills or plugins declared");
     } else {
-        println!(
+        say!(
+            quiet,
             "resolving {} skill(s) + {} plugin(s) for: {}",
             manifest.skills.len(),
             manifest.plugins.len(),
@@ -447,7 +456,7 @@ fn plan(
         }
         let short = &locked.commit[..locked.commit.len().min(8)];
         let reference = locked.display_reference();
-        println!("  {name:<width$}  {reference} @ {short}  ({how})");
+        say!(quiet, "  {name:<width$}  {reference} @ {short}  ({how})");
         lock.skills.insert(name.clone(), locked);
     }
 
@@ -481,7 +490,7 @@ fn plan(
         // that checkout is not used: by a lock-only sync (which does not fetch
         // the plugin again) or for a linked plugin (keeping `ai.lock`
         // unaffected by the link).
-        if how == "resolved" || !(lock_only || linked.contains_key(name)) {
+        if how == "resolved" || !(lock_only || check || linked.contains_key(name)) {
             locked.bundled_skills.clear();
         } else if linked.contains_key(name) {
             reused_linked_plugins.insert(name.clone());
@@ -489,7 +498,10 @@ fn plan(
         locked.also_satisfies.clear();
         let short = &locked.commit[..locked.commit.len().min(8)];
         let reference = locked.display_reference();
-        println!("  {name:<width$}  {reference} @ {short}  (plugin, {how})");
+        say!(
+            quiet,
+            "  {name:<width$}  {reference} @ {short}  (plugin, {how})"
+        );
         lock.plugins.insert(name.clone(), locked);
     }
 
@@ -525,12 +537,15 @@ fn plan(
     let mut plugins: Vec<MaterializedPlugin> = Vec::new();
     let mut plugin_skills: Vec<MaterializedSkill> = Vec::new();
     if !manifest.plugins.is_empty() {
-        println!("fetching plugins into store");
+        say!(quiet, "fetching plugins into store");
     }
     let mut linked_plugin_skills: Vec<String> = Vec::new();
     for (name, locked) in &mut lock.plugins {
         if lock_only && !fresh.contains(name) {
-            println!("  {name:<width$}  unchanged (lock only, not fetched)");
+            say!(
+                quiet,
+                "  {name:<width$}  unchanged (lock only, not fetched)"
+            );
             continue;
         }
         let link = linked.get(name);
@@ -538,24 +553,35 @@ fn plan(
         // bundled skills in `ai.lock` when its pin was freshly resolved.
         let ensured = if link.is_some() && reused_linked_plugins.contains(name) {
             None
+        } else if check {
+            // Not in the store: keep the locked bundled skills (carried over
+            // above), unverified.
+            match store::cached(locked).with_context(|| format!("inspecting plugin `{name}`"))? {
+                Some(ensured) => Some(ensured),
+                None => {
+                    unverified.push(name.clone());
+                    continue;
+                }
+            }
         } else {
             let ensured =
                 store::ensure(locked).with_context(|| format!("fetching plugin `{name}`"))?;
-            println!(
+            say!(
+                quiet,
                 "  {name:<width$}  {}",
                 if ensured.fetched { "fetched" } else { "cached" }
             );
             Some(ensured)
         };
         let (path, root) = if let Some(l) = link {
-            println!("  {name:<width$}  linked → {}", l.display);
+            say!(quiet, "  {name:<width$}  linked → {}", l.display);
             (l.content.clone(), l.content.clone())
         } else if let Some(e) = &ensured {
             (e.path.clone(), e.root.clone())
         } else {
             bail!("plugin `{name}` was neither linked nor fetched");
         };
-        if !crate::plugin::looks_like_plugin(&path) {
+        if !check && !crate::plugin::looks_like_plugin(&path) {
             let source = match link {
                 Some(l) => format!("linked → {}", l.display),
                 None => format!(
@@ -592,8 +618,11 @@ fn plan(
         }
         // Scan the whole plugin tree (agents, scripts, hooks, bundled skills)
         // before any of it is materialized into an agent-discovered directory.
-        crate::scan::enforce(name, &path, &root)
-            .with_context(|| format!("scanning plugin `{name}`"))?;
+        // A check materializes nothing, so it has nothing to gate.
+        if !check {
+            crate::scan::enforce(name, &path, &root)
+                .with_context(|| format!("scanning plugin `{name}`"))?;
+        }
         plugin_skills.extend(bundled);
         plugins.push(MaterializedPlugin {
             name: name.clone(),
@@ -608,14 +637,17 @@ fn plan(
     // the same flat list every vendor consumes and pinned into `ai.lock`
     // alongside the directly-declared ones.
     if !manifest.skills.is_empty() {
-        println!("fetching skills into store");
+        say!(quiet, "fetching skills into store");
     }
     // Lock-only without transitive resolution: a reused skill is a leaf whose
     // pin is carried over as is, so only the (re)resolved ones are walked. With
     // it on, every skill is walked: its nested `ai.json` shapes the lock.
     let walked: BTreeMap<String, LockedSkill> = if lock_only && !manifest.resolve_transitive {
         for name in lock.skills.keys().filter(|n| !fresh.contains(*n)) {
-            println!("  {name:<width$}  unchanged (lock only, not fetched)");
+            say!(
+                quiet,
+                "  {name:<width$}  unchanged (lock only, not fetched)"
+            );
         }
         lock.skills
             .iter()
@@ -640,6 +672,7 @@ fn plan(
             // `resolve_child` and docs/guide/transitive-dependencies.md.
             refresh: force_refresh && only.is_none(),
             locked,
+            check,
             width,
             policy: &policy,
             links: &linked,
@@ -664,10 +697,18 @@ fn plan(
             manifest.resolve_transitive,
             skipped_roots
                 .into_iter()
-                .chain(expansion.lock_misses.iter().map(|(n, _)| n.clone())),
+                .chain(expansion.lock_misses.iter().map(|(n, _)| n.clone()))
+                .chain(expansion.unverified.iter().cloned()),
         ));
-        mismatches.extend(expansion.lock_misses.into_iter().map(|(_, m)| m));
+        // A walk that skipped a subtree (check mode, not in the store) can
+        // reach a shared child first from another root, under a name derived
+        // from that root: its misses are artifacts, so the transitive part of
+        // the verdict is left unverified instead.
+        if expansion.unverified.is_empty() {
+            mismatches.extend(expansion.lock_misses.into_iter().map(|(_, m)| m));
+        }
     }
+    unverified.extend(expansion.unverified);
     // Fold the transitively-resolved skills into `ai.lock`. A synthesized name
     // colliding with a directly-declared dependency is a hard error (the
     // synthesized names are hash-suffixed to make this astronomically unlikely).
@@ -683,7 +724,8 @@ fn plan(
                  brings it in"
             );
         }
-        println!(
+        say!(
+            quiet,
             "  {tname:<width$}  transitive (via {})",
             tlocked.requested_by.join(", ")
         );
@@ -742,26 +784,33 @@ fn plan(
             .collect();
         (&vendors, outputs)
     };
-    guard_working_copies(
-        scope,
-        &dir,
-        guarded_vendors,
-        &linked,
-        &outputs,
-        snapshots.as_ref().map(|s| s.root.as_path()),
-        Writes {
-            lock_only,
-            // A lock-only sync freezes only a legacy assumption (see
-            // `Plan::apply`); any other sync records what it installs.
-            ownership: !lock_only || matches!(previously_owned, Ownership::Legacy(_)),
-        },
-    )?;
+    // A check writes nothing, so it has nothing to guard.
+    if !check {
+        guard_working_copies(
+            scope,
+            &dir,
+            guarded_vendors,
+            &linked,
+            &outputs,
+            snapshots.as_ref().map(|s| s.root.as_path()),
+            Writes {
+                lock_only,
+                // A lock-only sync freezes only a legacy assumption (see
+                // `Plan::apply`); any other sync records what it installs.
+                ownership: !lock_only || matches!(previously_owned, Ownership::Legacy(_)),
+            },
+        )?;
+    }
+    let mut verdict = LockCheck::default();
     if locked {
         // Backstop for the whole defect class: whatever the specific checks above
         // missed (a hand-edited `bundled_skills`/`requested_by`/store key, ...),
         // `--locked` must never install a set that differs from the committed
         // lock. Compared as JSON values, so line endings/formatting don't matter.
-        if mismatches.is_empty() {
+        // An unverified transitive subtree was not walked, so the lock built
+        // here lacks it: the comparison would only report that.
+        let partial = manifest.resolve_transitive && !unverified.is_empty();
+        if mismatches.is_empty() && !partial {
             let on_disk: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(Lockfile::path_in(&dir))?)?;
             if on_disk != serde_json::to_value(&lock)? {
@@ -772,7 +821,12 @@ fn plan(
                 );
             }
         }
-        if !mismatches.is_empty() {
+        if check {
+            verdict = LockCheck {
+                mismatches,
+                unverified,
+            };
+        } else if !mismatches.is_empty() {
             bail!(
                 "{}: ai.lock is out of sync with ai.json ({} problem(s)):\n{}\n{}",
                 mode.label(),
@@ -791,7 +845,7 @@ fn plan(
     links.managed = linked_plugin_skills;
     // Only rewrite the links file when it changes (a `link`/`unlink`, or a
     // linked plugin's bundled skills moving), never on a plain sync.
-    let links = (Links::load(scope).ok().as_ref() != Some(&links)).then_some(links);
+    let links = (!check && Links::load(scope).ok().as_ref() != Some(&links)).then_some(links);
     if let Some(links) = &links {
         links.document(scope)?;
     }
@@ -809,7 +863,70 @@ fn plan(
         _snapshots: snapshots,
         _state_lock: state_lock,
         apply,
+        verdict,
     })
+}
+
+/// What [`check_lock`] found.
+#[derive(Default)]
+pub(super) struct LockCheck {
+    /// Every way `ai.lock` disagrees with `ai.json` — exactly what
+    /// `spm install --locked` would reject.
+    pub(super) mismatches: Vec<String>,
+    /// Dependencies whose store checkout is missing, so what they contribute
+    /// to `ai.lock` (a plugin's bundled skills, nested dependencies) could not
+    /// be verified offline. `spm install` would fetch them.
+    pub(super) unverified: Vec<String>,
+}
+
+/// Judge `ai.lock` against `manifest` by the exact `spm install --locked`
+/// rules, without fetching, scanning, printing or writing anything (`spm
+/// doctor`). `ai.lock` must exist. `state_lock` must have been taken before
+/// `manifest` was read; it is handed back for the caller's further reads.
+pub(super) fn check_lock(
+    scope: &Scope,
+    manifest: &Manifest,
+    state_lock: StateLock,
+) -> Result<(LockCheck, StateLock)> {
+    let links = Links::load(scope)?;
+    let plan = plan(
+        scope,
+        manifest,
+        state_lock,
+        links,
+        false,
+        None,
+        LockMode::Check,
+    )?;
+    Ok((plan.verdict, plan._state_lock))
+}
+
+/// Describe each dependency of `manifest` — and each linked directory in
+/// `links` (`(name, recorded path)`) — that `policy` does not allow. The one
+/// rule `plan` enforces before any network access and `spm doctor` reports.
+pub(super) fn denied_sources<'a>(
+    manifest: &Manifest,
+    policy: &crate::policy::Policy,
+    links: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Vec<String> {
+    manifest
+        .skills
+        .iter()
+        .map(|(n, s)| ("skill", n, s))
+        .chain(manifest.plugins.iter().map(|(n, s)| ("plugin", n, s)))
+        .filter_map(|(kind, name, spec)| {
+            policy
+                .check(&spec.git)
+                .err()
+                .map(|e| format!("{kind} `{name}`: {e:#}"))
+        })
+        .chain(links.into_iter().filter_map(|(name, display)| {
+            policy
+                .check_local(display)
+                .err()
+                .map(|e| format!("link `{name}`: {e:#}"))
+        }))
+        .collect()
 }
 
 impl Plan {

@@ -63,7 +63,11 @@ impl Vendor for Copilot {
                     return Ok(());
                 }
                 copy_skills_into(&dir, skills, claim)?;
-                ensure_gitignored(root)
+                let names: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
+                for entry in self.gitignore_entries(&names) {
+                    gitignore::ensure(root, GITIGNORE_COMMENT, &entry)?;
+                }
+                Ok(())
             }
             Scope::Global => {
                 // The dir is shared with the user's own skills: remove only the
@@ -78,6 +82,15 @@ impl Vendor for Copilot {
                 }
                 Ok(())
             }
+        }
+    }
+
+    fn gitignore_entries(&self, skills: &[String]) -> Vec<String> {
+        // Nothing is materialized (nor ignored) for an empty skill set.
+        if skills.is_empty() {
+            Vec::new()
+        } else {
+            vec![GITIGNORE_ENTRY.to_string()]
         }
     }
 
@@ -122,10 +135,6 @@ fn join_all(base: &Path, segs: &[&str]) -> PathBuf {
     segs.iter().fold(base.to_path_buf(), |p, seg| p.join(seg))
 }
 
-fn ensure_gitignored(project_root: &Path) -> Result<()> {
-    gitignore::ensure(project_root, GITIGNORE_COMMENT, GITIGNORE_ENTRY)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,21 +157,6 @@ mod tests {
             path: src,
             root: root.to_path_buf(),
         }
-    }
-
-    #[test]
-    fn ensure_gitignored_appends_block() {
-        let tmp = scratch("gi");
-        std::fs::create_dir_all(&tmp).unwrap();
-        std::fs::write(tmp.join(".gitignore"), "target/\n").unwrap();
-
-        ensure_gitignored(&tmp).unwrap();
-        let after = std::fs::read_to_string(tmp.join(".gitignore")).unwrap();
-        assert!(after.contains(GITIGNORE_ENTRY), "{after}");
-        assert!(after.contains(GITIGNORE_COMMENT), "{after}");
-        assert!(after.starts_with("target/\n"), "{after}");
-
-        std::fs::remove_dir_all(&tmp).unwrap();
     }
 
     /// The global materialize must add spm's skills without disturbing a skill
