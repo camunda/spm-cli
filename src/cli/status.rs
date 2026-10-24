@@ -292,7 +292,7 @@ fn render_text(report: &StatusReport) {
                 "! linked: `{}` → {} is not declared in ai.json and is ignored — run `spm unlink {}{}`",
                 l.name,
                 l.path,
-                l.name,
+                crate::shell::arg(&l.name),
                 if report.scope == "global" { " -g" } else { "" }
             );
         }

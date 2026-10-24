@@ -698,11 +698,12 @@ fn check_gitignore(
         }
         if !tracked.is_empty() {
             // Targets sharing a dir report the same path; untrack it once.
-            let paths: Vec<&str> = tracked
+            let paths: Vec<_> = tracked
                 .iter()
                 .map(|(_, p)| p.as_str())
                 .collect::<BTreeSet<_>>()
                 .into_iter()
+                .map(crate::shell::arg)
                 .collect();
             checks.push(
                 Check::warn(

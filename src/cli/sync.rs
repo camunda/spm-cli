@@ -913,15 +913,15 @@ fn verified_lock_drift(
 ) -> Result<Vec<String>> {
     use serde_json::Value;
     let mut drift = Vec::new();
-    // An unwalked subtree only adds entries: every other top-level field (the
-    // project `id`, any stray key) must match exactly.
+    // An unwalked subtree only adds skill entries: every other top-level field
+    // (the project `id`, the never-walked `plugins` map, any stray key) must
+    // match exactly.
     let outer = |v: Value| -> serde_json::Map<String, Value> {
         let mut fields = match v {
             Value::Object(m) => m,
             _ => serde_json::Map::new(),
         };
         fields.remove("skills");
-        fields.remove("plugins");
         fields
     };
     let (ours, theirs) = (outer(serde_json::to_value(lock)?), outer(on_disk.clone()));
@@ -929,10 +929,32 @@ fn verified_lock_drift(
     keys.sort();
     keys.dedup();
     for key in keys {
-        if ours.get(key) != theirs.get(key) {
+        let (ours, theirs) = (ours.get(key), theirs.get(key));
+        if ours == theirs {
+            continue;
+        }
+        if key != "plugins" {
             drift.push(format!(
                 "ai.lock top-level `{key}` differs from what spm would write"
             ));
+            continue;
+        }
+        // Name the plugins that differ; only a shape difference (e.g. an
+        // empty map spm omits) is left to report as the whole map.
+        let entries = |v: Option<&Value>| v.and_then(Value::as_object).cloned().unwrap_or_default();
+        let (ours, theirs) = (entries(ours), entries(theirs));
+        let mut names: Vec<&String> = ours.keys().chain(theirs.keys()).collect();
+        names.sort();
+        names.dedup();
+        let before = drift.len();
+        for name in names.into_iter().filter(|n| ours.get(*n) != theirs.get(*n)) {
+            drift.push(format!(
+                "ai.lock entry for plugin `{name}` differs from what spm would write (e.g. \
+                 its bundled skills changed)"
+            ));
+        }
+        if drift.len() == before {
+            drift.push("ai.lock `plugins` differs from what spm would write".to_string());
         }
     }
     let unwalked = |r: &str| {
@@ -945,50 +967,53 @@ fn verified_lock_drift(
             .cloned()
             .unwrap_or_default()
     };
-    let maps = [
-        ("skill", "skills", &lock.skills),
-        ("plugin", "plugins", &lock.plugins),
-    ];
-    for (kind, map, built) in maps {
-        for (name, entry) in built {
-            let Some(disk) = on_disk[map].get(name) else {
-                continue;
-            };
-            let mut disk = disk.clone();
-            let entry = serde_json::to_value(entry)?;
-            // Only a transitive pin (one the walk gave requesters) can gain
-            // requesters from a skipped subtree; a direct pin never has any.
-            let tolerated: &[&str] = match kind {
-                "skill" if !list(&entry, "requested_by").is_empty() => {
-                    &["requested_by", "also_satisfies"]
-                }
-                "skill" => &["also_satisfies"],
-                _ => &[],
-            };
-            for &key in tolerated {
-                let (ours, theirs) = (list(&entry, key), list(&disk, key));
-                let added_by_unwalked = ours.iter().all(|v| theirs.contains(v))
-                    && theirs
-                        .iter()
-                        .filter(|v| !ours.contains(v))
-                        .all(|v| key == "also_satisfies" || v.as_str().is_some_and(unwalked));
-                if added_by_unwalked {
-                    match entry.get(key) {
-                        Some(v) => disk[key] = v.clone(),
-                        None => {
-                            if let Some(fields) = disk.as_object_mut() {
-                                fields.remove(key);
-                            }
+    // The walk writes both lists sorted and deduplicated (see
+    // `transitive::expand`), so additions are only tolerated in that form.
+    fn strict<T: Ord>(v: &[T]) -> bool {
+        v.windows(2).all(|w| w[0] < w[1])
+    }
+    let canonical = |disk: &Value| {
+        serde_json::from_value::<LockedSkill>(disk.clone())
+            .is_ok_and(|l| strict(&l.requested_by) && strict(&l.also_satisfies))
+    };
+    for (name, entry) in &lock.skills {
+        let Some(disk) = on_disk["skills"].get(name) else {
+            continue;
+        };
+        let mut disk = disk.clone();
+        let entry = serde_json::to_value(entry)?;
+        // Only a transitive pin (one the walk gave requesters) can gain
+        // requesters from a skipped subtree; a direct pin never has any.
+        let tolerated: &[&str] = if !canonical(&disk) {
+            &[]
+        } else if !list(&entry, "requested_by").is_empty() {
+            &["requested_by", "also_satisfies"]
+        } else {
+            &["also_satisfies"]
+        };
+        for &key in tolerated {
+            let (ours, theirs) = (list(&entry, key), list(&disk, key));
+            let added_by_unwalked = ours.iter().all(|v| theirs.contains(v))
+                && theirs
+                    .iter()
+                    .filter(|v| !ours.contains(v))
+                    .all(|v| key == "also_satisfies" || v.as_str().is_some_and(unwalked));
+            if added_by_unwalked {
+                match entry.get(key) {
+                    Some(v) => disk[key] = v.clone(),
+                    None => {
+                        if let Some(fields) = disk.as_object_mut() {
+                            fields.remove(key);
                         }
                     }
                 }
             }
-            if disk != entry {
-                drift.push(format!(
-                    "ai.lock entry for {kind} `{name}` differs from what spm would write (e.g. \
-                     a plugin's bundled skills or a transitive skill's requesters changed)"
-                ));
-            }
+        }
+        if disk != entry {
+            drift.push(format!(
+                "ai.lock entry for skill `{name}` differs from what spm would write (e.g. \
+                 a transitive skill's requesters changed)"
+            ));
         }
     }
     Ok(drift)
@@ -1505,7 +1530,8 @@ fn reject_link_overlaps(
         let relink = if active {
             format!(
                 "link `{name}` to a directory outside spm's output \
-                 (`spm link {name} <dir>{flag}`), or "
+                 (`spm link {} <dir>{flag}`), or ",
+                crate::shell::arg(name)
             )
         } else if !g.origin.is_empty() {
             "unlink it where it was linked, or ".to_string()
@@ -1641,7 +1667,7 @@ fn reject_locked_skill_collisions(lock: &Lockfile) -> Result<()> {
 /// `spm unlink <name>`, spelled for the scope in use.
 pub(super) fn unlink_command(scope: &Scope, name: &str) -> String {
     let g = if scope.is_global() { " -g" } else { "" };
-    format!("spm unlink {name}{g}")
+    format!("spm unlink {}{g}", crate::shell::arg(name))
 }
 
 /// The pin in `prev` if it can be reused for `spec` without re-resolving, else

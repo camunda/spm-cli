@@ -14155,11 +14155,54 @@ fn doctor_rejects_extra_top_level_lock_fields_when_a_root_is_not_in_the_store() 
     assert!(ok, "only unverified: {doc:#}");
     check(&doc, "lockfile", "warn");
 
-    edit_lock(&sb, |l| l["metadata"] = serde_json::json!(true));
+    let installed = sb.read("ai.lock");
+    // Plugins are never walked, so their map (even an empty one spm omits)
+    // is compared exactly too.
+    for (key, value) in [
+        ("metadata", serde_json::json!(true)),
+        ("plugins", serde_json::json!({})),
+    ] {
+        std::fs::write(sb.project.join("ai.lock"), &installed).unwrap();
+        edit_lock(&sb, |l| l[key] = value);
+        let (ok, doc) = doctor(&sb, &[]);
+        assert!(!ok, "{key}: {doc:#}");
+        let c = check(&doc, "lockfile", "error");
+        assert!(c["details"].to_string().contains(key), "{c}");
+        assert!(!sb.spm(&["install", "--locked"]).status.success());
+        remove_store_checkout(&sb, "alpha-");
+    }
+}
+
+/// The walk writes provenance lists sorted and deduplicated, so a
+/// non-canonical list on a walked entry is drift even while another root's
+/// subtree is unwalked.
+#[test]
+fn doctor_rejects_non_canonical_requested_by_when_another_root_is_not_in_the_store() {
+    let sb = Sandbox::new();
+    let (alpha, beta) = (transitive_root(&sb, "alpha"), transitive_root(&sb, "beta"));
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{"alpha":{{"git":"{alpha}","branch":"main"}},"beta":{{"git":"{beta}","branch":"main"}}}}}}"#
+        ),
+    );
+    sb.ok(&["install"]);
+    let lock: serde_json::Value = serde_json::from_str(&sb.read("ai.lock")).unwrap();
+    let child = lock["skills"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, l)| l["requested_by"] == serde_json::json!(["beta"]))
+        .map(|(n, _)| n.clone())
+        .unwrap();
+    remove_store_checkout(&sb, "alpha-");
+    edit_lock(&sb, |l| {
+        l["skills"][child.as_str()]["requested_by"] = serde_json::json!(["beta", "beta"])
+    });
     let (ok, doc) = doctor(&sb, &[]);
     assert!(!ok, "{doc:#}");
-    let c = check(&doc, "lockfile", "error");
-    assert!(c["details"].to_string().contains("metadata"), "{c}");
+    check(&doc, "lockfile", "error");
     assert!(!sb.spm(&["install", "--locked"]).status.success());
 }
 
@@ -14297,6 +14340,43 @@ fn doctor_flags_spm_output_that_git_would_still_commit() {
     );
     let (_, doc) = doctor(&sb, &[]);
     assert!(all_ok(&doc), "{doc:#}");
+}
+
+/// A fix is meant to be pasted into a shell, so names with spaces or shell
+/// metacharacters must come out as one safely quoted argument each.
+#[cfg(unix)]
+#[test]
+fn doctor_fix_commands_quote_names_for_the_shell() {
+    let sb = Sandbox::new();
+    git_in(&sb.project, &["init", "-q"]);
+    sb.ok(&["init", "--target", "gemini"]);
+    let name = "it's my;skill";
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", name]);
+    git_in(
+        &sb.project,
+        &["add", "-f", &format!(".gemini/skills/{name}/SKILL.md")],
+    );
+    let (_, doc) = doctor(&sb, &[]);
+    let fix = check(&doc, "gitignore", "warn")["fix"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        fix,
+        r#"git rm -r --cached '.gemini/skills/it'\''s my;skill'"#
+    );
+    let out = Command::new("sh")
+        .args(["-c", &fix])
+        .current_dir(&sb.project)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let (_, doc) = doctor(&sb, &[]);
+    check(&doc, "gitignore", "ok");
 }
 
 /// Claude's settings.local.json holds a machine-specific path: flag it when
