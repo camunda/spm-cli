@@ -175,7 +175,7 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
         &Default::default(),
         &removed_owned,
         None,
-        false,
+        super::sync::Writes::ALL,
     )?;
     for ((t, v), names) in removed.iter().zip(&removed_vendors).zip(&removed_owned) {
         let mut candidates = v.clean_paths(scope, &names.skill_names())?;

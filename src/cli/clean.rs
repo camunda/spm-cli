@@ -38,7 +38,7 @@ pub(super) fn clean(scope: &Scope) -> Result<()> {
         &Default::default(),
         &owned,
         None,
-        false,
+        super::sync::Writes::ALL,
     )?;
     for (vendor, names) in vendors.iter().zip(&owned) {
         vendor.clean(scope, &names.skill_names())?;

@@ -276,7 +276,7 @@ spm install                               # re-run after further edits
 - The directory may not overlap anything a target writes or deletes (e.g.
   Codex's `.agents/skills/<name>`, or the project root, which contains the
   output), nor be reached by a file spm edits in place (`ai.json`, `ai.lock`,
-  the links file, `.gitignore`, Claude's settings) through a symlink or a hard link (detected on Unix) — that would wipe or modify your working copy,
+  the links file, the ownership record, `.gitignore`, Claude's settings) through a symlink or a hard link (detected on Unix) — that would wipe or modify your working copy,
   or copy the output into itself. The path as given counts too: one that
   passes through a symlink inside the output (e.g. `.agents/skills/<name>`
   replaced by a symlink to your clone) is rejected, as syncing would replace it;
@@ -286,7 +286,8 @@ spm install                               # re-run after further edits
   refuse, since rebuilding that output would silently drop your links. The same
   goes for any ownership record (e.g. through a symlinked `$SPM_HOME/owned`):
   losing it would leave cleanup trusting a newer `ai.lock` and deleting skills
-  spm never installed.
+  spm never installed — this holds before the first install too, when the
+  record is yet to be written.
   This protection covers every link on the machine, whichever scope recorded it:
   a global link (or another project's) pointing into this project's output
   makes this project's syncs, `clean` and `target remove` refuse until it is

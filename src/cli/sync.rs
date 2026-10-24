@@ -749,7 +749,12 @@ fn plan(
         &linked,
         &outputs,
         snapshots.as_ref().map(|s| s.root.as_path()),
-        lock_only,
+        Writes {
+            lock_only,
+            // A lock-only sync freezes only a legacy assumption (see
+            // `Plan::apply`); any other sync records what it installs.
+            ownership: !lock_only || matches!(previously_owned, Ownership::Legacy(_)),
+        },
     )?;
     if locked {
         // Backstop for the whole defect class: whatever the specific checks above
@@ -923,8 +928,9 @@ struct Guarded {
 /// project's into another's). Each is still the user's data even when this
 /// command doesn't copy from it. A recorded dir that is gone has nothing left
 /// to protect. Every command that writes target output or deletes it (`sync`,
-/// `clean`, `target remove`) must call this first. A `lock_only` sync writes
-/// just `ai.json` and `ai.lock` (pass no `vendors`), so only those count.
+/// `clean`, `target remove`) must call this first. A lock-only sync writes
+/// just `ai.json` and `ai.lock` (pass no `vendors`), plus the ownership record
+/// when it freezes a legacy one (see [`Writes`]), so only those count.
 pub(super) fn guard_working_copies(
     scope: &Scope,
     manifest_dir: &std::path::Path,
@@ -932,7 +938,7 @@ pub(super) fn guard_working_copies(
     active: &BTreeMap<String, Linked>,
     outputs: &[Owned],
     snapshot: Option<&std::path::Path>,
-    lock_only: bool,
+    writes: Writes,
 ) -> Result<()> {
     assert_eq!(vendors.len(), outputs.len(), "one output set per vendor");
     let mut guarded: Vec<Guarded> = active
@@ -1016,7 +1022,7 @@ pub(super) fn guard_working_copies(
         Kept {
             state_files: &state_files,
             snapshot,
-            lock_only,
+            writes,
         },
         outputs,
     )
@@ -1042,6 +1048,25 @@ impl StateFile {
     }
 }
 
+/// Which of spm's own state files a guarded command writes besides `ai.json`
+/// and `ai.lock` (see [`guard_working_copies`]).
+#[derive(Clone, Copy)]
+pub(super) struct Writes {
+    /// Writes only `ai.json` and `ai.lock` (and maybe the ownership record):
+    /// neither the links file (nor its removal) nor `.gitignore`.
+    pub lock_only: bool,
+    /// Saves the ownership record.
+    pub ownership: bool,
+}
+
+impl Writes {
+    /// An install, `clean` or `target remove`: every state file.
+    pub const ALL: Self = Self {
+        lock_only: false,
+        ownership: true,
+    };
+}
+
 /// What the targets' writes and deletions must leave alone besides working
 /// copies (see [`reject_link_overlaps`]).
 struct Kept<'a> {
@@ -1050,9 +1075,8 @@ struct Kept<'a> {
     state_files: &'a [StateFile],
     /// Where this command copied linked content to materialize it from.
     snapshot: Option<&'a std::path::Path>,
-    /// Writes only `ai.json` and `ai.lock`: neither the links file (nor its
-    /// removal) nor `.gitignore`.
-    lock_only: bool,
+    /// Which state files this command writes itself.
+    writes: Writes,
 }
 
 /// Reject a linked working copy that overlaps any location a target writes or
@@ -1081,10 +1105,14 @@ fn reject_link_overlaps(
     let Kept {
         state_files,
         snapshot,
-        lock_only,
+        writes,
     } = kept;
-    // Nothing to protect: no working copy, and no links file to lose.
+    let lock_only = writes.lock_only;
+    // Nothing to protect: no working copy, no state file to lose, and none
+    // about to be created (an ownership record written for the first time
+    // must not land in a target's output either).
     if guarded.is_empty()
+        && !writes.ownership
         && !state_files
             .iter()
             .any(|f| f.path.symlink_metadata().is_ok())
@@ -1195,6 +1223,13 @@ fn reject_link_overlaps(
         let links_file = state_files[0].path.clone();
         let id = identity(&deletion_target(&links_file)?)?;
         outputs.push(("spm", links_file, id, false));
+    }
+    // Saving the ownership record replaces the entry at its path (beside a
+    // temporary file in the same dir), following its parents' symlinks only.
+    if writes.ownership {
+        let record = Ownership::path(scope)?;
+        let id = identity(&deletion_target(&record)?)?;
+        outputs.push(("spm", record, id, false));
     }
     for g in guarded {
         let (name, display, active) = (&g.name, &g.display, g.active);

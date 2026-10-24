@@ -128,7 +128,7 @@ impl Ownership {
         Ok(out)
     }
 
-    fn path(scope: &Scope) -> Result<PathBuf> {
+    pub fn path(scope: &Scope) -> Result<PathBuf> {
         let home = paths::spm_home()?;
         Ok(match scope {
             Scope::Project { root } => crate::links::project_state_path(&home, PROJECT_DIR, root)?,

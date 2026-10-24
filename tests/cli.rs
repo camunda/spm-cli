@@ -13257,3 +13257,61 @@ fn ownership_records_are_guarded_like_links_files() {
         assert_eq!(read_path(&record), before, "{args:?}");
     }
 }
+
+/// Saving the ownership record replaces the file at its path: with
+/// `$SPM_HOME/owned` moved into a linked working copy (and symlinked back),
+/// every command that would save it refuses before changing anything — an
+/// install, `clean`, `target remove`, and a lock-only sync freezing a legacy
+/// assumption into a record.
+#[test]
+fn ownership_records_are_never_written_into_a_working_copy() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot,codex"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let dev = local_skill_checkout(&sb, "dev", "LOCAL");
+    sb.ok(&["link", "greet", "../dev"]);
+    let record = sb.project_owned();
+    let owned_dir = record.parent().unwrap().to_path_buf();
+    let inside = dev.join("owned");
+    std::fs::rename(&owned_dir, &inside).unwrap();
+    symlink(&inside, &owned_dir);
+    let before = read_path(&record);
+    let lock = read_path(&sb.project.join("ai.lock"));
+
+    for args in [
+        &["install"][..],
+        &["clean"],
+        &["target", "remove", "copilot"],
+    ] {
+        let err = fails(&sb, args);
+        assert!(err.contains("linked directory `../dev`"), "{args:?}: {err}");
+        assert_eq!(read_path(&record), before, "{args:?}");
+    }
+    // No record yet (a legacy install): a lock-only sync would write one.
+    std::fs::remove_file(&record).unwrap();
+    let err = fails(&sb, &["update", "--lock-only"]);
+    assert!(err.contains("linked directory `../dev`"), "{err}");
+    assert!(!record.exists(), "no record written");
+    assert_eq!(read_path(&sb.project.join("ai.lock")), lock);
+}
+
+/// Before the first install there is no ownership record (nor links file) to
+/// find, yet the install creates one: with `$SPM_HOME/owned` pointing into a
+/// target's output, it refuses rather than write the record where rebuilding
+/// that output deletes it.
+#[test]
+fn a_first_install_never_records_ownership_inside_target_output() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    let state = sb.project.join(".agents/skills/spm-managed-skills/owned");
+    std::fs::create_dir_all(&state).unwrap();
+    let owned_dir = sb.project_owned().parent().unwrap().to_path_buf();
+    std::fs::create_dir_all(owned_dir.parent().unwrap()).unwrap();
+    symlink(&state, &owned_dir);
+    let err = fails(
+        &sb,
+        &["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"],
+    );
+    assert!(err.contains("the ownership record"), "{err}");
+    assert!(!sb.project_owned().exists(), "no record written");
+}
