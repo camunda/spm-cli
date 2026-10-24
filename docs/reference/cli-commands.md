@@ -151,7 +151,9 @@ them removes a name from the shared dir, the others stop claiming it too, even
 if the install fails before reaching them. Likewise, when an install, `spm
 clean` or `spm target remove` fails part-way, the record drops every name whose
 entry is already gone, so a skill you create under that name afterwards is
-yours. Targets with separate dirs never claim each other's names. The record is bound to the
+yours. Names are released in the record before they're removed, so if the
+record can't be written (say `$SPM_HOME` is read-only) the command stops before
+deleting anything. Targets with separate dirs never claim each other's names. The record is bound to the
 directory spm wrote into: if a target's skills dir later leads to a different
 directory (say the original was moved aside, or deleted and recreated, or
 replaced by a symlink to your own skills), nothing recorded for the original is

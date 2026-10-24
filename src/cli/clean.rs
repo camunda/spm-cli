@@ -40,6 +40,10 @@ pub(super) fn clean(scope: &Scope) -> Result<()> {
         None,
         super::sync::Writes::ALL,
     )?;
+    // Released before anything is deleted, so the record never outlives a
+    // removal even if it can't be written afterwards; should a vendor fail,
+    // what it left in place is reclaimed (see `Ownership::fail`).
+    ownership.cleaned(&manifest.targets).save(scope)?;
     for (vendor, names) in vendors.iter().zip(&owned) {
         if let Err(e) = vendor
             .clean(scope, &names.skill_names())
@@ -48,7 +52,6 @@ pub(super) fn clean(scope: &Scope) -> Result<()> {
             return Err(ownership.fail(scope, &manifest.targets, e));
         }
     }
-    ownership.cleaned(&manifest.targets).save(scope)?;
     println!(
         "cleaned generated {} config for target(s): {}",
         scope.label(),

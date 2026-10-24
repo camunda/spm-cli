@@ -123,7 +123,9 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
         &lock,
         &crate::links::Links::load(scope)?.managed,
         &manifest.targets,
-    )?;
+    )?
+    // Exact, so each removal below can be released before it starts.
+    .exact(&manifest.targets);
     // Physical locations a remaining target still loads skills, plugins or
     // their metadata from (`content`), plus every location reaching them
     // depends on (`traversed`: symlinks, and dirs passed through before a
@@ -241,6 +243,8 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
                 None => deletable.push(p),
             }
         }
+        // Released before anything is deleted (see `clean`).
+        owned.clone().without(t).save(scope)?;
         if let Err(e) = vendor::remove_paths(&deletable)
             .and_then(|()| v.deregister(scope))
             .and_then(|()| v.deregister_plugins(scope))

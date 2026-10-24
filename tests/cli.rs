@@ -13453,3 +13453,27 @@ fn a_target_remove_failing_part_way_releases_what_it_removed() {
     std::fs::write(&settings, kept).unwrap();
     assert_user_skill_survives_clean(&sb, "old");
 }
+
+/// A command that removes entries releases them in the ownership record
+/// before deleting anything: when the record can't be written (here
+/// `$SPM_HOME/owned` is read-only), `clean` and `target remove` delete nothing,
+/// so no record can outlive what they removed.
+#[cfg(unix)]
+#[test]
+fn an_unwritable_ownership_record_stops_removals_before_they_start() {
+    use std::os::unix::fs::PermissionsExt;
+    for args in [&["clean"][..], &["target", "remove", "codex"]] {
+        let sb = Sandbox::new();
+        sb.ok(&["init", "--target", "codex,cursor"]);
+        sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "old"]);
+        let owned_dir = sb.project_owned().parent().unwrap().to_path_buf();
+        std::fs::set_permissions(&owned_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let out = sb.command(args).output().unwrap();
+        std::fs::set_permissions(&owned_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!out.status.success(), "{args:?} succeeded");
+        assert!(
+            sb.project.join(".agents/skills/old/SKILL.md").exists(),
+            "{args:?} deleted before recording it"
+        );
+    }
+}

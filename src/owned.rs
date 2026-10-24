@@ -258,12 +258,7 @@ impl Ownership {
     /// written out for `targets` first (see [`Self::freeze`]): falling back to
     /// the lock again would claim what was just removed.
     pub fn fail(self, scope: &Scope, targets: &[String], err: anyhow::Error) -> anyhow::Error {
-        let mut record = match self {
-            Self::Legacy(owned) => {
-                Self::Recorded(targets.iter().map(|t| (t.clone(), owned.clone())).collect())
-            }
-            recorded => recorded,
-        };
+        let mut record = self.exact(targets);
         match record.settle(scope).and_then(|()| record.save(scope)) {
             Ok(()) => err,
             Err(e) => err.context(format!("also failed to update the ownership record: {e:#}")),
@@ -320,7 +315,13 @@ impl Ownership {
                     }
                 }
             }
+            // Names this install removes are released before it starts: the
+            // record must never outlive a removal, even when a later save
+            // fails. Should it stop part-way, those still present are
+            // reclaimed (see `fail`); at worst one stays unclaimed, which is
+            // left alone rather than deleted.
             let mut ahead = prior.clone();
+            ahead.skills.retain(|n| desired.skills.contains(n));
             ahead.plugins.extend(desired.plugins.iter().cloned());
             record.insert(target.clone(), ahead);
             Self::Recorded(record.clone()).save(scope)?;
@@ -331,7 +332,8 @@ impl Ownership {
             let mut bound = skills_dir_identity(scope, target)?;
             let mut claim = |name: &str| -> Result<()> {
                 let owned = record.get_mut(target).expect("target recorded above");
-                let added = owned.skills.insert(name.to_string());
+                // Claimed only to be removed: nothing to record.
+                let added = desired.skills.contains(name) && owned.skills.insert(name.to_string());
                 let dir = skills_dir_identity(scope, target)?;
                 if added || dir != bound {
                     Self::Recorded(record.clone()).save(scope)?;
@@ -340,6 +342,8 @@ impl Ownership {
                 Ok(())
             };
             if let Err(e) = install(i, &prior, &mut claim) {
+                let owned = record.get_mut(target).expect("target recorded above");
+                owned.skills.extend(prior.skills.iter().cloned());
                 return Err(Self::Recorded(record).fail(scope, targets, e));
             }
             record.insert(target.clone(), desired.clone());
@@ -353,10 +357,18 @@ impl Ownership {
     pub fn freeze(&self, scope: &Scope, targets: &[String]) -> Result<()> {
         match self {
             Self::Recorded(_) => Ok(()),
+            Self::Legacy(_) => self.clone().exact(targets).save(scope),
+        }
+    }
+
+    /// A legacy assumption written out as a record for `targets` (each holds
+    /// the lock's set); a record as is.
+    pub fn exact(self, targets: &[String]) -> Self {
+        match self {
             Self::Legacy(owned) => {
                 Self::Recorded(targets.iter().map(|t| (t.clone(), owned.clone())).collect())
-                    .save(scope)
             }
+            recorded => recorded,
         }
     }
 
@@ -550,12 +562,11 @@ mod tests {
         };
         let err = owned
             .install(scope, targets, &Owned::from_lock(lock), |i, _, claim| {
-                claim("touched")?;
-                write(&targets[i], "touched");
-                if i == fail_at {
-                    anyhow::bail!("boom")
-                }
-                for name in lock.skills.keys() {
+                // The target at `fail_at` stops after its first name.
+                for (n, name) in lock.skills.keys().enumerate() {
+                    if i == fail_at && n == 1 {
+                        anyhow::bail!("boom")
+                    }
                     claim(name)?;
                     write(&targets[i], name);
                 }
@@ -653,13 +664,13 @@ mod tests {
         );
 
         let targets = ["codex".to_string(), "cursor".to_string()];
-        let err = installed_err(&scope, &recorded, &targets, &lock_with(&["b"]), 1);
+        let err = installed_err(&scope, &recorded, &targets, &lock_with(&["b", "c"]), 1);
         assert!(err.contains("boom"), "{err}");
         // `codex` was written; `cursor` failed part-way, so it holds its prior
         // set plus exactly what it claimed — not the rest of the new set.
         let partial = Ownership::load(&scope, &lock_with(&[]), &[], &[]).unwrap();
-        assert_eq!(partial.for_target("codex").skills, set(&["b"]));
-        assert_eq!(partial.for_target("cursor").skills, set(&["touched"]));
+        assert_eq!(partial.for_target("codex").skills, set(&["b", "c"]));
+        assert_eq!(partial.for_target("cursor").skills, set(&["b"]));
         let mut seen = Vec::new();
         recorded
             .install(
@@ -683,9 +694,9 @@ mod tests {
             .unwrap();
         let kept = Ownership::load(&scope, &lock_with(&[]), &[], &[]).unwrap();
         assert_eq!(kept.for_target("codex"), Owned::default());
-        assert_eq!(kept.for_target("cursor").skills, set(&["touched"]));
+        assert_eq!(kept.for_target("cursor").skills, set(&["b"]));
         let cleaned = kept.cleaned(&targets[..1]);
-        assert_eq!(cleaned.for_target("cursor").skills, set(&["touched"]));
+        assert_eq!(cleaned.for_target("cursor").skills, set(&["b"]));
         assert_eq!(
             Ownership::Legacy(Owned::from_lock(&lock_with(&["a"]))).cleaned(&[]),
             Ownership::Recorded(BTreeMap::new())
@@ -736,11 +747,56 @@ mod tests {
         before.grant("amp", &Owned::from_lock(&lock_with(&["old"])));
         before.save(&scope).unwrap();
         let targets = ["codex".to_string(), "amp".to_string()];
-        let err = installed_err(&scope, &before, &targets, &lock_with(&["fresh"]), 1);
+        let err = installed_err(&scope, &before, &targets, &lock_with(&["fresh", "more"]), 1);
         assert!(err.contains("boom"), "{err}");
         let after = Ownership::load(&scope, &Lockfile::default(), &[], &targets).unwrap();
+        assert_eq!(after.for_target("codex").skills, set(&["fresh", "more"]));
+        assert_eq!(after.for_target("amp").skills, set(&["fresh"]));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The record never claims a name an install removed, even when the save
+    /// after the last target fails: it was released before the removal.
+    #[cfg(unix)]
+    #[test]
+    fn a_removed_name_is_released_before_the_final_save() {
+        use std::os::unix::fs::PermissionsExt;
+        let (root, scope, _home) = sandbox("final");
+        make_skills_dir(&scope, "codex");
+        let dir = crate::vendor::for_target("codex")
+            .unwrap()
+            .skills_dir(&scope)
+            .unwrap();
+        std::fs::create_dir_all(dir.join("old")).unwrap();
+        let mut before = Ownership::Recorded(BTreeMap::new());
+        before.grant("codex", &Owned::from_lock(&lock_with(&["old"])));
+        before.save(&scope).unwrap();
+        let record_dir = Ownership::path(&scope)
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let lock = lock_with(&["fresh"]);
+        let err = before
+            .install(
+                &scope,
+                &["codex".to_string()],
+                &Owned::from_lock(&lock),
+                |_, _, claim| {
+                    claim("old")?;
+                    std::fs::remove_dir_all(dir.join("old"))?;
+                    claim("fresh")?;
+                    std::fs::create_dir_all(dir.join("fresh"))?;
+                    // The record can't be written from here on.
+                    std::fs::set_permissions(&record_dir, std::fs::Permissions::from_mode(0o555))?;
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+        std::fs::set_permissions(&record_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(format!("{err:#}").contains("ermission"), "{err:#}");
+        let after = Ownership::load(&scope, &Lockfile::default(), &[], &[]).unwrap();
         assert_eq!(after.for_target("codex").skills, set(&["fresh"]));
-        assert_eq!(after.for_target("amp").skills, set(&["touched"]));
         std::fs::remove_dir_all(root).unwrap();
     }
 
