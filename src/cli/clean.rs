@@ -41,8 +41,12 @@ pub(super) fn clean(scope: &Scope) -> Result<()> {
         super::sync::Writes::ALL,
     )?;
     for (vendor, names) in vendors.iter().zip(&owned) {
-        vendor.clean(scope, &names.skill_names())?;
-        vendor.clean_plugins(scope, &names.plugin_names())?;
+        if let Err(e) = vendor
+            .clean(scope, &names.skill_names())
+            .and_then(|()| vendor.clean_plugins(scope, &names.plugin_names()))
+        {
+            return Err(ownership.fail(scope, &manifest.targets, e));
+        }
     }
     ownership.cleaned(&manifest.targets).save(scope)?;
     println!(

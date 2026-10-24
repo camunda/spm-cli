@@ -241,9 +241,12 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
                 None => deletable.push(p),
             }
         }
-        vendor::remove_paths(&deletable)?;
-        v.deregister(scope)?;
-        v.deregister_plugins(scope)?;
+        if let Err(e) = vendor::remove_paths(&deletable)
+            .and_then(|()| v.deregister(scope))
+            .and_then(|()| v.deregister_plugins(scope))
+        {
+            return Err(owned.fail(scope, &manifest.targets, e));
+        }
         owned = owned.without(t);
     }
     owned.save(scope)?;

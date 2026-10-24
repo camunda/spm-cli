@@ -148,8 +148,10 @@ and amp both use `.agents/skills/`) share what spm installed there: when a
 branch switches from one to the other, the configured target takes over the
 other's names, so it removes them once they're no longer wanted. Once one of
 them removes a name from the shared dir, the others stop claiming it too, even
-if the install fails before reaching them. Targets with separate dirs never
-claim each other's names. The record is bound to the
+if the install fails before reaching them. Likewise, when an install, `spm
+clean` or `spm target remove` fails part-way, the record drops every name whose
+entry is already gone, so a skill you create under that name afterwards is
+yours. Targets with separate dirs never claim each other's names. The record is bound to the
 directory spm wrote into: if a target's skills dir later leads to a different
 directory (say the original was moved aside, or deleted and recreated, or
 replaced by a symlink to your own skills), nothing recorded for the original is

@@ -225,6 +225,51 @@ impl Ownership {
         Ok(())
     }
 
+    /// Drop every recorded skill name whose entry is gone from its target's
+    /// skills dir: spm holds nothing there any more, so whatever is created
+    /// under that name later is the user's. Called once a command that
+    /// deletes entries (install, `clean`, `target remove`) stops part-way, so
+    /// the record never outlives what it removed. Plugins live only in
+    /// spm-owned locations, so their names stay.
+    pub fn settle(&mut self, scope: &Scope) -> Result<()> {
+        let Self::Recorded(map) = self else {
+            return Ok(());
+        };
+        for (target, owned) in map.iter_mut() {
+            let Ok(vendor) = crate::vendor::for_target(target) else {
+                continue;
+            };
+            let dir = vendor.skills_dir(scope)?;
+            owned
+                .skills
+                .retain(|name| match dir.join(name).symlink_metadata() {
+                    Ok(_) => true,
+                    Err(e) => !matches!(
+                        e.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ),
+                });
+        }
+        Ok(())
+    }
+
+    /// Return `err`, first [settling](Self::settle) and saving the record as
+    /// it stands once a command failed part-way. A legacy assumption is
+    /// written out for `targets` first (see [`Self::freeze`]): falling back to
+    /// the lock again would claim what was just removed.
+    pub fn fail(self, scope: &Scope, targets: &[String], err: anyhow::Error) -> anyhow::Error {
+        let mut record = match self {
+            Self::Legacy(owned) => {
+                Self::Recorded(targets.iter().map(|t| (t.clone(), owned.clone())).collect())
+            }
+            recorded => recorded,
+        };
+        match record.settle(scope).and_then(|()| record.save(scope)) {
+            Ok(()) => err,
+            Err(e) => err.context(format!("also failed to update the ownership record: {e:#}")),
+        }
+    }
+
     /// What spm owns in `target`.
     pub fn for_target(&self, target: &str) -> Owned {
         match self {
@@ -294,7 +339,9 @@ impl Ownership {
                 }
                 Ok(())
             };
-            install(i, &prior, &mut claim)?;
+            if let Err(e) = install(i, &prior, &mut claim) {
+                return Err(Self::Recorded(record).fail(scope, targets, e));
+            }
             record.insert(target.clone(), desired.clone());
         }
         Self::Recorded(record).save(scope)
@@ -484,6 +531,9 @@ mod tests {
         lock
     }
 
+    /// Install `lock`'s names into `targets`, writing each claimed entry like
+    /// a vendor would (but removing none): the one at `fail_at` writes only
+    /// `touched`, then fails.
     fn installed_err(
         scope: &Scope,
         owned: &Ownership,
@@ -491,11 +541,23 @@ mod tests {
         lock: &Lockfile,
         fail_at: usize,
     ) -> String {
+        let write = |target: &str, name: &str| {
+            let dir = crate::vendor::for_target(target)
+                .unwrap()
+                .skills_dir(scope)
+                .unwrap();
+            std::fs::create_dir_all(dir.join(name)).unwrap();
+        };
         let err = owned
             .install(scope, targets, &Owned::from_lock(lock), |i, _, claim| {
                 claim("touched")?;
+                write(&targets[i], "touched");
                 if i == fail_at {
                     anyhow::bail!("boom")
+                }
+                for name in lock.skills.keys() {
+                    claim(name)?;
+                    write(&targets[i], name);
                 }
                 Ok(())
             })

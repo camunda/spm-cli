@@ -13380,3 +13380,76 @@ fn a_shared_dir_rename_failing_part_way_leaves_no_stale_alias_claim() {
         "clean deleted the user's skill"
     );
 }
+
+/// Create the user's own skill at `.agents/skills/<name>`, run `spm clean`,
+/// and assert it survived.
+fn assert_user_skill_survives_clean(sb: &Sandbox, name: &str) {
+    let dir = sb.project.join(".agents/skills").join(name);
+    assert!(!dir.exists(), "spm removed `{name}`");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: Mine.\n---\n"),
+    )
+    .unwrap();
+    sb.ok(&["clean"]);
+    assert!(
+        dir.join("SKILL.md").exists(),
+        "clean deleted the user's `{name}`"
+    );
+}
+
+/// An install that removed a skill's entry and then failed (here on a
+/// `.gitignore` that isn't UTF-8) no longer records it: the user's own skill
+/// created under that name since survives `clean`.
+#[test]
+fn an_install_failing_after_a_removal_releases_the_removed_name() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "old"]);
+    let mut doc: serde_json::Value = serde_json::from_str(&sb.read("ai.json")).unwrap();
+    let spec = doc["skills"]["old"].take();
+    doc["skills"] = serde_json::json!({ "fresh": spec });
+    write_manifest(&sb, &serde_json::to_string_pretty(&doc).unwrap());
+    let gitignore = sb.project.join(".gitignore");
+    let kept = std::fs::read(&gitignore).unwrap();
+    std::fs::write(&gitignore, b"\xff\xfe\n").unwrap();
+    fails(&sb, &["install"]);
+    std::fs::write(&gitignore, kept).unwrap();
+    assert_user_skill_survives_clean(&sb, "old");
+}
+
+/// A `clean` that removed codex's skills and then failed on Claude (whose
+/// settings can't be parsed) no longer records them for codex.
+#[test]
+fn a_clean_failing_part_way_releases_what_it_removed() {
+    // With a record, and without one yet (installed by an older spm).
+    for legacy in [false, true] {
+        let sb = Sandbox::new();
+        sb.ok(&["init", "--target", "codex,claude"]);
+        sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "old"]);
+        if legacy {
+            std::fs::remove_file(sb.project_owned()).unwrap();
+        }
+        let settings = sb.project.join(".claude/settings.local.json");
+        let kept = std::fs::read(&settings).unwrap();
+        std::fs::write(&settings, "not json").unwrap();
+        fails(&sb, &["clean"]);
+        std::fs::write(&settings, kept).unwrap();
+        assert_user_skill_survives_clean(&sb, "old");
+    }
+}
+
+/// Likewise for `target remove` failing after removing one target's output.
+#[test]
+fn a_target_remove_failing_part_way_releases_what_it_removed() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex,claude,cursor"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "old"]);
+    let settings = sb.project.join(".claude/settings.local.json");
+    let kept = std::fs::read(&settings).unwrap();
+    std::fs::write(&settings, "not json").unwrap();
+    fails(&sb, &["target", "remove", "codex,claude"]);
+    std::fs::write(&settings, kept).unwrap();
+    assert_user_skill_survives_clean(&sb, "old");
+}
