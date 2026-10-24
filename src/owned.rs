@@ -12,24 +12,25 @@
 //! exactly what this record says spm installed into each target, and only an
 //! install (or clean) rewrites it.
 //!
-//! The record is machine-local state, never committed: in a project it lives
-//! in `.spm/owned.json` (the `.spm/` dir ignores itself), globally in
-//! `$SPM_HOME/owned-global.json`. Installs made before it existed have no
+//! The record is machine-local state, never in the checkout — a repository
+//! must not be able to claim the user's own skills for spm to delete: in a
+//! project it lives in `$SPM_HOME/owned/<project>-<hash>.json` (named like the
+//! links file, see [`crate::links`]), globally in `$SPM_HOME/owned-global.json`. Installs made before it existed have no
 //! record; then the lock stands in for it, as it always did.
 
 use crate::lockfile::Lockfile;
 use crate::manifest::validate_skill_name;
+use crate::paths;
 use crate::scope::Scope;
 use crate::vendor::Claim;
-use crate::{gitignore, paths};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-const PROJECT_DIR: &str = ".spm";
-const PROJECT_FILE: &str = "owned.json";
+/// `$SPM_HOME` subdirectory holding one record per project.
+const PROJECT_DIR: &str = "owned";
 const GLOBAL_FILE: &str = "owned-global.json";
 
 /// Skill and plugin names spm installed into one target.
@@ -95,9 +96,10 @@ pub enum Ownership {
 
 impl Ownership {
     fn path(scope: &Scope) -> Result<PathBuf> {
+        let home = paths::spm_home()?;
         Ok(match scope {
-            Scope::Project { root } => root.join(PROJECT_DIR).join(PROJECT_FILE),
-            Scope::Global => paths::spm_home()?.join(GLOBAL_FILE),
+            Scope::Project { root } => crate::links::project_state_path(&home, PROJECT_DIR, root)?,
+            Scope::Global => home.join(GLOBAL_FILE),
         })
     }
 
@@ -214,11 +216,6 @@ impl Ownership {
         let p = Self::path(scope)?;
         let dir = p.parent().expect("record path has a parent");
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-        if let Scope::Project { .. } = scope {
-            // `.spm/.gitignore` may pre-exist (even empty): append the rule
-            // rather than trust it, so the record can never be committed.
-            gitignore::ensure(dir, "# machine-local spm state — never commit", "*")?;
-        }
         let record = Record {
             targets: targets.clone(),
         };
@@ -277,6 +274,16 @@ mod tests {
         p
     }
 
+    /// A scratch dir holding an isolated `SPM_HOME` (`home/`) and a project
+    /// (`project/`), with `SPM_HOME` pointed at it while the guard lives.
+    fn sandbox(name: &str) -> (PathBuf, Scope, paths::SpmHomeGuard) {
+        let root = scratch(name);
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let guard = paths::SpmHomeGuard::set(&root.join("home"));
+        (root, Scope::Project { root: project }, guard)
+    }
+
     fn set(names: &[&str]) -> BTreeSet<String> {
         names.iter().map(|s| s.to_string()).collect()
     }
@@ -320,8 +327,7 @@ mod tests {
 
     #[test]
     fn a_failed_write_keeps_the_previous_record() {
-        let root = scratch("atomic");
-        let scope = Scope::Project { root: root.clone() };
+        let (root, scope, _home) = sandbox("atomic");
         let mut first = Ownership::Recorded(BTreeMap::new());
         first.grant("codex", &Owned::from_lock(&lock_with(&["a"])));
         first.save(&scope).unwrap();
@@ -383,9 +389,8 @@ mod tests {
     }
 
     #[test]
-    fn records_per_target_and_ignores_itself_in_a_project() {
-        let root = scratch("roundtrip");
-        let scope = Scope::Project { root: root.clone() };
+    fn records_per_target_outside_the_checkout() {
+        let (root, scope, _home) = sandbox("roundtrip");
         let legacy = Ownership::load(&scope, &lock_with(&["a"])).unwrap();
         assert_eq!(legacy.for_target("codex").skills, set(&["a"]));
         // A legacy assumption is written out once; afterwards it is exact and
@@ -420,31 +425,42 @@ mod tests {
         installed.without("codex").save(&scope).unwrap();
         let empty = Ownership::load(&scope, &lock_with(&["b"])).unwrap();
         assert_eq!(empty, Ownership::Recorded(BTreeMap::new()));
-        let ignore = std::fs::read_to_string(root.join(".spm").join(".gitignore")).unwrap();
-        assert!(ignore.lines().any(|l| l == "*"), "{ignore}");
+        let path = Ownership::path(&scope).unwrap();
+        assert!(
+            path.starts_with(root.join("home").join(PROJECT_DIR)),
+            "{path:?}"
+        );
+        assert!(!root.join("project").join(".spm").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn an_existing_ignore_file_without_the_rule_gets_it() {
-        for existing in ["", "keep-me\n"] {
-            let root = scratch("ignore");
-            let scope = Scope::Project { root: root.clone() };
-            std::fs::create_dir_all(root.join(".spm")).unwrap();
-            std::fs::write(root.join(".spm").join(".gitignore"), existing).unwrap();
-            Ownership::Recorded(BTreeMap::new()).save(&scope).unwrap();
-            let ignore = std::fs::read_to_string(root.join(".spm").join(".gitignore")).unwrap();
-            assert!(ignore.starts_with(existing), "{ignore:?}");
-            assert!(ignore.lines().any(|l| l == "*"), "{ignore:?}");
-            std::fs::remove_dir_all(root).unwrap();
-        }
+    fn a_record_in_the_checkout_is_ignored() {
+        // A repository must not be able to claim the user's own skills for
+        // spm to delete by committing a record.
+        let (root, scope, _home) = sandbox("committed");
+        let Scope::Project { root: project } = &scope else {
+            unreachable!()
+        };
+        std::fs::create_dir_all(project.join(".spm")).unwrap();
+        std::fs::write(
+            project.join(".spm").join("owned.json"),
+            r#"{"targets":{"codex":{"skills":["users-own"]}}}"#,
+        )
+        .unwrap();
+        let loaded = Ownership::load(&scope, &lock_with(&["a"])).unwrap();
+        assert_eq!(
+            loaded,
+            Ownership::Legacy(Owned::from_lock(&lock_with(&["a"])))
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn rejects_names_that_escape_the_target_dir() {
-        let root = scratch("hostile");
-        let scope = Scope::Project { root: root.clone() };
-        std::fs::create_dir_all(root.join(".spm")).unwrap();
+        let (root, scope, _home) = sandbox("hostile");
+        let path = Ownership::path(&scope).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         for owned in [
             r#"{"skills":[".."]}"#,
             r#"{"skills":["../x"]}"#,
@@ -452,11 +468,7 @@ mod tests {
             r#"{"skills":[""]}"#,
             r#"{"plugins":["../kit"]}"#,
         ] {
-            std::fs::write(
-                root.join(".spm").join("owned.json"),
-                format!(r#"{{"targets":{{"codex":{owned}}}}}"#),
-            )
-            .unwrap();
+            std::fs::write(&path, format!(r#"{{"targets":{{"codex":{owned}}}}}"#)).unwrap();
             let err = format!(
                 "{:#}",
                 Ownership::load(&scope, &Lockfile::default()).unwrap_err()

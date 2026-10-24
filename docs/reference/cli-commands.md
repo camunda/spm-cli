@@ -135,8 +135,9 @@ the new lock. The lock is the same one the command writes without
 Skills the new lock drops (say, a plugin's renamed bundled skill or a transitive
 pin that went away) stay installed until then, and spm still owns them: it keeps
 a machine-local record of what it last installed into each target
-(`.spm/owned.json` in a project, `$SPM_HOME/owned-global.json` with `-g`; never
-committed), so the next `spm install` or `spm clean` removes exactly those from
+(`$SPM_HOME/owned/<project>-<hash>.json` for a project,
+`$SPM_HOME/owned-global.json` with `-g`; never in the checkout, so a repository
+can't supply it), so the next `spm install` or `spm clean` removes exactly those from
 shared skills dirs without touching your own skills. Only an install or clean
 updates the record, so names a lock merely passed through — or a target added
 since — are never claimed. The same applies when a pulled `ai.lock` drops them.

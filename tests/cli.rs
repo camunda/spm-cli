@@ -347,10 +347,21 @@ impl Sandbox {
     }
 
     /// The project's links file under `$SPM_HOME/links/` (a path that doesn't
-    /// exist when there is none). Found rather than derived, so the tests never
-    /// duplicate how spm names it.
+    /// exist when there is none).
     fn project_links(&self) -> PathBuf {
-        let dir = self.spm_home.join("links");
+        self.project_state("links")
+    }
+
+    /// The project's ownership record under `$SPM_HOME/owned/`.
+    fn project_owned(&self) -> PathBuf {
+        self.project_state("owned")
+    }
+
+    /// The project's machine-local state file under `$SPM_HOME/<subdir>/` (a
+    /// path that doesn't exist when there is none). Found rather than derived,
+    /// so the tests never duplicate how spm names it.
+    fn project_state(&self, subdir: &str) -> PathBuf {
+        let dir = self.spm_home.join(subdir);
         let files: Vec<PathBuf> = std::fs::read_dir(&dir)
             .map(|rd| {
                 rd.map(|e| e.unwrap().path())
@@ -12326,8 +12337,9 @@ fn install_after_lock_only_update_removes_the_skills_it_dropped() {
     sb.ok(&["remove", "--plugin", "kit"]);
     assert!(!dir.join("new").exists());
     assert!(dir.join("mine/SKILL.md").exists());
-    // The record is machine-local state that ignores itself.
-    assert!(sb.read(".spm/.gitignore").lines().any(|l| l == "*"));
+    // The record is machine-local state, kept out of the checkout.
+    assert!(sb.project_owned().exists());
+    assert!(!sb.project.join(".spm").exists());
 }
 
 /// Same for `clean`: it removes what a lock-only update dropped from ai.lock,
@@ -12341,7 +12353,8 @@ fn clean_after_lock_only_update_removes_the_skills_it_dropped() {
         assert!(!dir.join(gone).exists(), "{gone} cleaned");
     }
     assert!(dir.join("mine/SKILL.md").exists(), "user skill kept");
-    let record: serde_json::Value = serde_json::from_str(&sb.read(".spm/owned.json")).unwrap();
+    let record: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(sb.project_owned()).unwrap()).unwrap();
     assert_eq!(
         record,
         serde_json::json!({"targets": {}}),
@@ -12434,7 +12447,8 @@ fn target_added_after_lock_only_update_does_not_purge_other_targets_names() {
     sb.ok(&["target", "remove", "cursor"]);
     assert!(!cursor.join("new").exists());
     assert!(cursor.join("old/SKILL.md").exists());
-    let record: serde_json::Value = serde_json::from_str(&sb.read(".spm/owned.json")).unwrap();
+    let record: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(sb.project_owned()).unwrap()).unwrap();
     assert!(record["targets"]["cursor"].is_null(), "{record}");
     assert!(!record["targets"]["codex"].is_null(), "{record}");
 }
@@ -12623,7 +12637,8 @@ fn an_unreadable_ownership_record_stops_clean_before_deleting() {
         "--lock-only",
     ]);
 
-    let spm = sb.project.join(".spm");
+    let spm = sb.project_owned().parent().unwrap().to_path_buf();
+    assert!(sb.project_owned().exists(), "the record exists");
     std::fs::set_permissions(&spm, std::fs::Permissions::from_mode(0o000)).unwrap();
     let out = sb.spm(&["clean"]);
     std::fs::set_permissions(&spm, std::fs::Permissions::from_mode(0o755)).unwrap();
