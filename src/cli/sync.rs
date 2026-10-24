@@ -703,6 +703,9 @@ fn plan(
         ));
         mismatches.extend(expansion.lock_misses.into_iter().map(|(_, m)| m));
     }
+    // Only skill subtrees are walked: a plugin missing from the store keeps
+    // its locked entry, so it never makes the built lock partial.
+    let unwalked_skills = expansion.unverified.clone();
     unverified.extend(expansion.unverified);
     // Fold the transitively-resolved skills into `ai.lock`. A synthesized name
     // colliding with a directly-declared dependency is a hard error (the
@@ -807,8 +810,8 @@ fn plan(
                 serde_json::from_str(&std::fs::read_to_string(Lockfile::path_in(&dir))?)?;
             // An unverified transitive subtree was not walked, so the lock
             // built here lacks it: only the entries it did build are compared.
-            if manifest.resolve_transitive && !unverified.is_empty() {
-                mismatches.extend(verified_lock_drift(&on_disk, &lock, &unverified)?);
+            if manifest.resolve_transitive && !unwalked_skills.is_empty() {
+                mismatches.extend(verified_lock_drift(&on_disk, &lock, &unwalked_skills)?);
             } else if on_disk != serde_json::to_value(&lock)? {
                 mismatches.push(
                     "ai.lock differs from what spm would write (e.g. a plugin's bundled skills \

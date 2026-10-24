@@ -13975,6 +13975,52 @@ fn doctor_compares_verified_lock_entries_when_another_root_is_not_in_the_store()
     }
 }
 
+/// A plugin is never walked, so a plugin missing from the store leaves no
+/// skill subtree unwalked: every skill entry is still compared exactly.
+#[test]
+fn doctor_compares_skill_entries_exactly_when_only_a_plugin_is_not_in_the_store() {
+    let sb = Sandbox::new();
+    sb.add_plugin();
+    let alpha = transitive_root(&sb, "alpha");
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{"alpha":{{"git":"{alpha}","branch":"main"}}}},"plugins":{{"ds":{{"git":"{}","branch":"main","path":"pkg"}}}}}}"#,
+            sb.skill_url()
+        ),
+    );
+    sb.ok(&["install"]);
+    let installed = sb.read("ai.lock");
+    let lock: serde_json::Value = serde_json::from_str(&installed).unwrap();
+    let leaf = lock["skills"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, l)| l["requested_by"] == serde_json::json!(["alpha"]))
+        .map(|(n, _)| n.clone())
+        .unwrap();
+    remove_store_checkout(&sb, "skill-");
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(ok, "only unverified: {doc:#}");
+    let c = check(&doc, "lockfile", "warn");
+    assert!(c["details"].to_string().contains("ds"), "{c}");
+
+    for (key, value) in [
+        ("also_satisfies", serde_json::json!(["branch:dev"])),
+        ("requested_by", serde_json::json!(["alpha", "ds"])),
+    ] {
+        std::fs::write(sb.project.join("ai.lock"), &installed).unwrap();
+        edit_lock(&sb, |l| l["skills"][leaf.as_str()][key] = value);
+        let (ok, doc) = doctor(&sb, &[]);
+        assert!(!ok, "{key}: {doc:#}");
+        let c = check(&doc, "lockfile", "error");
+        assert!(c["details"].to_string().contains("ai.lock differs"), "{c}");
+        assert!(!sb.spm(&["install", "--locked"]).status.success());
+        remove_store_checkout(&sb, "skill-");
+    }
+}
+
 #[test]
 fn doctor_flags_missing_stale_and_unloadable_skills() {
     let sb = Sandbox::new();
