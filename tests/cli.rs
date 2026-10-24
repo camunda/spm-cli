@@ -13315,3 +13315,34 @@ fn a_first_install_never_records_ownership_inside_target_output() {
     assert!(err.contains("the ownership record"), "{err}");
     assert!(!sb.project_owned().exists(), "no record written");
 }
+
+/// spm's own state writes must not land on one another: with
+/// `$SPM_HOME/owned` aliasing `$SPM_HOME/links` before either file exists,
+/// saving the ownership record would write it as the links file. Every
+/// command that would save it refuses, writing neither.
+#[test]
+fn ownership_records_never_overwrite_an_aliased_links_file() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex,cursor"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    // Both name the project's file alike, each in its own dir.
+    let record = sb.project_owned();
+    let owned_dir = record.parent().unwrap();
+    let links_dir = sb.spm_home.join("links");
+    let links_file = links_dir.join(record.file_name().unwrap());
+    let links_dir = links_dir.as_path();
+    std::fs::remove_dir_all(owned_dir).unwrap();
+    std::fs::create_dir_all(links_dir).unwrap();
+    symlink(links_dir, owned_dir);
+
+    for args in [
+        &["update", "--lock-only"][..],
+        &["install"],
+        &["clean"],
+        &["target", "remove", "codex"],
+    ] {
+        let err = fails(&sb, args);
+        assert!(err.contains("the links file"), "{args:?}: {err}");
+        assert!(!links_file.exists(), "{args:?} wrote state");
+    }
+}

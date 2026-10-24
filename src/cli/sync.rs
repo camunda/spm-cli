@@ -1147,6 +1147,22 @@ fn reject_link_overlaps(
         let id = identity(&resolve(p, &mut Vec::new())?)?;
         outputs.push((owner, p.clone(), id, true));
     }
+    // spm's own state writes count too, so none lands on another state file
+    // (e.g. `$SPM_HOME/owned` aliasing `$SPM_HOME/links`). This scope's links
+    // file is also deleted once it holds nothing, which removes the entry at
+    // its path (not what a final symlink there points at).
+    if !lock_only {
+        let links_file = state_files[0].path.clone();
+        let id = identity(&deletion_target(&links_file)?)?;
+        outputs.push(("spm", links_file, id, false));
+    }
+    // Saving the ownership record replaces the entry at its path (beside a
+    // temporary file in the same dir), following its parents' symlinks only.
+    if writes.ownership {
+        let record = Ownership::path(scope)?;
+        let id = identity(&deletion_target(&record)?)?;
+        outputs.push(("spm", record, id, false));
+    }
     // Each state file must survive the targets' cleanup: inside their output
     // (by its entry or where it points) it would be wiped, silently dropping
     // every link or the record of what spm installed. Nor may any other file
@@ -1172,8 +1188,9 @@ fn reject_link_overlaps(
         // the files' own identities show it.
         let hit = outputs
             .iter()
-            .find(|(_, p, out, through)| {
-                (!through || p != links_file) && state.iter().any(|s| s.starts_with(out))
+            .find(|(_, p, out, _)| {
+                // Only a state file's own write (at its own path) is meant.
+                p != links_file && state.iter().any(|s| s.starts_with(out))
             })
             .map(|(owner, p, _, through)| (*owner, p.as_path(), *through))
             .or_else(|| {
@@ -1216,20 +1233,6 @@ fn reject_link_overlaps(
                 p.display()
             );
         }
-    }
-    // This scope's links file is also deleted once it holds nothing, which
-    // removes the entry at its path (not what a final symlink there points at).
-    if !lock_only {
-        let links_file = state_files[0].path.clone();
-        let id = identity(&deletion_target(&links_file)?)?;
-        outputs.push(("spm", links_file, id, false));
-    }
-    // Saving the ownership record replaces the entry at its path (beside a
-    // temporary file in the same dir), following its parents' symlinks only.
-    if writes.ownership {
-        let record = Ownership::path(scope)?;
-        let id = identity(&deletion_target(&record)?)?;
-        outputs.push(("spm", record, id, false));
     }
     for g in guarded {
         let (name, display, active) = (&g.name, &g.display, g.active);
