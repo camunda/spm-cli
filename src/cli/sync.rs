@@ -934,10 +934,14 @@ fn verified_lock_drift(
             };
             let mut disk = disk.clone();
             let entry = serde_json::to_value(entry)?;
-            let tolerated: &[&str] = if kind == "skill" {
-                &["requested_by", "also_satisfies"]
-            } else {
-                &[]
+            // Only a transitive pin (one the walk gave requesters) can gain
+            // requesters from a skipped subtree; a direct pin never has any.
+            let tolerated: &[&str] = match kind {
+                "skill" if !list(&entry, "requested_by").is_empty() => {
+                    &["requested_by", "also_satisfies"]
+                }
+                "skill" => &["also_satisfies"],
+                _ => &[],
             };
             for &key in tolerated {
                 let (ours, theirs) = (list(&entry, key), list(&disk, key));

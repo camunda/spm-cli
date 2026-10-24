@@ -654,7 +654,7 @@ To override the gate for content you trust (or a false positive), set
   "targets": [
     {
       "target": "claude",
-      "skills": {                           // null when no skills are expected
+      "skills": {                           // always present, even with none expected
         "location": "/path/to/project/.spm/claude/plugin/skills",
         "present": ["pdf-tools"],
         "missing": [],

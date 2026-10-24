@@ -6358,7 +6358,11 @@ fn status_json_reports_unlocked_skills_and_plugins() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("ai.lock has none"));
     let doc = json_doc(&out);
     assert_eq!(doc["complete"], false, "{doc}");
-    assert!(doc["targets"][0]["skills"].is_null(), "{doc}");
+    assert_eq!(
+        doc["targets"][0]["skills"]["missing"],
+        serde_json::json!([]),
+        "{doc}"
+    );
 }
 
 #[test]
@@ -13908,18 +13912,26 @@ fn doctor_keeps_lock_drift_of_an_independent_root_when_another_is_not_in_the_sto
         .unwrap();
     remove_store_checkout(&sb, "alpha-");
 
-    for change in ["selector", "removal"] {
+    // A skipped subtree never adds requesters to a direct root: provenance
+    // on a direct pin is always cleared.
+    let direct = "skill `beta`".to_string();
+    for (change, culprit) in [
+        ("selector", &beta_child),
+        ("removal", &beta_child),
+        ("direct requester", &direct),
+    ] {
         std::fs::write(sb.project.join("ai.lock"), &installed).unwrap();
         edit_lock(&sb, |l| match change {
             "selector" => l["skills"][&beta_child]["reference"] = "branch:dev".into(),
-            _ => {
+            "removal" => {
                 l["skills"].as_object_mut().unwrap().remove(&beta_child);
             }
+            _ => l["skills"]["beta"]["requested_by"] = serde_json::json!(["alpha"]),
         });
         let (ok, doc) = doctor(&sb, &[]);
-        assert!(!ok, "{doc:#}");
+        assert!(!ok, "{change}: {doc:#}");
         let c = check(&doc, "lockfile", "error");
-        assert!(c["details"].to_string().contains(&beta_child), "{c}");
+        assert!(c["details"].to_string().contains(culprit.as_str()), "{c}");
         assert!(!sb.spm(&["install", "--locked"]).status.success());
         remove_store_checkout(&sb, "alpha-");
     }
@@ -14136,6 +14148,23 @@ fn doctor_reports_links() {
     let (ok, doc) = doctor(&sb, &[]);
     assert!(!ok);
     assert_eq!(check(&doc, "links", "error")["fix"], "spm unlink greet");
+}
+
+/// After switching to a branch that declares and locks nothing, skills left
+/// in spm's own Copilot dir are still discoverable: doctor must see them even
+/// though `spm status` has nothing to compare.
+#[test]
+fn doctor_flags_leftover_skills_when_nothing_is_declared() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    write_manifest(&sb, r#"{"targets":["copilot"]}"#);
+    std::fs::remove_file(sb.project.join("ai.lock")).unwrap();
+
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(ok, "{doc:#}");
+    let c = check(&doc, "materialized", "warn");
+    assert!(c["details"].to_string().contains("greet"), "{c}");
 }
 
 /// A link to a name no longer declared is ignored by every sync, so its

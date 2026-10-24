@@ -239,13 +239,16 @@ fn diagnose(scope: &Scope, root: &Path, online: bool) -> Vec<Check> {
             format!("can't inspect the targets: {e:#}"),
         )),
     }
+    // Snapshot the remotes under the lock, then release it before the slow
+    // network probes so a concurrent install isn't blocked on them.
+    let remotes = (online && policy_active).then(|| remote_urls(root, &manifest));
     drop(state_lock);
 
     if let Some(c) = check_ssh_agent(&manifest) {
         checks.push(c);
     }
-    if online && policy_active {
-        checks.extend(check_remotes(root, &manifest));
+    if let Some(urls) = remotes {
+        checks.extend(check_remotes(&urls));
     }
     checks
 }
@@ -487,7 +490,7 @@ fn materialization_checks(scope: &Scope, report: &status::StatusReport) -> Vec<C
         problems.push(format!("plugin `{p}` is declared but not locked"));
     }
     for t in &report.targets {
-        for (what, st) in [("skills", &t.skills), ("plugins", &t.plugins)] {
+        for (what, st) in [("skills", Some(&t.skills)), ("plugins", t.plugins.as_ref())] {
             let Some(st) = st else { continue };
             if !st.missing.is_empty() {
                 problems.push(format!(
@@ -612,7 +615,7 @@ fn check_loadable(scope: &Scope, report: &status::StatusReport) -> Vec<Check> {
     let mut seen = BTreeSet::new();
     let mut problems = Vec::new();
     for t in &report.targets {
-        let Some(st) = &t.skills else { continue };
+        let st = &t.skills;
         let Ok(dir) = vendor::for_target(&t.target).and_then(|v| v.skills_dir(scope)) else {
             continue;
         };
@@ -661,7 +664,8 @@ fn check_ssh_agent(manifest: &Manifest) -> Option<Check> {
 }
 
 /// `--online`: every remote in ai.json and ai.lock answers `git ls-remote`.
-fn check_remotes(root: &Path, manifest: &Manifest) -> Vec<Check> {
+/// Every remote declared in `ai.json` or pinned in `ai.lock`.
+fn remote_urls(root: &Path, manifest: &Manifest) -> BTreeSet<String> {
     let mut urls: BTreeSet<String> = manifest
         .skills
         .values()
@@ -676,12 +680,16 @@ fn check_remotes(root: &Path, manifest: &Manifest) -> Vec<Check> {
                 .map(|l| l.git.clone()),
         );
     }
+    urls
+}
+
+fn check_remotes(urls: &BTreeSet<String>) -> Vec<Check> {
     if urls.is_empty() {
         return Vec::new();
     }
     let mut failed = Vec::new();
     let mut fixes = BTreeSet::new();
-    for url in &urls {
+    for url in urls {
         if let Reach::Unreachable { error, other } = git::probe(url) {
             failed.push(format!("{url}: {error:#}"));
             fixes.insert(match other {
