@@ -112,6 +112,9 @@ is written:
 - With [`resolveTransitive`](/guide/transitive-dependencies), every nested
   source is checked before it is resolved or fetched; the error names the chain
   of skills that required it.
+- A [`spm link`](/guide/authoring-skills) override is a local source, whatever
+  remote the dependency declares: it needs `file://*`, checked by `spm link` and
+  by every sync (including `install --locked`) while the link is active.
 - `spm outdated` reports a denied source as an error row instead of querying it.
 - `--protocol` and `--protocol-fallback` can't bypass the policy: the URL you
   wrote **and** every rewritten URL actually contacted must be allowed.

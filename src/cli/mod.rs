@@ -2,6 +2,7 @@ mod add;
 mod clean;
 mod common;
 mod init;
+mod link;
 mod list;
 mod outdated;
 mod remove;
@@ -82,6 +83,37 @@ enum Command {
         /// Remove a plugin dependency instead of a skill.
         #[arg(long)]
         plugin: bool,
+        #[command(flatten)]
+        scope: ScopeArg,
+        #[command(flatten)]
+        transport: TransportArgs,
+    },
+    /// Develop a declared skill or plugin from a local directory: materialize
+    /// its current content (uncommitted edits included) instead of the locked
+    /// commit. The override is machine-local, kept under `$SPM_HOME` and never
+    /// in the checkout (`links/<project>-<hash>.json`, or `links.json` with -g)
+    /// — ai.json and ai.lock are not modified.
+    /// Re-run `spm install` to pick up further edits.
+    Link {
+        /// Name of the skill or plugin, as declared in ai.json.
+        name: String,
+        /// Local directory to materialize from: the skill directory (holding
+        /// SKILL.md) or the plugin root. Relative paths are kept relative to the
+        /// project root (made absolute with -g).
+        dir: String,
+        #[command(flatten)]
+        scope: ScopeArg,
+        #[command(flatten)]
+        transport: TransportArgs,
+    },
+    /// Drop a `spm link` override and re-materialize the locked version.
+    Unlink {
+        /// Linked skill or plugin to restore.
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        name: Option<String>,
+        /// Drop every link in this scope.
+        #[arg(long)]
+        all: bool,
         #[command(flatten)]
         scope: ScopeArg,
         #[command(flatten)]
@@ -248,6 +280,24 @@ pub fn run() -> Result<()> {
         } => {
             transport.apply();
             remove::remove(&scope.resolve(&cwd), &name, plugin)
+        }
+        Command::Link {
+            name,
+            dir,
+            scope,
+            transport,
+        } => {
+            transport.apply();
+            link::link(&scope.resolve(&cwd), &cwd, &name, &dir)
+        }
+        Command::Unlink {
+            name,
+            all,
+            scope,
+            transport,
+        } => {
+            transport.apply();
+            link::unlink(&scope.resolve(&cwd), name.as_deref(), all)
         }
         Command::Update {
             name,

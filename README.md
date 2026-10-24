@@ -342,6 +342,8 @@ spm target add [vendor ...] [-g]                   # add target vendor(s); no ar
 spm target remove <vendor ...> [-g]               # drop target vendor(s) + clean their output; alias: rm
 spm remove <name> [--plugin] [-g]                  # drop a skill (or a plugin with --plugin); alias: rm
 spm update [name] [-g]                              # re-resolve branches/tags to latest
+spm link <name> <dir> [-g]                         # develop a declared skill/plugin from a local dir (machine-local override)
+spm unlink <name>|--all [-g]                       # drop link override(s), restore the locked version
 spm install [-g] [--locked]                        # rebuild from ai.lock (after clone); alias: i; --locked fails if ai.lock is out of sync (CI)
 spm list [-g] [--json]                             # show skills + pinned commits; alias: ls
 spm status [-g] [--json]                           # check skills are materialized in this checkout
@@ -356,6 +358,23 @@ then holds exactly one JSON document with a top-level `"schemaVersion": 1` and
 full commit SHAs, and exit codes are unchanged (the document is printed before a
 non-zero exit). See [Machine-readable output](docs/reference/cli-commands.md#machine-readable-output---json)
 for the shapes.
+
+### Developing a skill locally (`spm link`)
+
+To try uncommitted changes to a skill inside a real consuming project, point
+the already-declared dependency at your working copy:
+
+```bash
+spm link reviewer ../my-skills/reviewer   # materialize the local dir instead of the locked commit
+# ...edit ../my-skills/reviewer/SKILL.md, then:
+spm install                               # re-copy the latest local content
+spm unlink reviewer                       # back to the version pinned in ai.lock
+```
+
+The override lives under `$SPM_HOME`, never in the checkout (so a repository
+can't ship one); `ai.json` and `ai.lock` are never modified, so teammates and CI are
+unaffected. Linked content still goes through the content scan, and `spm list` /
+`spm status` show active links. See [Authoring Skills](docs/guide/authoring-skills.md).
 
 ## Agent skill
 

@@ -1,4 +1,5 @@
 use super::common::{confirm, human_size};
+use crate::links::Links;
 use crate::lockfile::Lockfile;
 use crate::manifest::Manifest;
 use crate::scope::Scope;
@@ -8,11 +9,27 @@ use anyhow::Result;
 
 pub(super) fn clean(scope: &Scope) -> Result<()> {
     let dir = scope.manifest_dir()?;
+    // Held from reading `ai.json` and link state until the deletions below are
+    // done (see `StateLock`).
+    let _state_lock = crate::links::StateLock::acquire(scope, false)?;
     let manifest = Manifest::load(&dir, scope)?;
     let lock = Lockfile::load_or_default(&dir)?;
-    let (managed, managed_plugins) = managed_names(&lock);
-    for target in &manifest.targets {
-        let vendor = vendor::for_target(target)?;
+    let (managed, managed_plugins) = managed_names(&lock, &Links::load(scope)?);
+    let vendors = manifest
+        .targets
+        .iter()
+        .map(|t| vendor::for_target(t))
+        .collect::<Result<Vec<_>>>()?;
+    super::sync::guard_working_copies(
+        scope,
+        &dir,
+        &vendors,
+        &Default::default(),
+        &managed,
+        &managed_plugins,
+        None,
+    )?;
+    for vendor in &vendors {
         vendor.clean(scope, &managed)?;
         vendor.clean_plugins(scope, &managed_plugins)?;
     }
@@ -24,9 +41,10 @@ pub(super) fn clean(scope: &Scope) -> Result<()> {
     Ok(())
 }
 
-/// The skill and plugin names spm currently owns, per `ai.lock`: what a
+/// The skill and plugin names spm currently owns, per `ai.lock` plus the skills
+/// last materialized from linked plugins (see [`Links::managed`]): what a
 /// vendor's `clean` / `clean_plugins` must remove.
-pub(super) fn managed_names(lock: &Lockfile) -> (Vec<String>, Vec<String>) {
+pub(super) fn managed_names(lock: &Lockfile, links: &Links) -> (Vec<String>, Vec<String>) {
     // Plugin-bundled skills are flattened into the same shared skills dirs as
     // standalone skills (see `sync`'s `previously_managed`), so they must be
     // included here too — otherwise a clean would leave their materialized
@@ -37,6 +55,7 @@ pub(super) fn managed_names(lock: &Lockfile) -> (Vec<String>, Vec<String>) {
             .values()
             .flat_map(|l| l.bundled_skills.iter().cloned()),
     );
+    managed.extend(links.managed.iter().cloned());
     managed.sort();
     managed.dedup();
     let managed_plugins: Vec<String> = lock.plugins.keys().cloned().collect();

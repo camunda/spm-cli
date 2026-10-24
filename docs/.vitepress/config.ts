@@ -63,6 +63,7 @@ export default defineConfig({
           { text: "Transitive Dependencies", link: "/guide/transitive-dependencies" },
           { text: "Source Policy", link: "/guide/source-policy" },
           { text: "Worktrees & Fresh Clones", link: "/guide/worktrees" },
+          { text: "Authoring Skills", link: "/guide/authoring-skills" },
           { text: "Agent Skill", link: "/guide/agent-skill" },
           { text: "Design Notes", link: "/guide/design-notes" },
         ],

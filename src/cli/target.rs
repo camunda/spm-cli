@@ -2,6 +2,7 @@ use super::clean::managed_names;
 use super::sync::save_and_sync;
 use crate::lockfile::Lockfile;
 use crate::manifest::Manifest;
+use crate::pathid::{deletion_target, identity, resolve, NodeId};
 use crate::scope::Scope;
 use crate::vendor;
 use anyhow::{anyhow, bail, Context, Result};
@@ -14,9 +15,11 @@ use std::path::{Path, PathBuf};
 /// not an error, so the command is safe to re-run.
 pub(super) fn target_add(scope: &Scope, vendors: Vec<String>) -> Result<()> {
     let dir = scope.manifest_dir()?;
-    let mut manifest = Manifest::load(&dir, scope)?;
 
     let requested = if vendors.is_empty() {
+        // Not locked yet: no command should wait on an interactive prompt. The
+        // choice is re-checked against `ai.json` as read under the lock below.
+        let manifest = Manifest::load(&dir, scope)?;
         let available: Vec<&str> = vendor::ALL_TARGETS
             .iter()
             .copied()
@@ -39,6 +42,9 @@ pub(super) fn target_add(scope: &Scope, vendors: Vec<String>) -> Result<()> {
         vendors
     };
 
+    // Held from reading `ai.json` to the last write (see `StateLock`).
+    let state_lock = crate::links::StateLock::acquire(scope, false)?;
+    let mut manifest = Manifest::load(&dir, scope)?;
     let mut added = Vec::new();
     for v in requested {
         if manifest.targets.iter().any(|cur| cur == &v) {
@@ -55,7 +61,7 @@ pub(super) fn target_add(scope: &Scope, vendors: Vec<String>) -> Result<()> {
     }
 
     // Materialize existing skills into the newly-added vendor(s).
-    save_and_sync(scope, &manifest)?;
+    save_and_sync(scope, state_lock, &manifest)?;
     println!("added target(s): {}", added.join(", "));
     Ok(())
 }
@@ -70,6 +76,9 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
         vendor::for_target(v)?;
     }
     let dir = scope.manifest_dir()?;
+    // Held from reading `ai.json` and link state until the deletions below are
+    // done (see `StateLock`).
+    let _state_lock = crate::links::StateLock::acquire(scope, false)?;
     let mut manifest = Manifest::load(&dir, scope)?;
 
     let mut removed: Vec<String> = Vec::new();
@@ -108,7 +117,7 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
     }
 
     let lock = Lockfile::load_or_default(&dir)?;
-    let (managed, managed_plugins) = managed_names(&lock);
+    let (managed, managed_plugins) = managed_names(&lock, &crate::links::Links::load(scope)?);
     // Physical locations a remaining target still loads skills, plugins or
     // their metadata from (`content`), plus every location reaching them
     // depends on (`traversed`: symlinks, and dirs passed through before a
@@ -134,8 +143,22 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
             }
         }
     }
-    for t in &removed {
-        let v = vendor::for_target(t)?;
+    // Neither the deletions nor the settings/`ai.json` writes below may touch a
+    // linked working copy.
+    let removed_vendors = removed
+        .iter()
+        .map(|t| vendor::for_target(t))
+        .collect::<Result<Vec<_>>>()?;
+    super::sync::guard_working_copies(
+        scope,
+        &dir,
+        &removed_vendors,
+        &Default::default(),
+        &managed,
+        &managed_plugins,
+        None,
+    )?;
+    for v in &removed_vendors {
         let mut candidates = v.clean_paths(scope, &managed)?;
         candidates.extend(v.plugin_clean_paths(scope, &managed_plugins)?);
         let mut deletable = Vec::new();
@@ -204,156 +227,6 @@ fn reach(
     Ok(())
 }
 
-/// One component of a path's filesystem identity (see [`identity`]).
-#[derive(Debug, PartialEq, Eq)]
-enum NodeId {
-    /// An existing entry, by device and inode (not following a final symlink).
-    #[cfg(unix)]
-    Inode(u64, u64),
-    /// A component compared by name: a missing one, or on Windows any one,
-    /// case-folded after canonicalizing its existing prefix.
-    Name(String),
-}
-
-/// The identity of physical path `p` as one [`NodeId`] per component from the
-/// root, so `a` is `b` or an ancestor of it iff `identity(b)` starts with
-/// `identity(a)` — regardless of how either is spelled (e.g. `.AGENTS` vs
-/// `.agents` on a case-insensitive filesystem).
-#[cfg(unix)]
-fn identity(p: &Path) -> Result<Vec<NodeId>> {
-    use std::os::unix::fs::MetadataExt;
-    let mut ids = Vec::new();
-    let mut cur = PathBuf::new();
-    let mut missing = false;
-    for comp in p.components() {
-        cur.push(comp);
-        if !missing {
-            match std::fs::symlink_metadata(&cur) {
-                Ok(m) => {
-                    ids.push(NodeId::Inode(m.dev(), m.ino()));
-                    continue;
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => missing = true,
-                Err(e) => return Err(anyhow!(e).context(format!("inspecting {}", cur.display()))),
-            }
-        }
-        ids.push(NodeId::Name(
-            comp.as_os_str().to_string_lossy().into_owned(),
-        ));
-    }
-    Ok(ids)
-}
-
-/// Windows has no stable inode API, so the longest existing prefix is
-/// canonicalized instead — normalizing `\\?\` vs plain prefixes (which
-/// `read_link` mixes), 8.3 short names and case — without following a final
-/// symlink; the rest is compared case-folded, as NTFS is case-insensitive.
-#[cfg(not(unix))]
-fn identity(p: &Path) -> Result<Vec<NodeId>> {
-    let comps: Vec<_> = p.components().collect();
-    let mut base = PathBuf::new();
-    let mut existing = 0;
-    for n in (1..=comps.len()).rev() {
-        let prefix: PathBuf = comps[..n].iter().collect();
-        let meta = match std::fs::symlink_metadata(&prefix) {
-            Ok(m) => m,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(anyhow!(e).context(format!("inspecting {}", prefix.display()))),
-        };
-        let canonical = |q: &Path| {
-            std::fs::canonicalize(q).with_context(|| format!("canonicalizing {}", q.display()))
-        };
-        base = match (
-            meta.file_type().is_symlink(),
-            prefix.parent(),
-            prefix.file_name(),
-        ) {
-            (true, Some(parent), Some(name)) => canonical(parent)?.join(name),
-            _ => canonical(&prefix)?,
-        };
-        existing = n;
-        break;
-    }
-    let names = base.components().chain(comps[existing..].iter().copied());
-    Ok(names
-        .map(|c| NodeId::Name(c.as_os_str().to_string_lossy().to_lowercase()))
-        .collect())
-}
-
-/// The physical location `remove_dir_all(p)` deletes: `p`'s parent resolved
-/// through symlinks, joined with its last component — which is not followed, as
-/// removing a symlink removes only the link.
-fn deletion_target(p: &Path) -> Result<PathBuf> {
-    match (p.parent(), p.file_name()) {
-        (Some(parent), Some(name)) => Ok(resolve(parent, &mut Vec::new())?.join(name)),
-        _ => resolve(p, &mut Vec::new()),
-    }
-}
-
-/// Resolve `p` (anchored to the working directory if relative, e.g. under a
-/// relative `SPM_HOME`) through symlinks component by component, returning the
-/// physical location and pushing onto `traversed` every location the path
-/// depends on along the way: each symlink, and each dir passed through before a
-/// `..`. Missing components are kept as spelled (they hold nothing to delete or
-/// protect); other errors, including a symlink loop, are propagated rather than
-/// treated as "not shared".
-fn resolve(p: &Path, traversed: &mut Vec<PathBuf>) -> Result<PathBuf> {
-    let abs = if p.is_relative() {
-        std::env::current_dir()?.join(p)
-    } else {
-        p.to_path_buf()
-    };
-    resolve_hops(&abs, traversed, &mut 0)
-}
-
-fn resolve_hops(p: &Path, chain: &mut Vec<PathBuf>, hops: &mut u32) -> Result<PathBuf> {
-    use std::path::Component;
-    const MAX_HOPS: u32 = 40;
-    let mut cur = PathBuf::new();
-    let mut missing = false;
-    for comp in p.components() {
-        match comp {
-            Component::Prefix(_) | Component::RootDir => cur.push(comp),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if !missing && cur.parent().is_some() {
-                    chain.push(cur.clone());
-                }
-                cur.pop();
-            }
-            Component::Normal(name) => {
-                let next = cur.join(name);
-                if missing {
-                    cur = next;
-                    continue;
-                }
-                match std::fs::symlink_metadata(&next) {
-                    Ok(m) if m.file_type().is_symlink() => {
-                        *hops += 1;
-                        if *hops > MAX_HOPS {
-                            bail!("too many levels of symbolic links at {}", next.display());
-                        }
-                        let link = std::fs::read_link(&next).map_err(|e| {
-                            anyhow!(e).context(format!("reading {}", next.display()))
-                        })?;
-                        chain.push(next);
-                        cur = resolve_hops(&cur.join(link), chain, hops)?;
-                    }
-                    Ok(_) => cur = next,
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                        missing = true;
-                        cur = next;
-                    }
-                    Err(e) => {
-                        return Err(anyhow!(e).context(format!("resolving {}", next.display())))
-                    }
-                }
-            }
-        }
-    }
-    Ok(cur)
-}
-
 /// Interactive numbered picker over the vendors not yet configured. Reads a
 /// comma-separated list of 1-based indices (or `all`) from stdin — a plain line
 /// read, not a raw-terminal TUI, so it stays portable across Windows and Unix
@@ -397,44 +270,4 @@ fn prompt_targets(available: &[&str]) -> Result<Vec<String>> {
         }
     }
     Ok(chosen)
-}
-
-#[cfg(all(test, unix))]
-mod tests {
-    use super::*;
-
-    fn scratch(name: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir =
-            std::env::temp_dir().join(format!("spm-target-{name}-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        resolve(&dir, &mut Vec::new()).unwrap()
-    }
-
-    #[test]
-    fn resolve_records_every_link_and_keeps_missing_tail() {
-        let tmp = scratch("chain");
-        std::fs::create_dir_all(tmp.join("real")).unwrap();
-        std::os::unix::fs::symlink("real", tmp.join("b")).unwrap();
-        std::os::unix::fs::symlink(tmp.join("b"), tmp.join("a")).unwrap();
-        let mut chain = Vec::new();
-        let got = resolve(&tmp.join("a/missing/x"), &mut chain).unwrap();
-        assert_eq!(got, tmp.join("real/missing/x"));
-        assert_eq!(chain, [tmp.join("a"), tmp.join("b")]);
-        assert_eq!(deletion_target(&tmp.join("a")).unwrap(), tmp.join("a"));
-        std::fs::remove_dir_all(&tmp).unwrap();
-    }
-
-    #[test]
-    fn resolve_rejects_symlink_loops() {
-        let tmp = scratch("loop");
-        std::os::unix::fs::symlink("y", tmp.join("x")).unwrap();
-        std::os::unix::fs::symlink("x", tmp.join("y")).unwrap();
-        let err = resolve(&tmp.join("x/z"), &mut Vec::new()).unwrap_err();
-        assert!(err.to_string().contains("too many levels"), "{err}");
-        std::fs::remove_dir_all(&tmp).unwrap();
-    }
 }

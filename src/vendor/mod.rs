@@ -139,6 +139,14 @@ pub trait Vendor {
     /// `.agents/skills/<name>/`.
     fn skill_paths(&self, scope: &Scope, managed: &[String]) -> Result<Vec<PathBuf>>;
 
+    /// Files this vendor edits *in place* in `scope` (e.g. Claude's settings),
+    /// writing through a symlink at their path instead of replacing it — unlike
+    /// [`clean_paths`](Vendor::clean_paths), whose final symlink is removed.
+    /// Default: none.
+    fn patched_files(&self, _scope: &Scope) -> Result<Vec<PathBuf>> {
+        Ok(Vec::new())
+    }
+
     /// Drop the config pointing this vendor at spm's output (e.g. Claude's
     /// settings entries) without deleting the output itself. Default: nothing to
     /// drop.

@@ -2,6 +2,7 @@ use super::common::default_name;
 use super::common::VersionArg;
 use super::shorthand;
 use super::sync::save_and_sync;
+use crate::links::StateLock;
 use crate::manifest::{Manifest, SkillSpec};
 use crate::scope::Scope;
 use crate::{resolver, store};
@@ -30,6 +31,8 @@ pub(super) fn add(scope: &Scope, req: AddRequest) -> Result<()> {
         force,
     } = req;
     let dir = scope.manifest_dir()?;
+    // Held from reading `ai.json` to the last write (see `StateLock`).
+    let state_lock = StateLock::acquire(scope, false)?;
     let mut manifest = Manifest::load(&dir, scope)?;
     // Expand a `github.com/owner/repo[@ref]` shorthand into a normal URL (plus
     // version selector) before deriving or saving the dependency, so the
@@ -49,7 +52,7 @@ pub(super) fn add(scope: &Scope, req: AddRequest) -> Result<()> {
         crate::manifest::validate_subpath(sub)?;
     }
     if all {
-        add_all(scope, &mut manifest, git, version, path, force)?;
+        add_all(scope, state_lock, &mut manifest, git, version, path, force)?;
     } else {
         let name = name.unwrap_or_else(|| {
             // Prefer the `--path` basename, but fall back to the git URL when the
@@ -120,7 +123,7 @@ pub(super) fn add(scope: &Scope, req: AddRequest) -> Result<()> {
         } else {
             manifest.skills.insert(name.clone(), spec);
         }
-        save_and_sync(scope, &manifest)?;
+        save_and_sync(scope, state_lock, &manifest)?;
         println!("added {kind} {name}");
     }
     Ok(())
@@ -148,6 +151,7 @@ fn with_default_branch(git: &str, mut version: VersionArg) -> Result<VersionArg>
 /// `skillcheck::child_skills` source of truth, guaranteeing the two never drift.
 fn add_all(
     scope: &Scope,
+    state_lock: StateLock,
     manifest: &mut Manifest,
     git: String,
     version: VersionArg,
@@ -209,7 +213,7 @@ fn add_all(
             },
         );
     }
-    save_and_sync(scope, manifest)?;
+    save_and_sync(scope, state_lock, manifest)?;
     println!("added {} skill(s): {}", subs.len(), subs.join(", "));
     Ok(())
 }

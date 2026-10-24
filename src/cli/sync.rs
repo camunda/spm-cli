@@ -1,3 +1,4 @@
+use crate::links::{Linked, Links, StateLock};
 use crate::lockfile::{LockedSkill, Lockfile};
 use crate::manifest::{Manifest, SkillSpec};
 use crate::scope::Scope;
@@ -24,9 +25,83 @@ pub(super) fn sync(
     only: Option<&str>,
     locked: bool,
 ) -> Result<usize> {
+    let state_lock = StateLock::acquire(scope, false)?;
     let dir = scope.manifest_dir()?;
     let manifest = Manifest::load(&dir, scope)?;
-    plan(scope, &manifest, force_refresh, only, locked)?.apply(scope)
+    let links = Links::load(scope)?;
+    let mode = if locked {
+        LockMode::Locked
+    } else {
+        LockMode::Write
+    };
+    plan(
+        scope,
+        &manifest,
+        state_lock,
+        links,
+        force_refresh,
+        only,
+        mode,
+    )?
+    .apply(scope)
+}
+
+/// Sync with an edited set of `spm link` overrides, persisting them only once
+/// the sync has been planned successfully (an unreadable or blocked linked
+/// directory leaves the links file untouched). `ai.json` and `ai.lock` are not
+/// affected by links: the lock still pins every dependency's declared source,
+/// so this runs in [`LockMode::Links`] — it never re-resolves a pin nor writes
+/// `ai.lock`, and fails instead when `ai.lock` is out of sync with `ai.json`.
+/// `links` must have been read and edited under `state_lock`, held exclusively.
+pub(super) fn sync_with_links(scope: &Scope, state_lock: StateLock, links: Links) -> Result<usize> {
+    let dir = scope.manifest_dir()?;
+    let manifest = Manifest::load(&dir, scope)?;
+    plan(
+        scope,
+        &manifest,
+        state_lock,
+        links,
+        false,
+        None,
+        LockMode::Links,
+    )?
+    .apply(scope)
+}
+
+/// How a sync may treat `ai.lock`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LockMode {
+    /// Re-resolve what changed or is unpinned, then write `ai.lock`.
+    Write,
+    /// `spm install --locked`: install exactly `ai.lock`, never write it.
+    Locked,
+    /// `spm link`/`spm unlink`: like [`LockMode::Locked`] — they promise to
+    /// leave `ai.lock` byte-identical — but with their own guidance on failure.
+    Links,
+}
+
+impl LockMode {
+    /// Prefix for an error raised because `ai.lock` is missing or out of sync.
+    fn label(self) -> &'static str {
+        match self {
+            LockMode::Links => "`spm link`/`spm unlink` never write ai.lock",
+            _ => "--locked",
+        }
+    }
+
+    /// How to fix such an error, spelled for the scope in use.
+    fn fix_hint(self, scope: &Scope) -> String {
+        match self {
+            LockMode::Links => format!(
+                "run `{}` first to bring ai.lock in sync, then retry",
+                install_command(scope)
+            ),
+            _ => format!(
+                "run `{}` (without --locked) and commit ai.lock",
+                install_command(scope)
+            ),
+        }
+    }
 }
 
 /// Write an edited `manifest` to `ai.json` and [`sync`] it, without ever leaving
@@ -44,14 +119,29 @@ pub(super) fn sync(
 /// so `ai.json` deliberately *keeps* the change: it is what records that spm
 /// owns that output (shared skill dirs are cleaned by declared/locked name
 /// only), and the next `spm install` finishes the job.
-pub(super) fn save_and_sync(scope: &Scope, manifest: &Manifest) -> Result<usize> {
+///
+/// `state_lock` must have been taken before `manifest` was read (see
+/// [`StateLock`]), so a command queued behind another edits what that one left.
+pub(super) fn save_and_sync(
+    scope: &Scope,
+    state_lock: StateLock,
+    manifest: &Manifest,
+) -> Result<usize> {
     let dir = scope.manifest_dir()?;
     let path = Manifest::path_in(&dir);
     let text = manifest.to_text()?;
     // Validate exactly as the next `Manifest::load` will (schema, name
     // collisions across skills/plugins, ...), so an invalid edit is never saved.
     let manifest = Manifest::parse(&text, &path)?;
-    let plan = plan(scope, &manifest, false, None, false)?;
+    let plan = plan(
+        scope,
+        &manifest,
+        state_lock,
+        Links::load(scope)?,
+        false,
+        None,
+        LockMode::Write,
+    )?;
     std::fs::write(&path, &text).with_context(|| format!("writing {}", path.display()))?;
     plan.apply(scope).map_err(|err| {
         anyhow!(
@@ -77,18 +167,94 @@ struct Plan {
     previously_managed: Vec<String>,
     previously_managed_plugins: Vec<String>,
     locked: bool,
+    /// The `spm link` overrides to persist after applying (with `managed`
+    /// refreshed), or `None` when the links file is already up to date.
+    links: Option<Links>,
+    _snapshots: Option<Snapshots>,
+    _state_lock: StateLock,
+}
+
+/// Private copies of the linked directories, made with the same safe-copy
+/// rules as materialization (no `.git`, no symlink leaving the directory), and
+/// removed once the sync is done.
+struct Snapshots {
+    root: PathBuf,
+}
+
+impl Snapshots {
+    /// Snapshot every link in `linked`, pointing its `content` at the copy.
+    fn take(linked: &mut BTreeMap<String, Linked>) -> Result<Option<Self>> {
+        if linked.is_empty() {
+            return Ok(None);
+        }
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let root = std::env::temp_dir().join(format!("spm-links-{}-{nanos}", std::process::id()));
+        // A fresh directory only its owner can enter: the copies may come from
+        // a working copy other users can't read.
+        let builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        let builder = {
+            let mut b = builder;
+            std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
+            b
+        };
+        builder
+            .create(&root)
+            .with_context(|| format!("creating {}", root.display()))?;
+        let snapshots = Self {
+            root: std::fs::canonicalize(&root)
+                .with_context(|| format!("resolving {}", root.display()))?,
+        };
+        // Numbered slots, not names: names that differ only in case (e.g. a
+        // skill `Foo` and a plugin `foo`) must not share one on a
+        // case-insensitive filesystem.
+        for (slot, (name, l)) in linked.iter_mut().enumerate() {
+            if crate::fsutil::contains(&l.dir, &snapshots.root) {
+                bail!(
+                    "linked directory `{}` for `{name}` contains spm's temporary directory \
+                     `{}` — link the skill or plugin directory itself",
+                    l.display,
+                    snapshots.root.display()
+                );
+            }
+            let content = snapshots.root.join(slot.to_string());
+            crate::fsutil::copy_tree(&l.dir, &content, &l.dir)
+                .with_context(|| format!("snapshotting linked `{name}` ({})", l.display))?;
+            l.content = content;
+        }
+        Ok(Some(snapshots))
+    }
+}
+
+impl Drop for Snapshots {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
 }
 
 /// Resolve `manifest` -> lock, populate the store, and run every check (source
 /// policy, content scan, collisions, `--locked` drift). Writes nothing outside
 /// the global store: no target output, no `ai.json`, no `ai.lock`.
+///
+/// `links` must have been read under `state_lock` — exclusively when they were
+/// edited (`LockMode::Links`) — and the plan holds it until it has been applied,
+/// so no other command changes link state in between.
 fn plan(
     scope: &Scope,
     manifest: &Manifest,
+    state_lock: StateLock,
+    mut links: Links,
     force_refresh: bool,
     only: Option<&str>,
-    locked: bool,
+    mode: LockMode,
 ) -> Result<Plan> {
+    if mode == LockMode::Links && !state_lock.is_exclusive() {
+        bail!("internal error: editing links requires the exclusive links lock");
+    }
+    let locked = mode != LockMode::Write;
     let dir = scope.manifest_dir()?;
     if manifest.targets.is_empty() {
         bail!("ai.json declares no targets");
@@ -96,6 +262,7 @@ fn plan(
     // Source policy: judge every direct source before any network access, and
     // report all denied ones at once.
     let policy = crate::policy::activate(manifest, &dir)?;
+    let mut linked = resolve_links(scope, manifest, &links)?;
     let denied: Vec<String> = manifest
         .skills
         .iter()
@@ -107,6 +274,12 @@ fn plan(
                 .err()
                 .map(|e| format!("{kind} `{name}`: {e:#}"))
         })
+        .chain(linked.iter().filter_map(|(name, l)| {
+            policy
+                .check_local(&l.display)
+                .err()
+                .map(|e| format!("link `{name}`: {e:#}"))
+        }))
         .collect();
     if !denied.is_empty() {
         bail!(
@@ -128,9 +301,10 @@ fn plan(
         .collect::<Result<Vec<_>>>()?;
     if locked && !Lockfile::path_in(&dir).exists() {
         bail!(
-            "--locked: {} not found\n{}",
+            "{}: {} not found\n{}",
+            mode.label(),
             Lockfile::path_in(&dir).display(),
-            locked_fix_hint(scope)
+            mode.fix_hint(scope)
         );
     }
     let mut prev = Lockfile::load_or_default(&dir)?;
@@ -149,6 +323,10 @@ fn plan(
     // `materialize`, so the previous set must include them too — otherwise
     // removing a plugin (or shrinking its bundled skill set) would orphan those
     // skill dirs in shared locations.
+    //
+    // Skills last materialized from a *linked* plugin's working tree are not in
+    // `ai.lock` (it records the locked commit's bundled skills), so the links
+    // file remembers them for the same purpose.
     let previously_managed: Vec<String> = prev
         .skills
         .keys()
@@ -158,6 +336,7 @@ fn plan(
                 .values()
                 .flat_map(|l| l.bundled_skills.iter().cloned()),
         )
+        .chain(links.managed.iter().cloned())
         .collect();
     let previously_managed_plugins: Vec<String> = prev.plugins.keys().cloned().collect();
 
@@ -250,6 +429,7 @@ fn plan(
         lock.skills.insert(name.clone(), locked);
     }
 
+    let mut reused_linked_plugins: BTreeSet<String> = BTreeSet::new();
     // Resolve full plugins the same way. A plugin's version reuse also depends
     // on the pinned commit being unchanged; its bundled-skill list is (re)filled
     // from the store checkout below, so we never carry a stale one forward.
@@ -271,7 +451,14 @@ fn plan(
                 "resolved",
             ),
         };
-        locked.bundled_skills.clear();
+        // A linked plugin is not fetched when its pin is reused, so its locked
+        // bundled-skill list is carried forward rather than re-enumerated from
+        // the (unfetched) checkout — keeping `ai.lock` unaffected by the link.
+        if how == "resolved" || !linked.contains_key(name) {
+            locked.bundled_skills.clear();
+        } else {
+            reused_linked_plugins.insert(name.clone());
+        }
         locked.also_satisfies.clear();
         let short = &locked.commit[..locked.commit.len().min(8)];
         let reference = locked.display_reference();
@@ -300,6 +487,10 @@ fn plan(
         }
     }
 
+    // Scan and materialize linked content from one snapshot, so a later edit
+    // to a working copy can't reach a target unscanned (or only some targets).
+    let snapshots = Snapshots::take(&mut linked)?;
+
     // Populate the store for plugins first: we need each plugin's checkout to
     // enumerate its bundled skills before writing the lockfile (so `ai.lock`
     // records the full component set) and before flattening those skills into
@@ -309,37 +500,74 @@ fn plan(
     if !manifest.plugins.is_empty() {
         println!("fetching plugins into store");
     }
+    let mut linked_plugin_skills: Vec<String> = Vec::new();
     for (name, locked) in &mut lock.plugins {
-        let ensured = store::ensure(locked).with_context(|| format!("fetching plugin `{name}`"))?;
-        println!(
-            "  {name:<width$}  {}",
-            if ensured.fetched { "fetched" } else { "cached" }
-        );
-        if !crate::plugin::looks_like_plugin(&ensured.path) {
+        let link = linked.get(name);
+        // A linked plugin only needs its locked checkout to record the commit's
+        // bundled skills in `ai.lock` when its pin was freshly resolved.
+        let ensured = if link.is_some() && reused_linked_plugins.contains(name) {
+            None
+        } else {
+            let ensured =
+                store::ensure(locked).with_context(|| format!("fetching plugin `{name}`"))?;
+            println!(
+                "  {name:<width$}  {}",
+                if ensured.fetched { "fetched" } else { "cached" }
+            );
+            Some(ensured)
+        };
+        let (path, root) = if let Some(l) = link {
+            println!("  {name:<width$}  linked → {}", l.display);
+            (l.content.clone(), l.content.clone())
+        } else if let Some(e) = &ensured {
+            (e.path.clone(), e.root.clone())
+        } else {
+            bail!("plugin `{name}` was neither linked nor fetched");
+        };
+        if !crate::plugin::looks_like_plugin(&path) {
+            let source = match link {
+                Some(l) => format!("linked → {}", l.display),
+                None => format!(
+                    "{} @ {}{}",
+                    locked.git,
+                    locked.display_reference(),
+                    locked
+                        .path
+                        .as_deref()
+                        .map(|p| format!(" under `{p}`"))
+                        .unwrap_or_default()
+                ),
+            };
             eprintln!(
-                "warning: plugin `{name}` ({} @ {}) has no `.claude-plugin/plugin.json`{} — \
-                 is it really a plugin? (only its bundled skills, if any, will be materialized)",
-                locked.git,
-                locked.display_reference(),
-                locked
-                    .path
-                    .as_deref()
-                    .map(|p| format!(" under `{p}`"))
-                    .unwrap_or_default()
+                "warning: plugin `{name}` ({source}) has no `.claude-plugin/plugin.json` — \
+                 is it really a plugin? (only its bundled skills, if any, will be materialized)"
             );
         }
-        let bundled = crate::plugin::plugin_skills(&ensured.path, &ensured.root)
+        let bundled = crate::plugin::plugin_skills(&path, &root)
             .with_context(|| format!("enumerating skills bundled in plugin `{name}`"))?;
-        locked.bundled_skills = bundled.iter().map(|s| s.name.clone()).collect();
+        match (link, ensured) {
+            (Some(_), Some(e)) => {
+                locked.bundled_skills = crate::plugin::plugin_skills(&e.path, &e.root)
+                    .with_context(|| format!("enumerating skills bundled in plugin `{name}`"))?
+                    .into_iter()
+                    .map(|s| s.name)
+                    .collect();
+            }
+            (Some(_), None) => {}
+            (None, _) => locked.bundled_skills = bundled.iter().map(|s| s.name.clone()).collect(),
+        }
+        if link.is_some() {
+            linked_plugin_skills.extend(bundled.iter().map(|s| s.name.clone()));
+        }
         // Scan the whole plugin tree (agents, scripts, hooks, bundled skills)
         // before any of it is materialized into an agent-discovered directory.
-        crate::scan::enforce(name, &ensured.path, &ensured.root)
+        crate::scan::enforce(name, &path, &root)
             .with_context(|| format!("scanning plugin `{name}`"))?;
         plugin_skills.extend(bundled);
         plugins.push(MaterializedPlugin {
             name: name.clone(),
-            path: ensured.path,
-            root: ensured.root,
+            path,
+            root,
         });
     }
 
@@ -368,6 +596,7 @@ fn plan(
             locked,
             width,
             policy: &policy,
+            links: &linked,
         },
     )?;
     let mut materialized: Vec<MaterializedSkill> = expansion.materialized;
@@ -441,6 +670,26 @@ fn plan(
     // separately, across plugins — before any vendor writes a byte.
     reject_case_folding_collisions("skill", materialized.iter().map(|m| m.name.as_str()))?;
     reject_case_folding_collisions("plugin", plugins.iter().map(|p| p.name.as_str()))?;
+    reject_locked_skill_collisions(&lock)?;
+    let output_skills: Vec<String> = materialized
+        .iter()
+        .map(|m| m.name.clone())
+        .chain(previously_managed.iter().cloned())
+        .collect();
+    let output_plugins: Vec<String> = plugins
+        .iter()
+        .map(|p| p.name.clone())
+        .chain(previously_managed_plugins.iter().cloned())
+        .collect();
+    guard_working_copies(
+        scope,
+        &dir,
+        &vendors,
+        &linked,
+        &output_skills,
+        &output_plugins,
+        snapshots.as_ref().map(|s| s.root.as_path()),
+    )?;
     if locked {
         // Backstop for the whole defect class: whatever the specific checks above
         // missed (a hand-edited `bundled_skills`/`requested_by`/store key, ...),
@@ -459,16 +708,26 @@ fn plan(
         }
         if !mismatches.is_empty() {
             bail!(
-                "--locked: ai.lock is out of sync with ai.json ({} problem(s)):\n{}\n{}",
+                "{}: ai.lock is out of sync with ai.json ({} problem(s)):\n{}\n{}",
+                mode.label(),
                 mismatches.len(),
                 mismatches
                     .iter()
                     .map(|m| format!("  - {m}"))
                     .collect::<Vec<_>>()
                     .join("\n"),
-                locked_fix_hint(scope)
+                mode.fix_hint(scope)
             );
         }
+    }
+    linked_plugin_skills.sort();
+    linked_plugin_skills.dedup();
+    links.managed = linked_plugin_skills;
+    // Only rewrite the links file when it changes (a `link`/`unlink`, or a
+    // linked plugin's bundled skills moving), never on a plain sync.
+    let links = (Links::load(scope).ok().as_ref() != Some(&links)).then_some(links);
+    if let Some(links) = &links {
+        links.document(scope)?;
     }
     Ok(Plan {
         dir,
@@ -481,6 +740,9 @@ fn plan(
         previously_managed,
         previously_managed_plugins,
         locked,
+        links,
+        _snapshots: snapshots,
+        _state_lock: state_lock,
     })
 }
 
@@ -491,6 +753,21 @@ impl Plan {
         let lock = &self.lock;
         if self.declares_any {
             println!("materializing: {}", self.targets.join(", "));
+        }
+        // Skills copied from a linked plugin's working tree are owned only via
+        // the links file. Record the planned ones alongside the previous ones
+        // before any vendor writes, so a failure part-way through never leaves
+        // an agent-discovered skill that no later sync or `clean` knows to
+        // remove; the final links file (below) narrows it once all succeeded.
+        if let Some(links) = &self.links {
+            let on_disk = Links::load(scope)?;
+            let mut pending = on_disk.clone();
+            pending.managed.extend(links.managed.iter().cloned());
+            pending.managed.sort();
+            pending.managed.dedup();
+            if pending != on_disk {
+                pending.save(scope)?;
+            }
         }
         for vendor in &self.vendors {
             vendor.materialize(
@@ -514,8 +791,486 @@ impl Plan {
         if !self.locked {
             lock.save(&self.dir)?;
         }
+        if let Some(links) = &self.links {
+            links.save(scope)?;
+        }
         Ok(lock.skills.len() + lock.plugins.len())
     }
+}
+
+/// Resolve every `spm link` override that names a declared skill or plugin to
+/// its directory. A link whose name is no longer declared is ignored with a
+/// warning (it stays in the links file until `spm unlink`); a declared one whose
+/// directory is gone is an error, so a sync never silently falls back to the
+/// locked version while the user believes a local override is active.
+fn resolve_links(
+    scope: &Scope,
+    manifest: &Manifest,
+    links: &Links,
+) -> Result<BTreeMap<String, Linked>> {
+    let mut out = BTreeMap::new();
+    for name in links.links.keys() {
+        if !manifest.skills.contains_key(name) && !manifest.plugins.contains_key(name) {
+            eprintln!(
+                "warning: ignoring link `{name}`: it is not declared in ai.json — run `{}` to \
+                 drop it",
+                unlink_command(scope, name)
+            );
+            continue;
+        }
+        if let Some(l) = links.resolve(scope, name)? {
+            out.insert(name.clone(), l);
+        }
+    }
+    Ok(out)
+}
+
+/// A working copy the overlap guard protects.
+struct Guarded {
+    name: String,
+    /// Canonical dir.
+    dir: PathBuf,
+    /// The path as recorded (its route counts too), anchored at its scope's base.
+    recorded: PathBuf,
+    /// The path as recorded, for messages.
+    display: String,
+    /// Where it was linked, for messages: empty for this command's scope.
+    origin: String,
+    /// Still linked in this command's scope (so relinking is a way out)?
+    active: bool,
+}
+
+/// Before `vendors` write or delete anything for `skills`/`plugins`, reject
+/// any overlap with a linked working copy: each `active` link, plus every one
+/// recorded on this machine — in this scope's links file (one being dropped by
+/// `spm unlink`, re-pointed by `spm link`, or ignored as undeclared) and in
+/// every other scope's (a global link may point into a project's output, or one
+/// project's into another's). Each is still the user's data even when this
+/// command doesn't copy from it. A recorded dir that is gone has nothing left
+/// to protect. Every command that writes target output or deletes it (`sync`,
+/// `clean`, `target remove`) must call this first.
+pub(super) fn guard_working_copies(
+    scope: &Scope,
+    manifest_dir: &std::path::Path,
+    vendors: &[Box<dyn Vendor>],
+    active: &BTreeMap<String, Linked>,
+    skills: &[String],
+    plugins: &[String],
+    snapshot: Option<&std::path::Path>,
+) -> Result<()> {
+    let mut guarded: Vec<Guarded> = active
+        .iter()
+        .map(|(n, l)| Guarded {
+            name: n.clone(),
+            dir: l.dir.clone(),
+            recorded: manifest_dir.join(&l.display),
+            display: l.display.clone(),
+            origin: String::new(),
+            active: true,
+        })
+        .collect();
+    // Fail closed: a links file or recorded dir that can't be read is not
+    // "nothing to protect". Only a dir that is gone (or no longer a dir) is
+    // skipped, so `spm unlink` can always drop a dead link.
+    let own_file = Links::path(scope)?;
+    let mut state_files = vec![own_file.clone()];
+    for rec in Links::all_recorded()? {
+        let own = rec.file == own_file;
+        let (base, origin) = if own {
+            (manifest_dir.to_path_buf(), String::new())
+        } else {
+            (rec.base, format!(" (linked {})", rec.origin))
+        };
+        if !own {
+            state_files.push(rec.file);
+        }
+        for (name, display) in rec.links.links {
+            let recorded = base.join(&display);
+            let dir = match recorded.canonicalize() {
+                Ok(d) if d.is_dir() => d,
+                Ok(_) => continue,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) =>
+                {
+                    continue
+                }
+                Err(e) => {
+                    return Err(e).with_context(|| {
+                        format!(
+                            "inspecting linked directory `{display}` for `{name}`{origin} — spm \
+                             can't rule out that this command would modify or delete it"
+                        )
+                    })
+                }
+            };
+            if !guarded
+                .iter()
+                .any(|g| g.name == name && g.recorded == recorded)
+            {
+                guarded.push(Guarded {
+                    name,
+                    dir,
+                    recorded,
+                    display,
+                    origin: origin.clone(),
+                    active: false,
+                });
+            }
+        }
+    }
+    reject_link_overlaps(
+        scope,
+        manifest_dir,
+        vendors,
+        &guarded,
+        Kept {
+            state_files: &state_files,
+            snapshot,
+        },
+        skills,
+        plugins,
+    )
+}
+
+/// What the targets' writes and deletions must leave alone besides working
+/// copies (see [`reject_link_overlaps`]).
+struct Kept<'a> {
+    /// The links files this command must not wipe (this scope's first, which
+    /// it also writes).
+    state_files: &'a [PathBuf],
+    /// Where this command copied linked content to materialize it from.
+    snapshot: Option<&'a std::path::Path>,
+}
+
+/// Reject a linked working copy that overlaps any location a target writes or
+/// deletes. A source inside the output (e.g. linking Codex's own
+/// `.agents/skills/<name>`) would be wiped before it is copied — losing
+/// uncommitted edits — and output inside the source (e.g. linking the project
+/// root) would be copied into itself. Files spm edits in place (`ai.json`,
+/// `ai.lock`, the links file, the project `.gitignore`, a vendor's settings)
+/// are followed through symlinks, since writing them would modify whatever they
+/// point at. Compared by filesystem identity, so symlinks and spelling aliases
+/// (case on a case-insensitive filesystem) match. The recorded path's access
+/// route counts too: deleting a symlink (or a dir holding one) it passes
+/// through would break — or, once regenerated, silently re-point — the link.
+///
+/// Nor may the targets wipe what `kept` lists: a links file (dropping every
+/// link), or the snapshot before they copy from it.
+fn reject_link_overlaps(
+    scope: &Scope,
+    manifest_dir: &std::path::Path,
+    vendors: &[Box<dyn Vendor>],
+    guarded: &[Guarded],
+    kept: Kept,
+    skills: &[String],
+    plugins: &[String],
+) -> Result<()> {
+    use crate::pathid::{deletion_target, identity, resolve, NodeId};
+    let Kept {
+        state_files,
+        snapshot,
+    } = kept;
+    // Nothing to protect: no working copy, and no links file to lose.
+    if guarded.is_empty() && !state_files.iter().any(|f| f.symlink_metadata().is_ok()) {
+        return Ok(());
+    }
+    // (owner, path as spelled, physical identity, written through?)
+    let mut outputs = Vec::new();
+    let mut patched: Vec<(&str, PathBuf)> = vec![
+        ("spm", Manifest::path_in(manifest_dir)),
+        ("spm", Lockfile::path_in(manifest_dir)),
+        ("spm", Links::path(scope)?),
+    ];
+    if let Scope::Project { root } = scope {
+        patched.push(("spm", root.join(".gitignore")));
+    }
+    for v in vendors {
+        let mut paths = v.clean_paths(scope, skills)?;
+        paths.extend(v.skill_paths(scope, skills)?);
+        paths.extend(v.plugin_clean_paths(scope, plugins)?);
+        paths.extend(v.plugin_paths(scope, plugins)?);
+        for p in paths {
+            let id = identity(&deletion_target(&p)?)?;
+            outputs.push((v.name(), p, id, false));
+        }
+        patched.extend(v.patched_files(scope)?.into_iter().map(|p| (v.name(), p)));
+    }
+    for (owner, p) in &patched {
+        let id = identity(&resolve(p, &mut Vec::new())?)?;
+        outputs.push((owner, p.clone(), id, true));
+    }
+    // The links file itself must survive the targets' cleanup: inside their
+    // output (by its entry or where it points) it would be wiped, silently
+    // dropping every link. Nor may any other file spm or a target patches in
+    // place (`.gitignore`, a settings file, ...) resolve to it: that write would
+    // corrupt it.
+    for links_file in state_files {
+        // Its entry, where it points, and every symlink on the way: deleting
+        // any of those loses the file (or access to it) just the same.
+        let mut hops = Vec::new();
+        let mut state = vec![
+            identity(&deletion_target(links_file)?)?,
+            identity(&resolve(links_file, &mut hops)?)?,
+        ];
+        for h in &hops {
+            state.push(identity(h)?);
+        }
+        // A hard link shares no path component with the links file, so only
+        // the files' own identities show it.
+        let hit = outputs
+            .iter()
+            .find(|(_, p, out, through)| {
+                (!through || p != links_file) && state.iter().any(|s| s.starts_with(out))
+            })
+            .map(|(owner, p, _, through)| (*owner, p.as_path(), *through))
+            .or_else(|| {
+                patched
+                    .iter()
+                    .find(|(_, p)| p != links_file && same_file(p, links_file))
+                    .map(|(owner, p)| (*owner, p.as_path(), true))
+            });
+        if let Some((owner, p, through)) = hit {
+            let (relation, effect) = if through {
+                ("is the same file as", "writes in place")
+            } else {
+                ("lies inside", "writes or deletes")
+            };
+            let owner = if owner == "spm" {
+                "spm".to_string()
+            } else {
+                format!("target `{owner}`")
+            };
+            bail!(
+                "the links file `{}` {relation} `{}`, which {owner} {effect}; refusing to \
+                 continue, as that would drop your links — remove whatever puts it there (e.g. \
+                 a symlink) and retry",
+                links_file.display(),
+                p.display()
+            );
+        }
+    }
+    // The snapshot root is canonical, so its identity is its whole route.
+    if let Some(root) = snapshot {
+        let id = identity(root)?;
+        if let Some((owner, p, ..)) = outputs
+            .iter()
+            .find(|(_, _, out, through)| !through && id.starts_with(out))
+        {
+            bail!(
+                "spm's temporary directory `{}` lies inside `{}`, which target `{owner}` \
+                 writes or deletes, so linked content copied there would be lost — point the \
+                 temporary directory elsewhere (`TMPDIR`; `TMP`/`TEMP` on Windows) and retry",
+                root.display(),
+                p.display()
+            );
+        }
+    }
+    // This scope's links file is also deleted once it holds nothing, which
+    // removes the entry at its path (not what a final symlink there points at).
+    let links_file = state_files[0].clone();
+    let id = identity(&deletion_target(&links_file)?)?;
+    outputs.push(("spm", links_file, id, false));
+    for g in guarded {
+        let (name, display, active) = (&g.name, &g.display, g.active);
+        let src = identity(&g.dir)?;
+        // Every location the content depends on: the recorded path's own hops,
+        // and those of each symlink inside the tree the copy follows (one that
+        // is broken, cyclic or escapes the tree is skipped by the copy and the
+        // scan alike, so it is no route), tagged with the symlink for messages.
+        let mut route: Vec<(Option<PathBuf>, Vec<NodeId>)> = Vec::new();
+        let mut hops = Vec::new();
+        resolve(&g.recorded, &mut hops)?;
+        for h in &hops {
+            route.push((None, identity(h)?));
+        }
+        for link in symlinks_in(&g.dir)? {
+            if crate::fsutil::resolve_within_canonical(&g.dir, &link).is_none() {
+                continue;
+            }
+            let mut hops = Vec::new();
+            resolve(&link, &mut hops)?;
+            for h in &hops {
+                route.push((Some(link.clone()), identity(h)?));
+            }
+        }
+        let hit = outputs.iter().find_map(|(owner, p, out, through)| {
+            if out.starts_with(&src) || (!through && src.starts_with(out)) {
+                return Some((*owner, p.as_path(), String::new()));
+            }
+            if *through {
+                return None;
+            }
+            let (via, _) = route.iter().find(|(_, r)| r.starts_with(out))?;
+            let how = via
+                .as_ref()
+                .map(|v| format!(" (through the symlink `{}`)", v.display()))
+                .unwrap_or_default();
+            Some((*owner, p.as_path(), how))
+        });
+        let hit = match hit {
+            Some(h) => Some(h),
+            None => hard_linked_into(&g.dir, &patched)?.map(|(owner, p, alias)| {
+                (owner, p, format!(" (hard-linked as `{}`)", alias.display()))
+            }),
+        };
+        let Some((owner, p, how)) = hit else {
+            continue;
+        };
+        let owner = if owner == "spm" {
+            "spm".to_string()
+        } else {
+            format!("target `{owner}`")
+        };
+        let clash = format!(
+            "linked directory `{display}` for `{name}`{} overlaps `{}`{how}, which {owner} \
+             writes or deletes",
+            g.origin,
+            p.display()
+        );
+        let flag = if scope.is_global() { " -g" } else { "" };
+        let relink = if active {
+            format!(
+                "link `{name}` to a directory outside spm's output \
+                 (`spm link {name} <dir>{flag}`), or "
+            )
+        } else if !g.origin.is_empty() {
+            "unlink it where it was linked, or ".to_string()
+        } else {
+            String::new()
+        };
+        bail!(
+            "{clash}; refusing to continue, as that could modify or delete the working copy — \
+             {relink}remove whatever makes them overlap (e.g. a symlink) and retry"
+        );
+    }
+    Ok(())
+}
+
+/// Every symlink inside `dir`, not descending into `.git` (never copied) or
+/// through symlinks.
+fn symlinks_in(dir: &std::path::Path) -> Result<Vec<PathBuf>> {
+    let mut found = Vec::new();
+    let mut dirs = vec![dir.to_path_buf()];
+    while let Some(d) = dirs.pop() {
+        for entry in std::fs::read_dir(&d).with_context(|| format!("reading {}", d.display()))? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if kind.is_symlink() {
+                found.push(entry.path());
+            } else if kind.is_dir() && entry.file_name() != ".git" {
+                dirs.push(entry.path());
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// A file spm writes in place (`files`: owner, path) that is a hard link to a
+/// file inside `dir`: writing it would modify the working copy too, though no
+/// path relation shows it. Only files with more than one link are looked for,
+/// so the tree is walked only when there is something to find. Windows has no
+/// stable std API for link counts or file ids, so this is Unix-only.
+#[cfg(unix)]
+fn hard_linked_into<'a>(
+    dir: &std::path::Path,
+    files: &'a [(&'a str, PathBuf)],
+) -> Result<Option<(&'a str, &'a std::path::Path, PathBuf)>> {
+    use std::os::unix::fs::MetadataExt;
+    let linked: Vec<(u64, u64, usize)> = files
+        .iter()
+        .enumerate()
+        .filter_map(|(i, (_, f))| {
+            std::fs::metadata(f)
+                .ok()
+                .filter(|m| m.is_file() && m.nlink() > 1)
+                .map(|m| (m.dev(), m.ino(), i))
+        })
+        .collect();
+    if linked.is_empty() {
+        return Ok(None);
+    }
+    let mut dirs = vec![dir.to_path_buf()];
+    while let Some(d) = dirs.pop() {
+        for entry in std::fs::read_dir(&d).with_context(|| format!("reading {}", d.display()))? {
+            let entry = entry?;
+            // Not following symlinks: one pointing out of the tree is not in it.
+            let m = entry.metadata()?;
+            if m.is_dir() {
+                dirs.push(entry.path());
+            } else if let Some((.., i)) = linked
+                .iter()
+                .find(|(dev, ino, _)| *dev == m.dev() && *ino == m.ino())
+            {
+                let (owner, file) = &files[*i];
+                return Ok(Some((owner, file.as_path(), entry.path())));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Whether `a` and `b` are the same existing file, however reached (a symlink
+/// or a hard link). Windows has no stable std API for file ids, so there only
+/// the path checks apply.
+#[cfg(unix)]
+fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn same_file(_a: &std::path::Path, _b: &std::path::Path) -> bool {
+    false
+}
+
+#[cfg(not(unix))]
+fn hard_linked_into<'a>(
+    _dir: &std::path::Path,
+    _files: &'a [(&'a str, PathBuf)],
+) -> Result<Option<(&'a str, &'a std::path::Path, PathBuf)>> {
+    Ok(None)
+}
+
+/// The checks above judge the *effective* skill set, where a linked plugin's
+/// working tree replaces its locked bundle. `ai.lock` must stay installable
+/// without the link (by teammates, CI, or after `spm unlink`), so its own skill
+/// namespace — standalone and transitive skills plus every plugin's locked
+/// bundle — must be free of exact and case-folding clashes too.
+fn reject_locked_skill_collisions(lock: &Lockfile) -> Result<()> {
+    let mut seen: std::collections::HashMap<String, (&str, String)> =
+        std::collections::HashMap::new();
+    let entries = lock
+        .skills
+        .keys()
+        .map(|n| (n.as_str(), format!("skill `{n}`")))
+        .chain(lock.plugins.iter().flat_map(|(p, l)| {
+            l.bundled_skills
+                .iter()
+                .map(move |s| (s.as_str(), format!("plugin `{p}`")))
+        }));
+    for (name, by) in entries {
+        if let Some((other, other_by)) = seen.insert(name.to_lowercase(), (name, by.clone())) {
+            bail!(
+                "skill name collision in ai.lock: `{other}` ({other_by}) and `{name}` ({by}) \
+                 would install to the same directory — a linked working copy may not bundle \
+                 one of them, but installing ai.lock without the link would; rename the \
+                 conflicting skill or plugin-bundled skill"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `spm unlink <name>`, spelled for the scope in use.
+pub(super) fn unlink_command(scope: &Scope, name: &str) -> String {
+    let g = if scope.is_global() { " -g" } else { "" };
+    format!("spm unlink {name}{g}")
 }
 
 /// The pin in `prev` if it can be reused for `spec` without re-resolving, else
@@ -577,16 +1332,8 @@ fn stale_transitive_pins(
         .collect()
 }
 
-/// How to fix a `--locked` failure, spelled for the scope in use.
-fn locked_fix_hint(scope: &Scope) -> String {
-    format!(
-        "run `{}` (without --locked) and commit ai.lock",
-        install_command(scope)
-    )
-}
-
 /// `spm install`, spelled for the scope in use.
-fn install_command(scope: &Scope) -> &'static str {
+pub(super) fn install_command(scope: &Scope) -> &'static str {
     if matches!(scope, Scope::Global) {
         "spm install -g"
     } else {
@@ -617,4 +1364,70 @@ fn reject_case_folding_collisions<'a>(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fresh source dir under the system temp dir holding `files`.
+    fn source(label: &str, files: &[(&str, &str)]) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("spm-snapshot-src-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for (rel, body) in files {
+            let p = dir.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        }
+        std::fs::canonicalize(dir).unwrap()
+    }
+
+    fn linked(dir: &std::path::Path) -> Linked {
+        Linked {
+            dir: dir.to_path_buf(),
+            content: dir.to_path_buf(),
+            display: dir.display().to_string(),
+        }
+    }
+
+    /// Each link gets its own slot, even when names only differ in case (a
+    /// skill `Foo` and a plugin `foo`), which would share a directory on a
+    /// case-insensitive filesystem; the root is private and removed on drop.
+    #[test]
+    fn snapshots_are_private_distinct_and_temporary() {
+        let skill = source("skill", &[("SKILL.md", "skill")]);
+        let plugin = source("plugin", &[(".claude-plugin/plugin.json", "{}")]);
+        let mut map = BTreeMap::from([
+            ("Foo".to_string(), linked(&skill)),
+            ("foo".to_string(), linked(&plugin)),
+        ]);
+        let snapshots = Snapshots::take(&mut map).unwrap().unwrap();
+        let (s, p) = (&map["Foo"].content, &map["foo"].content);
+        assert_eq!(
+            std::fs::read_to_string(s.join("SKILL.md")).unwrap(),
+            "skill"
+        );
+        assert!(
+            !s.join(".claude-plugin").exists(),
+            "plugin merged into skill"
+        );
+        assert!(!p.join("SKILL.md").exists(), "skill merged into plugin");
+        assert!(p.join(".claude-plugin/plugin.json").is_file());
+        assert_eq!(map["Foo"].dir, skill, "the working copy stays protected");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&snapshots.root)
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o700);
+        }
+        let root = snapshots.root.clone();
+        drop(snapshots);
+        assert!(!root.exists());
+        std::fs::remove_dir_all(skill).unwrap();
+        std::fs::remove_dir_all(plugin).unwrap();
+    }
 }

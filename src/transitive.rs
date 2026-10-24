@@ -99,6 +99,11 @@ pub struct Ctx<'a> {
     /// The effective source policy every nested edge must pass before it is
     /// resolved or fetched.
     pub policy: &'a crate::policy::Policy,
+    /// `spm link` overrides for *direct* skills: materialized (and scanned) from
+    /// the local directory instead of the store checkout. With transitive
+    /// resolution on, the root's nested `ai.json` is still read from its locked
+    /// checkout, so `ai.lock` is unaffected by the override.
+    pub links: &'a BTreeMap<String, crate::links::Linked>,
 }
 
 /// Result of the walk: the flattened, deduplicated skill list to hand to the
@@ -455,30 +460,64 @@ fn visit(
     direct: &BTreeMap<String, LockedSkill>,
     ctx: &Ctx,
 ) -> Result<()> {
+    let width = ctx.width;
+    let link = if depth == 0 {
+        ctx.links.get(name)
+    } else {
+        None
+    };
+    if let Some(l) = link {
+        println!("  {name:<width$}  linked → {}", l.display);
+        if !l.content.join("SKILL.md").is_file() {
+            eprintln!(
+                "warning: linked skill `{name}` has no SKILL.md at the root of `{}` — agents \
+                 may ignore it (link the skill directory itself)",
+                l.display
+            );
+        }
+        crate::scan::enforce(name, &l.content, &l.content)
+            .with_context(|| format!("scanning linked skill `{name}`"))?;
+        w.out.materialized.push(MaterializedSkill {
+            name: name.to_string(),
+            path: l.content.clone(),
+            root: l.content.clone(),
+        });
+        // Without transitive resolution a linked root needs nothing from the
+        // store at all.
+        if !ctx.resolve_transitive {
+            return Ok(());
+        }
+    }
+
     // Fetch into the store and run the pre-materialize security gate BEFORE
     // reading this node's nested manifest — a blocked node aborts before any of
     // its subtree is ever fetched.
     let ensured = store::ensure(locked).with_context(|| format!("fetching skill `{name}`"))?;
-    let width = ctx.width;
     println!(
         "  {name:<width$}  {}",
         if ensured.fetched { "fetched" } else { "cached" }
     );
-    crate::skillcheck::warn_if_not_loadable(
-        name,
-        &locked.git,
-        &locked.reference,
-        locked.path.as_deref(),
-        &ensured.path,
-        &ensured.root,
-    );
+    if link.is_none() {
+        crate::skillcheck::warn_if_not_loadable(
+            name,
+            &locked.git,
+            &locked.reference,
+            locked.path.as_deref(),
+            &ensured.path,
+            &ensured.root,
+        );
+    }
+    // A linked root's locked checkout is still the source of its nested
+    // manifest, so it passes the gate too before its subtree is walked.
     crate::scan::enforce(name, &ensured.path, &ensured.root)
         .with_context(|| format!("scanning skill `{name}`"))?;
-    w.out.materialized.push(MaterializedSkill {
-        name: name.to_string(),
-        path: ensured.path.clone(),
-        root: ensured.root.clone(),
-    });
+    if link.is_none() {
+        w.out.materialized.push(MaterializedSkill {
+            name: name.to_string(),
+            path: ensured.path.clone(),
+            root: ensured.root.clone(),
+        });
+    }
 
     if !ctx.resolve_transitive {
         return Ok(());
