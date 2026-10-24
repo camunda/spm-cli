@@ -66,36 +66,42 @@ pub fn loadability_problem(dir: &Path) -> Option<String> {
     frontmatter_problem(&text)
 }
 
-/// The frontmatter half of [`loadability_problem`], on `SKILL.md` text.
+/// The frontmatter half of [`loadability_problem`], on `SKILL.md` text. The
+/// block is parsed as YAML, so `name` and `description` must be non-blank
+/// strings: a comment, `~`, an empty block scalar or a list is no value.
 fn frontmatter_problem(text: &str) -> Option<String> {
     let mut lines = text.trim_start_matches('\u{feff}').lines();
     if lines.next().map(str::trim_end) != Some("---") {
         return Some("SKILL.md has no YAML frontmatter (`---` block)".to_string());
     }
-    let mut keys: Vec<(&str, &str)> = Vec::new();
+    let mut block = String::new();
     let mut closed = false;
     for line in lines {
         if line.trim_end() == "---" {
             closed = true;
             break;
         }
-        // Top-level keys only: nested or continuation lines are indented.
-        if line.starts_with([' ', '\t']) {
-            continue;
-        }
-        if let Some((key, value)) = line.split_once(':') {
-            keys.push((key.trim(), value.trim()));
-        }
+        block.push_str(line);
+        block.push('\n');
     }
     if !closed {
         return Some("SKILL.md frontmatter is not closed by `---`".to_string());
     }
+    let docs = match yaml_rust2::YamlLoader::load_from_str(&block) {
+        Ok(docs) => docs,
+        Err(e) => return Some(format!("SKILL.md frontmatter is not valid YAML: {e}")),
+    };
+    let fields = match docs.first() {
+        None | Some(yaml_rust2::Yaml::Null) => None,
+        Some(doc @ yaml_rust2::Yaml::Hash(_)) => Some(doc),
+        Some(_) => return Some("SKILL.md frontmatter is not a YAML mapping".to_string()),
+    };
     let missing: Vec<&str> = ["name", "description"]
         .into_iter()
-        .filter(|want| {
-            !keys.iter().any(|(k, v)| {
-                k == want && !v.trim_matches(|c| c == '"' || c == '\'').trim().is_empty()
-            })
+        .filter(|key| {
+            !fields
+                .and_then(|f| f[*key].as_str())
+                .is_some_and(|v| !v.trim().is_empty())
         })
         .collect();
     (!missing.is_empty()).then(|| {
@@ -215,6 +221,32 @@ mod tests {
         assert!(frontmatter_problem(nested)
             .unwrap()
             .contains("`description`"));
+    }
+
+    /// Values are judged as YAML, not as the raw text after the colon.
+    #[test]
+    fn frontmatter_problem_parses_values_as_yaml() {
+        let missing_description = |fm: &str| {
+            frontmatter_problem(&format!("---\nname: greet\n{fm}---\n"))
+                .is_some_and(|p| p.contains("`description`"))
+        };
+        // A comment, `~`, `null` and an empty block scalar are no value.
+        assert!(missing_description("description: # TODO\n"));
+        assert!(missing_description("description: ~\n"));
+        assert!(missing_description("description: null\n"));
+        assert!(missing_description("description: >\n"));
+        assert!(missing_description("description: |\n\n"));
+        assert!(missing_description("description: '  '\n"));
+        // A list or mapping is not the string agents expect.
+        assert!(missing_description("description:\n  - a\n"));
+        // A plain scalar may continue on indented lines.
+        assert!(!missing_description("description:\n  Say hello.\n"));
+        assert!(!missing_description("description: Say\n  hello.\n"));
+        assert!(!missing_description("description: \"#1 greeter\" # ok\n"));
+        let invalid = frontmatter_problem("---\nname: [greet\ndescription: x\n---\n").unwrap();
+        assert!(invalid.contains("not valid YAML"), "{invalid}");
+        let list = frontmatter_problem("---\n- greet\n---\n").unwrap();
+        assert!(list.contains("mapping"), "{list}");
     }
 
     #[test]

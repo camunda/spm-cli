@@ -71,7 +71,7 @@ pub(super) fn sync(
     plan(
         scope,
         &manifest,
-        state_lock,
+        &state_lock,
         links,
         force_refresh,
         only,
@@ -93,7 +93,7 @@ pub(super) fn sync_with_links(scope: &Scope, state_lock: StateLock, links: Links
     plan(
         scope,
         &manifest,
-        state_lock,
+        &state_lock,
         links,
         false,
         None,
@@ -177,7 +177,7 @@ pub(super) fn save_and_sync(
     let plan = plan(
         scope,
         &manifest,
-        state_lock,
+        &state_lock,
         Links::load(scope)?,
         false,
         None,
@@ -211,7 +211,6 @@ struct Plan {
     /// refreshed), or `None` when the links file is already up to date.
     links: Option<Links>,
     _snapshots: Option<Snapshots>,
-    _state_lock: StateLock,
     apply: Apply,
     /// [`LockMode::Check`] only: the verdict on `ai.lock`.
     verdict: LockCheck,
@@ -283,12 +282,13 @@ impl Drop for Snapshots {
 /// the global store: no target output, no `ai.json`, no `ai.lock`.
 ///
 /// `links` must have been read under `state_lock` — exclusively when they were
-/// edited (`LockMode::Links`) — and the plan holds it until it has been applied,
-/// so no other command changes link state in between.
+/// edited (`LockMode::Links`) — and the caller holds it until the plan has been
+/// applied (it is only borrowed here, so no failure can release it early), so
+/// no other command changes link state in between.
 fn plan(
     scope: &Scope,
     manifest: &Manifest,
-    state_lock: StateLock,
+    state_lock: &StateLock,
     mut links: Links,
     force_refresh: bool,
     only: Option<&str>,
@@ -698,15 +698,10 @@ fn plan(
             skipped_roots
                 .into_iter()
                 .chain(expansion.lock_misses.iter().map(|(n, _)| n.clone()))
+                .chain(expansion.uncertain_misses)
                 .chain(expansion.unverified.iter().cloned()),
         ));
-        // A walk that skipped a subtree (check mode, not in the store) can
-        // reach a shared child first from another root, under a name derived
-        // from that root: its misses are artifacts, so the transitive part of
-        // the verdict is left unverified instead.
-        if expansion.unverified.is_empty() {
-            mismatches.extend(expansion.lock_misses.into_iter().map(|(_, m)| m));
-        }
+        mismatches.extend(expansion.lock_misses.into_iter().map(|(_, m)| m));
     }
     unverified.extend(expansion.unverified);
     // Fold the transitively-resolved skills into `ai.lock`. A synthesized name
@@ -861,7 +856,6 @@ fn plan(
         locked,
         links,
         _snapshots: snapshots,
-        _state_lock: state_lock,
         apply,
         verdict,
     })
@@ -882,12 +876,12 @@ pub(super) struct LockCheck {
 /// Judge `ai.lock` against `manifest` by the exact `spm install --locked`
 /// rules, without fetching, scanning, printing or writing anything (`spm
 /// doctor`). `ai.lock` must exist. `state_lock` must have been taken before
-/// `manifest` was read; it is handed back for the caller's further reads.
+/// `manifest` was read, and the caller keeps holding it for its further reads.
 pub(super) fn check_lock(
     scope: &Scope,
     manifest: &Manifest,
-    state_lock: StateLock,
-) -> Result<(LockCheck, StateLock)> {
+    state_lock: &StateLock,
+) -> Result<LockCheck> {
     let links = Links::load(scope)?;
     let plan = plan(
         scope,
@@ -898,7 +892,7 @@ pub(super) fn check_lock(
         None,
         LockMode::Check,
     )?;
-    Ok((plan.verdict, plan._state_lock))
+    Ok(plan.verdict)
 }
 
 /// Describe each dependency of `manifest` — and each linked directory in

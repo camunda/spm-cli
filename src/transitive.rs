@@ -40,7 +40,7 @@ use crate::resolver;
 use crate::store;
 use crate::vendor::MaterializedSkill;
 use anyhow::{bail, Context, Result};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
 /// Hard cap on transitive recursion depth, independent of the opt-in flag. A
@@ -127,6 +127,11 @@ pub struct Output {
     /// [`Ctx::check`] only: skills whose store checkout is missing, so they
     /// (and their nested dependencies) could not be verified offline.
     pub unverified: Vec<String>,
+    /// [`Ctx::check`] only: synthesized names of misses that may be artifacts
+    /// of an [`Output::unverified`] subtree. The lock pins the same identity
+    /// under a name this walk never reached, so the unwalked subtree could
+    /// claim it first, under that name. These are not in `lock_misses`.
+    pub uncertain_misses: Vec<String>,
 }
 
 /// One resolved identity in the global dedup/conflict map.
@@ -151,6 +156,9 @@ struct Walk {
     stack: Vec<(Key, String)>,
     resolved: std::collections::HashMap<Key, Resolved>,
     out: Output,
+    /// Every lock miss with the identity it is for, sorted into
+    /// [`Output::lock_misses`] and [`Output::uncertain_misses`] after the walk.
+    misses: Vec<(Key, String, String)>,
     /// Total transitive edges examined across the whole walk, capped by
     /// [`MAX_EDGES`] to bound per-edge work that does not create a new node.
     edges: usize,
@@ -437,7 +445,9 @@ pub fn expand(direct: &BTreeMap<String, LockedSkill>, ctx: &Ctx) -> Result<Outpu
             direct_also_satisfies: BTreeMap::new(),
             lock_misses: Vec::new(),
             unverified: Vec::new(),
+            uncertain_misses: Vec::new(),
         },
+        misses: Vec::new(),
         edges: 0,
     };
     for (name, locked) in direct {
@@ -445,6 +455,23 @@ pub fn expand(direct: &BTreeMap<String, LockedSkill>, ctx: &Ctx) -> Result<Outpu
     }
 
     let mut out = w.out;
+    let reached: BTreeSet<&str> = out.transitive.iter().map(|(n, _)| n.as_str()).collect();
+    let claimable: BTreeSet<Key> = if out.unverified.is_empty() {
+        BTreeSet::new()
+    } else {
+        ctx.prev
+            .iter()
+            .filter(|(n, l)| !l.requested_by.is_empty() && !reached.contains(n.as_str()))
+            .map(|(_, l)| key_of(&l.git, &l.path))
+            .collect()
+    };
+    for (key, name, problem) in w.misses {
+        if claimable.contains(&key) {
+            out.uncertain_misses.push(name);
+        } else {
+            out.lock_misses.push((name, problem));
+        }
+    }
     // Stable committed lockfile: provenance lists must not churn with traversal
     // order.
     for (_, l) in &mut out.transitive {
@@ -669,9 +696,11 @@ fn visit(
                         format!("resolving nested skill `{declared}` of `{name}`")
                     })?
                     else {
-                        w.out
-                            .lock_misses
-                            .push((synth.clone(), lock_miss(&synth, declared, name, spec, ctx)?));
+                        w.misses.push((
+                            ckey.clone(),
+                            synth.clone(),
+                            lock_miss(&synth, declared, name, spec, ctx)?,
+                        ));
                         continue;
                     };
                     (child.commit, child.resolved_tag)
@@ -750,9 +779,11 @@ fn visit(
         let Some(mut child) = resolve_child(spec, &synth, ctx)
             .with_context(|| format!("resolving nested skill `{declared}` of `{name}`"))?
         else {
-            w.out
-                .lock_misses
-                .push((synth.clone(), lock_miss(&synth, declared, name, spec, ctx)?));
+            w.misses.push((
+                ckey,
+                synth.clone(),
+                lock_miss(&synth, declared, name, spec, ctx)?,
+            ));
             continue;
         };
         child.requested_by = vec![name.to_string()];

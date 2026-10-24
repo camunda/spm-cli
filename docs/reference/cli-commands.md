@@ -494,7 +494,8 @@ project: /work/my-repo
 It checks:
 
 - **git** is installed (and its version) and the **store** (`$SPM_HOME/store`)
-  is writable — a store that doesn't exist yet is fine;
+  is writable by you (asked of the OS, never by writing; not checked on
+  Windows) — a store that doesn't exist yet is fine;
 - **`ai.json`** exists, is valid and declares known **targets**;
 - the **source policy**: the machine policy (`SPM_POLICY` or
   `$SPM_HOME/policy.json`) parses, and every declared source and linked dir is
@@ -514,7 +515,8 @@ It checks:
   `.claude/settings.local.json` (which holds a machine-specific path) is
   gitignored;
 - every installed skill has a **`SKILL.md` with `name` and `description`**
-  frontmatter, which agents discover skills by;
+  frontmatter, which agents discover skills by: the frontmatter must be valid
+  YAML and both must be non-blank strings;
 - environment: `SPM_ALLOW_SUSPICIOUS` turning the [content scan](#spm-scan-path)
   into warnings, and SSH remotes with no `SSH_AUTH_SOCK` (no ssh-agent).
 

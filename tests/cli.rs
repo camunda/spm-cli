@@ -13780,18 +13780,7 @@ fn doctor_does_not_flag_a_diamond_whose_first_root_is_not_in_the_store() {
         ),
     );
     sb.ok(&["install"]);
-    let store = sb.spm_home.join("store");
-    let left_entry = std::fs::read_dir(&store)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .find(|p| {
-            p.file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with("left-")
-        })
-        .unwrap();
-    std::fs::remove_dir_all(left_entry).unwrap();
+    remove_store_checkout(&sb, "left-");
 
     let (ok, doc) = doctor(&sb, &[]);
     assert!(ok, "{doc:#}");
@@ -13801,6 +13790,96 @@ fn doctor_does_not_flag_a_diamond_whose_first_root_is_not_in_the_store() {
         serde_json::json!(["left"])
     );
     sb.ok(&["install", "--locked"]);
+}
+
+/// Write permission for *someone* is not enough: a store the invoking user
+/// can't write (here group-writable, owner read-only) fails `spm install`, so
+/// doctor must flag it rather than read the mode bits.
+#[cfg(unix)]
+#[test]
+fn doctor_flags_a_store_the_current_user_cannot_write() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let store = sb.spm_home.join("store");
+    let set = |mode| std::fs::set_permissions(&store, std::fs::Permissions::from_mode(mode));
+    set(0o575).unwrap();
+    let (ok, doc) = doctor(&sb, &[]);
+    set(0o755).unwrap();
+    assert!(!ok, "{doc:#}");
+    let c = check(&doc, "store", "error");
+    assert!(
+        c["message"].as_str().unwrap().contains("not writable"),
+        "{c}"
+    );
+}
+
+/// Deletes the store checkout whose directory name starts with `prefix`.
+fn remove_store_checkout(sb: &Sandbox, prefix: &str) {
+    let entry = std::fs::read_dir(sb.spm_home.join("store"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.file_name().unwrap().to_string_lossy().starts_with(prefix))
+        .unwrap();
+    std::fs::remove_dir_all(entry).unwrap();
+}
+
+/// A root missing from the store leaves only *its* subtree unverified: a pin
+/// missing for an unrelated root's child is still proven drift, so doctor must
+/// flag it, as `install --locked` does.
+#[test]
+fn doctor_keeps_lock_drift_of_an_independent_root_when_another_is_not_in_the_store() {
+    let sb = Sandbox::new();
+    let root = |name: &str| {
+        let dep = make_repo(
+            &sb.root.join(format!("{name}-dep")),
+            &[(
+                "SKILL.md",
+                &format!("---\nname: {name}-dep\ndescription: D.\n---\n"),
+            )],
+        );
+        make_repo(
+            &sb.root.join(name),
+            &[
+                (
+                    "SKILL.md",
+                    &format!("---\nname: {name}\ndescription: R.\n---\n"),
+                ),
+                (
+                    "ai.json",
+                    &format!(r#"{{"skills":{{"{name}-dep":{{"git":"{dep}","branch":"main"}}}}}}"#),
+                ),
+            ],
+        )
+    };
+    let (alpha, beta) = (root("alpha"), root("beta"));
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{"alpha":{{"git":"{alpha}","branch":"main"}},"beta":{{"git":"{beta}","branch":"main"}}}}}}"#
+        ),
+    );
+    sb.ok(&["install"]);
+    let lock_path = sb.project.join("ai.lock");
+    let mut lock: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&lock_path).unwrap()).unwrap();
+    let skills = lock["skills"].as_object_mut().unwrap();
+    let beta_child = skills
+        .iter()
+        .find(|(_, l)| l["requested_by"] == serde_json::json!(["beta"]))
+        .map(|(n, _)| n.clone())
+        .unwrap();
+    skills.remove(&beta_child);
+    std::fs::write(&lock_path, serde_json::to_string_pretty(&lock).unwrap()).unwrap();
+    remove_store_checkout(&sb, "alpha-");
+
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(!ok, "{doc:#}");
+    let c = check(&doc, "lockfile", "error");
+    assert!(c["details"].to_string().contains(&beta_child), "{c}");
+    assert!(!sb.spm(&["install", "--locked"]).status.success());
 }
 
 #[test]

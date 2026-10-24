@@ -352,3 +352,35 @@ mod tests {
         std::fs::remove_dir_all(&dst_root).ok();
     }
 }
+
+/// Whether the invoking user may create entries in `dir` (write and search
+/// permission for its *effective* ids, not just any write bit), asked of the
+/// OS without writing anything. `None` where that can't be established without
+/// trying, which is every non-Unix platform (Windows ACLs).
+#[cfg(unix)]
+pub fn can_create_in(dir: &Path) -> std::io::Result<Option<bool>> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(dir.as_os_str().as_bytes()).map_err(std::io::Error::other)?;
+    // SAFETY: `path` is a valid NUL-terminated string that outlives the call.
+    let rc = unsafe {
+        libc::faccessat(
+            libc::AT_FDCWD,
+            path.as_ptr(),
+            libc::W_OK | libc::X_OK,
+            libc::AT_EACCESS,
+        )
+    };
+    if rc == 0 {
+        return Ok(Some(true));
+    }
+    let err = std::io::Error::last_os_error();
+    match err.raw_os_error() {
+        Some(libc::EACCES | libc::EROFS | libc::EPERM) => Ok(Some(false)),
+        _ => Err(err),
+    }
+}
+
+#[cfg(not(unix))]
+pub fn can_create_in(dir: &Path) -> std::io::Result<Option<bool>> {
+    std::fs::metadata(dir).map(|_| None)
+}

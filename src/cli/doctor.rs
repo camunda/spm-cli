@@ -155,7 +155,7 @@ fn diagnose(scope: &Scope, root: &Path, online: bool) -> Vec<Check> {
 
     // Taken once, before reading ai.json, like every command that reads link
     // state (shared machine-wide: doctor activates no link).
-    let mut state_lock = match StateLock::acquire(scope, false) {
+    let state_lock = match StateLock::acquire(scope, false) {
         Ok(lock) => Some(lock),
         Err(e) => {
             checks.push(Check::error(
@@ -214,12 +214,9 @@ fn diagnose(scope: &Scope, root: &Path, online: bool) -> Vec<Check> {
         } else {
             Check::ok("lockfile", "no ai.lock (nothing declared yet)")
         });
-    } else if let Some(lock) = state_lock.take() {
+    } else if let Some(lock) = &state_lock {
         match sync::check_lock(scope, &manifest, lock) {
-            Ok((verdict, lock)) => {
-                state_lock = Some(lock);
-                checks.extend(lock_checks(scope, verdict));
-            }
+            Ok(verdict) => checks.extend(lock_checks(scope, verdict)),
             Err(e) => checks.push(
                 Check::error("lockfile", format!("ai.lock can't be checked: {e:#}")).fix(format!(
                     "{} and commit ai.lock",
@@ -292,23 +289,30 @@ fn check_store() -> Check {
             store.display()
         ));
     }
-    // Judged from its permissions: doctor never writes into the store.
-    match std::fs::metadata(&store) {
-        Ok(meta) if !meta.permissions().readonly() => Check::ok(
+    // Asked of the OS for the invoking user: doctor never writes into the store.
+    match crate::fsutil::can_create_in(&store) {
+        Ok(Some(true)) => Check::ok(
             "store",
             format!("store {}{from} is writable", store.display()),
         ),
-        Ok(_) => Check::error(
+        Ok(Some(false)) => Check::error(
             "store",
-            format!("store {}{from} is read-only", store.display()),
+            format!("store {}{from} is not writable by you", store.display()),
         )
         .fix(format!(
             "make {} writable or point SPM_HOME elsewhere",
             store.display()
         )),
+        Ok(None) => Check::ok(
+            "store",
+            format!(
+                "store {}{from} exists (write access is not checked on this platform)",
+                store.display()
+            ),
+        ),
         Err(e) => Check::error(
             "store",
-            format!("store {}{from} can't be read: {e}", store.display()),
+            format!("store {}{from} can't be checked: {e}", store.display()),
         ),
     }
 }
