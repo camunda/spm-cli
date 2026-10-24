@@ -698,20 +698,22 @@ fn check_gitignore(
         }
         if !tracked.is_empty() {
             // Targets sharing a dir report the same path; untrack it once.
-            let paths: Vec<_> = tracked
-                .iter()
-                .map(|(_, p)| p.as_str())
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .map(crate::shell::arg)
-                .collect();
+            let paths: BTreeSet<&str> = tracked.iter().map(|(_, p)| p.as_str()).collect();
             checks.push(
                 Check::warn(
                     "gitignore",
                     "spm's output is committed, so its .gitignore rules don't apply",
                 )
                 .details(tracked.iter().map(|(t, p)| format!("{t}: {p}")).collect())
-                .fix(format!("git rm -r --cached {}", paths.join(" "))),
+                // Literal: a name like `g[1]` must not match the user's `g1`.
+                .fix(format!(
+                    "git --literal-pathspecs rm -r --cached -- {}",
+                    paths
+                        .into_iter()
+                        .map(crate::shell::arg)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )),
             );
         }
         if checks.is_empty() {

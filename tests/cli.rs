@@ -10272,7 +10272,7 @@ fn global_link_and_unlink() {
     local_skill_checkout(&sb, "dev", "GLOBAL LOCAL");
 
     let out = sb.ok(&["link", "-g", "greet", "../dev"]);
-    assert!(out.contains("spm unlink greet -g"), "{out}");
+    assert!(out.contains("spm unlink -g greet"), "{out}");
     let skill = sb.copilot_global_skills().join("greet/SKILL.md");
     assert!(read_path(&skill).contains("GLOBAL LOCAL"));
     assert!(!sb.project.join(".spm").exists(), "nothing in the project");
@@ -10290,8 +10290,8 @@ fn global_link_and_unlink() {
     let parked = sb.root.join("dev-parked");
     std::fs::rename(&dev, &parked).unwrap();
     let err = fails(&sb, &["install", "-g"]);
-    assert!(err.contains("`spm link greet <dir> -g`"), "{err}");
-    assert!(err.contains("`spm unlink greet -g`"), "{err}");
+    assert!(err.contains("`spm link -g greet <dir>`"), "{err}");
+    assert!(err.contains("`spm unlink -g greet`"), "{err}");
     std::fs::rename(&parked, &dev).unwrap();
 
     sb.ok(&["unlink", "-g", "greet"]);
@@ -14333,7 +14333,10 @@ fn doctor_flags_spm_output_that_git_would_still_commit() {
             .contains("gemini: .gemini/skills/greet"),
         "{c}"
     );
-    assert_eq!(c["fix"], "git rm -r --cached .gemini/skills/greet", "{c}");
+    assert_eq!(
+        c["fix"], "git --literal-pathspecs rm -r --cached -- .gemini/skills/greet",
+        "{c}"
+    );
     git_in(
         &sb.project,
         &["rm", "-r", "-q", "--cached", ".gemini/skills/greet"],
@@ -14363,20 +14366,114 @@ fn doctor_fix_commands_quote_names_for_the_shell() {
         .to_string();
     assert_eq!(
         fix,
-        r#"git rm -r --cached '.gemini/skills/it'\''s my;skill'"#
+        r#"git --literal-pathspecs rm -r --cached -- '.gemini/skills/it'\''s my;skill'"#
     );
+    run_fix(&sb, &fix);
+    let (_, doc) = doctor(&sb, &[]);
+    check(&doc, "gitignore", "ok");
+}
+
+/// Run a suggested `fix` through `sh` in the project, with this build's `spm`
+/// first on `PATH` and the sandbox's environment.
+#[cfg(unix)]
+fn run_fix(sb: &Sandbox, fix: &str) {
+    let bin = Path::new(env!("CARGO_BIN_EXE_spm")).parent().unwrap();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
     let out = Command::new("sh")
-        .args(["-c", &fix])
+        .args(["-c", fix])
         .current_dir(&sb.project)
+        .env("PATH", path)
+        .env("SPM_HOME", &sb.spm_home)
+        .env("HOME", &sb.home)
+        .env_remove("SPM_POLICY")
         .output()
         .unwrap();
     assert!(
         out.status.success(),
-        "{}",
+        "{fix}: {}",
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Git treats paths as glob pathspecs and `.gitignore` lines as patterns, so a
+/// bracket in a name (`g[1]`) must not be taken to mean the user's `g1`.
+#[cfg(unix)]
+#[test]
+fn doctor_treats_bracket_names_literally_in_git() {
+    let sb = Sandbox::new();
+    git_in(&sb.project, &["init", "-q"]);
+    sb.ok(&["init", "--target", "gemini"]);
+    let user = sb.project.join(".gemini/skills/g1");
+    std::fs::create_dir_all(&user).unwrap();
+    std::fs::write(
+        user.join("SKILL.md"),
+        "---\nname: g1\ndescription: U.\n---\n",
+    )
+    .unwrap();
+    git_in(&sb.project, &["add", ".gemini/skills/g1/SKILL.md"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "g[1]"]);
+    let (_, doc) = doctor(&sb, &[]);
+    check(&doc, "gitignore", "ok");
+
+    git_in(
+        &sb.project,
+        &[
+            "--literal-pathspecs",
+            "add",
+            "-f",
+            ".gemini/skills/g[1]/SKILL.md",
+        ],
+    );
+    let (_, doc) = doctor(&sb, &[]);
+    let c = check(&doc, "gitignore", "warn");
+    assert_eq!(
+        c["fix"], "git --literal-pathspecs rm -r --cached -- '.gemini/skills/g[1]'",
+        "{c}"
+    );
+    run_fix(&sb, c["fix"].as_str().unwrap());
+    let tracked = Command::new("git")
+        .args(["ls-files"])
+        .current_dir(&sb.project)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&tracked.stdout),
+        ".gemini/skills/g1/SKILL.md\n"
     );
     let (_, doc) = doctor(&sb, &[]);
     check(&doc, "gitignore", "ok");
+}
+
+/// A name that looks like an option must reach `spm` as an operand: the fix
+/// for a stale `--all` link must not drop every link.
+#[cfg(unix)]
+#[test]
+fn doctor_fix_commands_separate_dash_names_from_options() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name=--all"]);
+    local_skill_checkout(&sb, "dev", "LOCAL");
+    sb.ok(&["link", "greet", "../dev"]);
+    sb.ok(&["link", "--", "--all", "../dev"]);
+    sb.ok(&["remove", "--", "--all"]);
+    let (_, doc) = doctor(&sb, &[]);
+    let fix = checks(&doc, "links")
+        .into_iter()
+        .find(|c| c["message"].as_str().unwrap().contains("not declared"))
+        .unwrap()["fix"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(fix, "spm unlink -- --all");
+    run_fix(&sb, &fix);
+    let (_, doc) = doctor(&sb, &[]);
+    let links = checks(&doc, "links");
+    assert_eq!(links.len(), 1, "{doc:#}");
+    assert!(
+        links[0]["message"].as_str().unwrap().contains("`greet`"),
+        "{doc:#}"
+    );
 }
 
 /// Claude's settings.local.json holds a machine-specific path: flag it when

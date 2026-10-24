@@ -1530,8 +1530,8 @@ fn reject_link_overlaps(
         let relink = if active {
             format!(
                 "link `{name}` to a directory outside spm's output \
-                 (`spm link {} <dir>{flag}`), or ",
-                crate::shell::arg(name)
+                 (`spm link{flag} {} <dir>`), or ",
+                crate::shell::operands([name.as_str()])
             )
         } else if !g.origin.is_empty() {
             "unlink it where it was linked, or ".to_string()
@@ -1667,7 +1667,7 @@ fn reject_locked_skill_collisions(lock: &Lockfile) -> Result<()> {
 /// `spm unlink <name>`, spelled for the scope in use.
 pub(super) fn unlink_command(scope: &Scope, name: &str) -> String {
     let g = if scope.is_global() { " -g" } else { "" };
-    format!("spm unlink {}{g}", crate::shell::arg(name))
+    format!("spm unlink{g} {}", crate::shell::operands([name]))
 }
 
 /// The pin in `prev` if it can be reused for `spec` without re-resolving, else

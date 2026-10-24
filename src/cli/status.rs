@@ -288,12 +288,12 @@ fn render_text(report: &StatusReport) {
                 l.name, l.path
             );
         } else {
+            let g = if report.scope == "global" { " -g" } else { "" };
             println!(
-                "! linked: `{}` → {} is not declared in ai.json and is ignored — run `spm unlink {}{}`",
+                "! linked: `{}` → {} is not declared in ai.json and is ignored — run `spm unlink{g} {}`",
                 l.name,
                 l.path,
-                crate::shell::arg(&l.name),
-                if report.scope == "global" { " -g" } else { "" }
+                crate::shell::operands([l.name.as_str()])
             );
         }
     }

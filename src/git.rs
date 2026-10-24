@@ -515,10 +515,17 @@ pub fn is_ignored(dir: &Path, path: &str) -> Option<bool> {
 /// Whether `path` (relative to `dir`) is tracked by git (in the index), so
 /// ignore rules don't apply to it. `None` when `dir` is not in a git work tree.
 pub fn is_tracked(dir: &Path, path: &str) -> Option<bool> {
-    let out = git_command(&["ls-files", "--error-unmatch", "--", path])
-        .current_dir(dir)
-        .output()
-        .ok()?;
+    // Literal: `path` is a file name, not a glob (`g[1]` must not match `g1`).
+    let out = git_command(&[
+        "--literal-pathspecs",
+        "ls-files",
+        "--error-unmatch",
+        "--",
+        path,
+    ])
+    .current_dir(dir)
+    .output()
+    .ok()?;
     match out.status.code() {
         Some(0) => Some(true),
         // Not tracked, or not in a work tree: only the former is an answer.

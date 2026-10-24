@@ -157,8 +157,13 @@ impl Vendor for SharedDirVendor {
 
     fn gitignore_entries(&self, skills: &[String]) -> Vec<String> {
         // Each managed subdir by name: the user's own skills share the dir.
+        // A `[` would start a pattern class (`g[1]/` matches `g1/`); the other
+        // glob characters are not valid in names.
         let dir = self.project_segs.join("/");
-        skills.iter().map(|s| format!("{dir}/{s}/")).collect()
+        skills
+            .iter()
+            .map(|s| format!("{dir}/{}/", s.replace('[', "\\[")))
+            .collect()
     }
 
     fn clean_paths(&self, scope: &Scope, managed: &[String]) -> Result<Vec<PathBuf>> {

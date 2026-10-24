@@ -110,7 +110,7 @@ pub(super) fn add(scope: &Scope, req: AddRequest) -> Result<()> {
                  the existing entry, or `spm remove {}{}` first",
                 Manifest::path_in(&dir).display(),
                 if plugin { "--plugin " } else { "" },
-                crate::shell::arg(&name)
+                crate::shell::operands([name.as_str()])
             );
         }
         let version = with_default_branch(&git, version)?;
@@ -200,7 +200,7 @@ fn add_all(
                 "a skill named `{sub}` already exists in {}; either pass --force to \
                  overwrite the existing entries, or `spm remove {}` first",
                 Manifest::path_in(&dir).display(),
-                crate::shell::arg(sub)
+                crate::shell::operands([sub.as_str()])
             );
         }
     }
