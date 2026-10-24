@@ -950,7 +950,7 @@ pub(super) fn guard_working_copies(
     // "nothing to protect". Only a dir that is gone (or no longer a dir) is
     // skipped, so `spm unlink` can always drop a dead link.
     let own_file = Links::path(scope)?;
-    let mut state_files = vec![own_file.clone()];
+    let mut state_files = vec![StateFile::links(own_file.clone())];
     for rec in Links::all_recorded()? {
         let own = rec.file == own_file;
         let (base, origin) = if own {
@@ -959,7 +959,7 @@ pub(super) fn guard_working_copies(
             (rec.base, format!(" (linked {})", rec.origin))
         };
         if !own {
-            state_files.push(rec.file);
+            state_files.push(StateFile::links(rec.file));
         }
         for (name, display) in rec.links.links {
             let recorded = base.join(&display);
@@ -998,6 +998,16 @@ pub(super) fn guard_working_copies(
             }
         }
     }
+    state_files.extend(
+        Ownership::all_paths(scope)?
+            .into_iter()
+            .map(|path| StateFile {
+                path,
+                what: "the ownership record",
+                loss: "lose the record of which skills spm installed (so cleanup could \
+                       delete skills it never installed)",
+            }),
+    );
     reject_link_overlaps(
         scope,
         manifest_dir,
@@ -1012,12 +1022,32 @@ pub(super) fn guard_working_copies(
     )
 }
 
+/// A machine-local state file spm alone keeps, which the targets' writes and
+/// deletions must never reach.
+struct StateFile {
+    path: PathBuf,
+    /// How messages name it (`the links file`).
+    what: &'static str,
+    /// What wiping it costs (`drop your links`).
+    loss: &'static str,
+}
+
+impl StateFile {
+    fn links(path: PathBuf) -> Self {
+        Self {
+            path,
+            what: "the links file",
+            loss: "drop your links",
+        }
+    }
+}
+
 /// What the targets' writes and deletions must leave alone besides working
 /// copies (see [`reject_link_overlaps`]).
 struct Kept<'a> {
-    /// The links files this command must not wipe (this scope's first, which
-    /// it also writes).
-    state_files: &'a [PathBuf],
+    /// The state files this command must not wipe: every links file (this
+    /// scope's first, which it also writes) and every ownership record.
+    state_files: &'a [StateFile],
     /// Where this command copied linked content to materialize it from.
     snapshot: Option<&'a std::path::Path>,
     /// Writes only `ai.json` and `ai.lock`: neither the links file (nor its
@@ -1038,7 +1068,7 @@ struct Kept<'a> {
 /// through would break — or, once regenerated, silently re-point — the link.
 ///
 /// Nor may the targets wipe what `kept` lists: a links file (dropping every
-/// link), or the snapshot before they copy from it.
+/// link), an ownership record, or the snapshot before they copy from it.
 fn reject_link_overlaps(
     scope: &Scope,
     manifest_dir: &std::path::Path,
@@ -1054,7 +1084,11 @@ fn reject_link_overlaps(
         lock_only,
     } = kept;
     // Nothing to protect: no working copy, and no links file to lose.
-    if guarded.is_empty() && !state_files.iter().any(|f| f.symlink_metadata().is_ok()) {
+    if guarded.is_empty()
+        && !state_files
+            .iter()
+            .any(|f| f.path.symlink_metadata().is_ok())
+    {
         return Ok(());
     }
     // (owner, path as spelled, physical identity, written through?)
@@ -1085,12 +1119,17 @@ fn reject_link_overlaps(
         let id = identity(&resolve(p, &mut Vec::new())?)?;
         outputs.push((owner, p.clone(), id, true));
     }
-    // The links file itself must survive the targets' cleanup: inside their
-    // output (by its entry or where it points) it would be wiped, silently
-    // dropping every link. Nor may any other file spm or a target patches in
-    // place (`.gitignore`, a settings file, ...) resolve to it: that write would
-    // corrupt it.
-    for links_file in state_files {
+    // Each state file must survive the targets' cleanup: inside their output
+    // (by its entry or where it points) it would be wiped, silently dropping
+    // every link or the record of what spm installed. Nor may any other file
+    // spm or a target patches in place (`.gitignore`, a settings file, ...)
+    // resolve to it: that write would corrupt it.
+    for StateFile {
+        path: links_file,
+        what,
+        loss,
+    } in state_files
+    {
         // Its entry, where it points, and every symlink on the way: deleting
         // any of those loses the file (or access to it) just the same.
         let mut hops = Vec::new();
@@ -1127,9 +1166,8 @@ fn reject_link_overlaps(
                 format!("target `{owner}`")
             };
             bail!(
-                "the links file `{}` {relation} `{}`, which {owner} {effect}; refusing to \
-                 continue, as that would drop your links — remove whatever puts it there (e.g. \
-                 a symlink) and retry",
+                "{what} `{}` {relation} `{}`, which {owner} {effect}; refusing to continue, as \
+                 that would {loss} — remove whatever puts it there (e.g. a symlink) and retry",
                 links_file.display(),
                 p.display()
             );
@@ -1154,7 +1192,7 @@ fn reject_link_overlaps(
     // This scope's links file is also deleted once it holds nothing, which
     // removes the entry at its path (not what a final symlink there points at).
     if !lock_only {
-        let links_file = state_files[0].clone();
+        let links_file = state_files[0].path.clone();
         let id = identity(&deletion_target(&links_file)?)?;
         outputs.push(("spm", links_file, id, false));
     }

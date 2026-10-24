@@ -283,7 +283,10 @@ spm install                               # re-run after further edits
   so is a symlink inside the directory whose route passes through the output.
   Likewise, a links file that lies inside a target's output (e.g. through a
   symlinked `$SPM_HOME/links`) makes syncing, `clean` and `target remove`
-  refuse, since rebuilding that output would silently drop your links.
+  refuse, since rebuilding that output would silently drop your links. The same
+  goes for any ownership record (e.g. through a symlinked `$SPM_HOME/owned`):
+  losing it would leave cleanup trusting a newer `ai.lock` and deleting skills
+  spm never installed.
   This protection covers every link on the machine, whichever scope recorded it:
   a global link (or another project's) pointing into this project's output
   makes this project's syncs, `clean` and `target remove` refuse until it is

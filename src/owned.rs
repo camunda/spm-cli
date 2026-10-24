@@ -100,6 +100,34 @@ pub enum Ownership {
 }
 
 impl Ownership {
+    /// Every ownership record on this machine: the global one and each
+    /// project's (whether or not they exist yet), `scope`'s first. Losing any
+    /// of them makes cleanup trust a newer lock, so all are kept from harm.
+    pub fn all_paths(scope: &Scope) -> Result<Vec<PathBuf>> {
+        let own = Self::path(scope)?;
+        let home = paths::spm_home()?;
+        let mut out = vec![own.clone()];
+        let global = home.join(GLOBAL_FILE);
+        if global != own {
+            out.push(global);
+        }
+        let dir = home.join(PROJECT_DIR);
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+        };
+        for entry in entries {
+            let file = entry
+                .with_context(|| format!("reading {}", dir.display()))?
+                .path();
+            if file.extension().is_some_and(|e| e == "json") && file != own {
+                out.push(file);
+            }
+        }
+        Ok(out)
+    }
+
     fn path(scope: &Scope) -> Result<PathBuf> {
         let home = paths::spm_home()?;
         Ok(match scope {

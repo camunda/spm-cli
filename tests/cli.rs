@@ -13227,3 +13227,33 @@ fn target_remove_does_not_hand_over_through_an_entry_symlink() {
         "clean deleted the user's skill"
     );
 }
+
+/// The ownership record is the only proof of which skills spm installed: with
+/// `$SPM_HOME/owned` redirected into this project's output, a command that
+/// would rebuild or delete that output refuses rather than wipe the record
+/// (after which cleanup would trust a newer lock and delete skills it never
+/// installed).
+#[test]
+fn ownership_records_are_guarded_like_links_files() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot,codex"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let record = sb.project_owned();
+    assert!(record.exists(), "install recorded what it wrote");
+    let owned_dir = record.parent().unwrap().to_path_buf();
+    let state = sb.project.join(".agents/skills/spm-managed-skills/owned");
+    std::fs::rename(&owned_dir, &state).unwrap();
+    symlink(&state, &owned_dir);
+    let before = read_path(&record);
+
+    for args in [
+        &["install"][..],
+        &["update"],
+        &["clean"],
+        &["target", "remove", "copilot"],
+    ] {
+        let err = fails(&sb, args);
+        assert!(err.contains("the ownership record"), "{args:?}: {err}");
+        assert_eq!(read_path(&record), before, "{args:?}");
+    }
+}
