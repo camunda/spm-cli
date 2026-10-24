@@ -189,7 +189,9 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
         // `t` loads a skill from (e.g. both reach it through symlinks) is kept
         // (protected above) and is now that target's: hand it over so a later
         // `clean` or install still removes it. A location a symlink nested
-        // inside `t`'s entry points at is not `t`'s output, so is never handed.
+        // inside `t`'s entry points at is not `t`'s output, so is never handed;
+        // nor is where `t`'s entry itself points if it is a symlink (cleanup
+        // removes just the symlink) — only its parent dirs' aliases count.
         for x in &remaining {
             let xv = vendor::for_target(x)?;
             let mut handed = crate::owned::Owned::default();
@@ -202,7 +204,12 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
                 let (paths, ours) = if is_plugin {
                     (xv.plugin_paths(scope, std::slice::from_ref(&name))?, None)
                 } else {
-                    let ours = existing_identity(&v.skills_dir(scope)?.join(&name))?;
+                    let entry = deletion_target(&v.skills_dir(scope)?.join(&name))?;
+                    let ours = if entry.symlink_metadata().is_ok() {
+                        Some(identity(&entry)?)
+                    } else {
+                        None
+                    };
                     (vec![xv.skills_dir(scope)?.join(&name)], ours)
                 };
                 for q in paths {

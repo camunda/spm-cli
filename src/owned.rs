@@ -144,12 +144,16 @@ impl Ownership {
         // Skill names are bound to the dir spm wrote them into: once a
         // target's skills dir is gone or is a different directory (moved
         // aside, or a symlink re-pointed at the user's own skills), the names
-        // recorded for the old one claim nothing there.
+        // recorded for the old one claim nothing there. Only a present,
+        // matching identity keeps them: an unknown one (no birth time, or no
+        // dir) proves nothing.
         let mut map = record.targets;
         for (target, owned) in map.iter_mut() {
-            if !owned.skills.is_empty()
-                && record.dirs.get(target) != skills_dir_identity(scope, target)?.as_ref()
-            {
+            if owned.skills.is_empty() {
+                continue;
+            }
+            let current = skills_dir_identity(scope, target)?;
+            if current.is_none() || record.dirs.get(target) != current.as_ref() {
                 owned.skills.clear();
             }
         }
@@ -405,6 +409,12 @@ mod tests {
         (root, Scope::Project { root: project }, guard)
     }
 
+    /// Create `target`'s skills dir, so a record can bind names to it.
+    fn make_skills_dir(scope: &Scope, target: &str) {
+        let vendor = crate::vendor::for_target(target).unwrap();
+        std::fs::create_dir_all(vendor.skills_dir(scope).unwrap()).unwrap();
+    }
+
     fn set(names: &[&str]) -> BTreeSet<String> {
         names.iter().map(|s| s.to_string()).collect()
     }
@@ -449,6 +459,7 @@ mod tests {
     #[test]
     fn a_failed_write_keeps_the_previous_record() {
         let (root, scope, _home) = sandbox("atomic");
+        make_skills_dir(&scope, "codex");
         let mut first = Ownership::Recorded(BTreeMap::new());
         first.grant("codex", &Owned::from_lock(&lock_with(&["a"])));
         first.save(&scope).unwrap();
@@ -512,6 +523,8 @@ mod tests {
     #[test]
     fn records_per_target_outside_the_checkout() {
         let (root, scope, _home) = sandbox("roundtrip");
+        make_skills_dir(&scope, "codex");
+        make_skills_dir(&scope, "cursor");
         // With no record, every target is assumed to hold the lock's names
         // plus what linked plugins last materialized.
         let linked = Ownership::load(&scope, &lock_with(&["a"]), &["x".to_string()], &[]).unwrap();
@@ -600,6 +613,19 @@ mod tests {
             loaded,
             Ownership::Legacy(Owned::from_lock(&lock_with(&["a"])))
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn skills_without_a_known_dir_identity_are_withheld() {
+        // No identity on either side (no birth time, or no dir) must not
+        // count as a match: names are kept only for a present, matching one.
+        let (root, scope, _home) = sandbox("unbound");
+        let p = Ownership::path(&scope).unwrap();
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, r#"{"targets":{"codex":{"skills":["a"]}}}"#).unwrap();
+        let loaded = Ownership::load(&scope, &lock_with(&[]), &[], &[]).unwrap();
+        assert_eq!(loaded.for_target("codex").skills, set(&[]));
         std::fs::remove_dir_all(root).unwrap();
     }
 

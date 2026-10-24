@@ -13200,3 +13200,30 @@ fn ownership_does_not_carry_over_to_a_recreated_skills_dir() {
         "clean deleted the user's skill"
     );
 }
+
+/// `target remove` hands over only what the removed target's own entry is:
+/// an entry that is a symlink to the user's skill in another target's dir
+/// (cleanup removes just the symlink) does not make that skill spm's.
+#[test]
+fn target_remove_does_not_hand_over_through_an_entry_symlink() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let entry = sb.project.join(".agents/skills/greet");
+    std::fs::remove_dir_all(&entry).unwrap();
+    let mine = sb.project.join(".cursor/skills/greet");
+    std::fs::create_dir_all(&mine).unwrap();
+    std::fs::write(
+        mine.join("SKILL.md"),
+        "---\nname: greet\ndescription: Mine.\n---\n",
+    )
+    .unwrap();
+    symlink("../../.cursor/skills/greet", &entry);
+    set_targets(&sb, &["codex", "cursor"]);
+    sb.ok(&["target", "remove", "codex"]);
+    sb.ok(&["clean"]);
+    assert!(
+        mine.join("SKILL.md").exists(),
+        "clean deleted the user's skill"
+    );
+}
