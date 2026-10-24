@@ -4848,7 +4848,8 @@ fn shipped_skill_dir() -> PathBuf {
 }
 
 /// Flags an `spm … --help` screen advertises, as `(long, short)` pairs (for
-/// example `("--global", Some("-g"))`), minus clap's own `--help`/`--version`.
+/// example `("--global", Some("-g"))`), minus clap's own `--help` and `-V, --version`
+/// (a value-taking `--version <RANGE>`, as on `spm add`, is kept).
 /// Only the flag column is parsed, so `--foo` mentioned in a description is not
 /// mistaken for a flag.
 fn help_flags(sb: &Sandbox, args: &[&str]) -> Vec<(String, Option<String>)> {
@@ -4866,7 +4867,9 @@ fn help_flags(sb: &Sandbox, args: &[&str]) -> Vec<(String, Option<String>)> {
         for tok in line.split_whitespace() {
             let tok = tok.trim_end_matches(',');
             if let Some(long) = tok.strip_prefix("--") {
-                if long != "help" && long != "version" {
+                let builtin =
+                    long == "help" || (long == "version" && short.as_deref() == Some("-V"));
+                if !builtin {
                     flags.push((tok.to_string(), short.take()));
                 }
                 break;
@@ -5061,6 +5064,13 @@ fn command_overviews_document_every_command_and_flag() {
     assert!(
         leaves.len() >= 11 && leaves.contains(&vec!["target".to_string(), "add".to_string()]),
         "parsed too few commands: {leaves:?}"
+    );
+    // `add --version <RANGE>` is a real selector, unlike clap's built-in `-V, --version`.
+    assert!(
+        help_flags(&sb, &["add"])
+            .iter()
+            .any(|(l, _)| l == "--version"),
+        "help_flags dropped `add --version <RANGE>`"
     );
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     for (file, heading) in [
