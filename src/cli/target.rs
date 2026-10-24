@@ -189,10 +189,24 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
         for p in &candidates {
             spans.push(identity(&deletion_target(p)?)?);
         }
+        // Also where `t` loads its payload from through symlinks (e.g. its
+        // skills dir linked elsewhere) — content only: a location merely
+        // traversed on the way is not `t`'s output.
+        let mut loads = v.skill_paths(scope, &names.skill_names())?;
+        loads.extend(v.plugin_paths(scope, &names.plugin_names())?);
+        let (mut traversed, mut content) = (Vec::new(), Vec::new());
+        let mut visited = std::collections::HashSet::new();
+        for p in loads {
+            reach(&p, &mut traversed, &mut content, &mut visited)?;
+        }
+        for c in content {
+            spans.push(identity(&c)?);
+        }
         // What a remaining target loads from inside `t`'s output — the same
-        // shared entry, or one nested in `t`'s container — is kept (protected
-        // above) and is now that target's: hand it over so a later `clean` or
-        // install still removes it.
+        // shared entry, one nested in `t`'s container, or a payload `t` loads
+        // through a symlink — is kept (protected above) and is now that
+        // target's: hand it over so a later `clean` or install still removes
+        // it.
         for x in &remaining {
             let xv = vendor::for_target(x)?;
             let mut handed = crate::owned::Owned::default();

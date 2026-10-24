@@ -25,7 +25,8 @@ use crate::{gitignore, paths};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 const PROJECT_DIR: &str = ".spm";
 const PROJECT_FILE: &str = "owned.json";
@@ -222,8 +223,44 @@ impl Ownership {
             targets: targets.clone(),
         };
         let text = serde_json::to_string_pretty(&record)?;
-        std::fs::write(&p, text + "\n").with_context(|| format!("writing {}", p.display()))
+        replace_atomically(&p, (text + "\n").as_bytes(), |f, bytes| f.write_all(bytes))
+            .with_context(|| format!("writing {}", p.display()))
     }
+}
+
+/// Replace `path` with `bytes` all at once: they are `write`n to a fresh
+/// temporary file beside it, which is renamed over `path` only once complete.
+/// The record is the sole history of what spm installed, so a failed write
+/// (e.g. a full disk) must leave the previous one intact.
+fn replace_atomically(
+    path: &Path,
+    bytes: &[u8],
+    write: impl FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let dir = path.parent().expect("record path has a parent");
+    let name = path.file_name().expect("record path has a file name");
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let tmp = dir.join(format!(
+        ".{}.{}-{nanos}.tmp",
+        name.to_string_lossy(),
+        std::process::id()
+    ));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)?;
+    let res = write(&mut file, bytes)
+        .and_then(|()| file.sync_all())
+        .and_then(|()| {
+            drop(file);
+            std::fs::rename(&tmp, path)
+        });
+    if res.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    res
 }
 
 #[cfg(test)]
@@ -279,6 +316,44 @@ mod tests {
             })
             .unwrap_err();
         format!("{err:#}")
+    }
+
+    #[test]
+    fn a_failed_write_keeps_the_previous_record() {
+        let root = scratch("atomic");
+        let scope = Scope::Project { root: root.clone() };
+        let mut first = Ownership::Recorded(BTreeMap::new());
+        first.grant("codex", &Owned::from_lock(&lock_with(&["a"])));
+        first.save(&scope).unwrap();
+        let path = Ownership::path(&scope).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let err = replace_atomically(&path, b"{\"targets\":{}}\n", |f, bytes| {
+            f.write_all(&bytes[..3])?;
+            Err(std::io::Error::other("disk full"))
+        })
+        .unwrap_err();
+        assert_eq!(err.to_string(), "disk full");
+        assert_eq!(std::fs::read(&path).unwrap(), before, "record unchanged");
+        assert_eq!(
+            Ownership::load(&scope, &Lockfile::default()).unwrap(),
+            first
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp file removed: {leftovers:?}");
+
+        let mut second = first.clone();
+        second.grant("codex", &Owned::from_lock(&lock_with(&["b"])));
+        second.save(&scope).unwrap();
+        assert_eq!(
+            Ownership::load(&scope, &Lockfile::default()).unwrap(),
+            second
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

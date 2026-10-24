@@ -12631,6 +12631,43 @@ fn an_unreadable_ownership_record_stops_clean_before_deleting() {
     assert_eq!(sb.read(".cursor/skills/mine/SKILL.md"), "Mine.\n");
 }
 
+/// Handover follows owned payloads through chained aliases: after a partial
+/// `target add codex cursor` (`cursor` aliases Claude's skills dir), Claude's
+/// `plugin/skills` is itself moved behind a symlink. Removing Claude keeps the
+/// linked payload and hands it to `cursor`, so a later `clean` removes it.
+#[test]
+fn target_remove_hands_over_payload_reached_through_chained_aliases() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    std::fs::create_dir_all(sb.project.join(".cursor")).unwrap();
+    symlink(
+        "../.spm/claude/plugin/skills",
+        sb.project.join(".cursor/skills"),
+    );
+    let blocker = sb.project.join(".agents/skills/greet");
+    std::fs::create_dir_all(blocker.parent().unwrap()).unwrap();
+    std::fs::write(&blocker, "in the way\n").unwrap();
+    fails(&sb, &["target", "add", "codex", "cursor"]);
+
+    let skills = sb.claude_market_dir().join("plugin/skills");
+    let moved = sb.project.join(".spm/shared-skills");
+    std::fs::rename(&skills, &moved).unwrap();
+    symlink("../../shared-skills", &skills);
+    let greet = moved.join("greet/SKILL.md");
+
+    let out = sb.ok(&["target", "remove", "claude"]);
+    assert!(out.contains("still used by target `cursor`"), "{out}");
+    assert!(
+        greet.exists(),
+        "cursor still loads greet through the aliases"
+    );
+
+    std::fs::remove_file(&blocker).unwrap();
+    sb.ok(&["clean"]);
+    assert!(!greet.exists(), "cursor's greet cleaned");
+}
+
 /// Claude claims each skill as it copies it into its marketplace too: when a
 /// Claude install fails after copying (here: unparsable settings), a target
 /// aliasing that marketplace inherits what was copied once Claude is removed,
