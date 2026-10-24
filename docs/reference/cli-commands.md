@@ -149,8 +149,11 @@ branch switches from one to the other, the configured target takes over the
 other's names, so it removes them once they're no longer wanted. Targets with
 separate dirs never claim each other's names. The record is bound to the
 directory spm wrote into: if a target's skills dir later leads to a different
-directory (say the original was moved aside and replaced by a symlink to your
-own skills), nothing recorded for the original is removed from it. `--lock-only` itself writes only
+directory (say the original was moved aside, or deleted and recreated, or
+replaced by a symlink to your own skills), nothing recorded for the original is
+removed from it. On a filesystem that reports no directory birth time spm
+can't tell a recreated directory apart, so it leaves such skills installed
+rather than risk deleting yours. `--lock-only` itself writes only
 `ai.json` and `ai.lock` (no target output, `.gitignore` or links file), so a
 [linked](#spm-link-name-dir) working copy that only those other files lead
 into does not block it.

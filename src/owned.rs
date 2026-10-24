@@ -335,8 +335,10 @@ impl Ownership {
 /// The [`DirId`] of the directory `target`'s skills dir in `scope` resolves
 /// to, if it exists: the directory itself, not the route to it — moved, or
 /// reached through new symlinks, it still holds what spm wrote; a different
-/// directory at the same path does not. A target spm no longer knows has
-/// none, so nothing recorded for it is trusted.
+/// directory at the same path (even one reusing its inode) does not. A
+/// target spm no longer knows, or a filesystem without birth times, has none,
+/// so nothing recorded for it is trusted: a skill may be left installed, but
+/// never is the user's own deleted.
 fn skills_dir_identity(scope: &Scope, target: &str) -> Result<Option<DirId>> {
     let Ok(vendor) = crate::vendor::for_target(target) else {
         return Ok(None);

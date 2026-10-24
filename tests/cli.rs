@@ -13161,3 +13161,42 @@ fn ownership_does_not_carry_over_to_a_replacement_skills_dir() {
         "clean deleted the user's skill"
     );
 }
+
+/// Nor does it carry over to a directory created after deleting the original,
+/// even one the filesystem hands the old one's inode (ext4 does, readily): on
+/// such filesystems the new dir is recreated until it gets that inode, setting
+/// the others aside so the allocator moves on.
+#[test]
+fn ownership_does_not_carry_over_to_a_recreated_skills_dir() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "old"]);
+    let skills = sb.project.join(".agents/skills");
+    assert!(skills.join("old/SKILL.md").exists());
+    #[cfg(unix)]
+    let ino = |p: &Path| std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(p).unwrap());
+    #[cfg(unix)]
+    let original = ino(&skills);
+    std::fs::remove_dir_all(&skills).unwrap();
+    std::fs::create_dir(&skills).unwrap();
+    #[cfg(unix)]
+    for held in 0..64 {
+        if ino(&skills) == original {
+            break;
+        }
+        std::fs::rename(&skills, sb.root.join(format!("held-{held}"))).unwrap();
+        std::fs::create_dir(&skills).unwrap();
+    }
+    let mine = skills.join("old");
+    std::fs::create_dir_all(&mine).unwrap();
+    std::fs::write(
+        mine.join("SKILL.md"),
+        "---\nname: old\ndescription: Mine.\n---\n",
+    )
+    .unwrap();
+    sb.ok(&["clean"]);
+    assert!(
+        mine.join("SKILL.md").exists(),
+        "clean deleted the user's skill"
+    );
+}

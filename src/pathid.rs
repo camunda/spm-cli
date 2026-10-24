@@ -21,18 +21,25 @@ pub enum NodeId {
 /// A directory's own file identity, independent of the route to it: moved,
 /// or reached through other symlinks, it stays the same; a different
 /// directory created at the same path gets a new one. Device and inode on
-/// Unix; volume serial number and file index on Windows.
+/// Unix; volume serial number and file index on Windows. A filesystem may
+/// hand a deleted directory's inode to a new one (ext4 does readily), so the
+/// birth time tells such a reuse apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DirId {
     pub volume: u64,
     pub index: u64,
+    /// Birth time: nanoseconds since the Unix epoch on Unix, `FILETIME`
+    /// ticks on Windows.
+    pub born: u64,
 }
 
-/// The [`DirId`] of the directory `p` resolves to, if it exists.
+/// The [`DirId`] of the directory `p` resolves to, if it exists and its
+/// filesystem reports a birth time — without one, a reused inode can't be
+/// told apart, so there is no reliable identity.
 pub fn dir_id(p: &Path) -> Result<Option<DirId>> {
     let fin = resolve(p, &mut Vec::new())?;
     match std::fs::symlink_metadata(&fin) {
-        Ok(m) if m.is_dir() => file_id(&fin).map(Some),
+        Ok(m) if m.is_dir() => file_id(&fin),
         Ok(_) => Ok(None),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(anyhow!("inspecting {}: {e}", fin.display())),
@@ -40,17 +47,23 @@ pub fn dir_id(p: &Path) -> Result<Option<DirId>> {
 }
 
 #[cfg(unix)]
-fn file_id(p: &Path) -> Result<DirId> {
+fn file_id(p: &Path) -> Result<Option<DirId>> {
     use std::os::unix::fs::MetadataExt;
     let m = std::fs::symlink_metadata(p).map_err(|e| anyhow!("inspecting {}: {e}", p.display()))?;
-    Ok(DirId {
+    let born = m
+        .created()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .and_then(|d| u64::try_from(d.as_nanos()).ok());
+    Ok(born.map(|born| DirId {
         volume: m.dev(),
         index: m.ino(),
-    })
+        born,
+    }))
 }
 
 #[cfg(windows)]
-fn file_id(p: &Path) -> Result<DirId> {
+fn file_id(p: &Path) -> Result<Option<DirId>> {
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
@@ -74,10 +87,14 @@ fn file_id(p: &Path) -> Result<DirId> {
             std::io::Error::last_os_error()
         ));
     }
-    Ok(DirId {
+    let ticks = |t: windows_sys::Win32::Foundation::FILETIME| {
+        (u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime)
+    };
+    Ok(Some(DirId {
         volume: u64::from(info.dwVolumeSerialNumber),
         index: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
-    })
+        born: ticks(info.ftCreationTime),
+    }))
 }
 
 /// The identity of the location `p` resolves to, if it exists.
