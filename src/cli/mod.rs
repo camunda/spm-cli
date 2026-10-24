@@ -1,6 +1,7 @@
 mod add;
 mod clean;
 mod common;
+mod doctor;
 mod init;
 mod link;
 mod list;
@@ -184,6 +185,22 @@ enum Command {
         #[command(flatten)]
         transport: TransportArgs,
     },
+    /// Diagnose common setup problems: git, ai.json/ai.lock, the store,
+    /// source policy, links, what is installed in each target, .gitignore and
+    /// SKILL.md frontmatter. Each check prints ok/warn/error with a fix. Read-only:
+    /// never writes ai.json/ai.lock, the store or any target. Offline unless
+    /// `--online`. Exits non-zero only if a check is an error.
+    Doctor {
+        /// Also check that every remote can be reached (`git ls-remote`).
+        #[arg(long)]
+        online: bool,
+        #[command(flatten)]
+        scope: ScopeArg,
+        #[command(flatten)]
+        output: JsonArg,
+        #[command(flatten)]
+        transport: TransportArgs,
+    },
     /// Remove all generated vendor config for this project.
     Clean {
         #[command(flatten)]
@@ -344,6 +361,15 @@ pub fn run() -> Result<()> {
         }
         Command::List { scope, output } => list::list(&scope.resolve(&cwd), output.json),
         Command::Status { scope, output } => status::status(&scope.resolve(&cwd), output.json),
+        Command::Doctor {
+            online,
+            scope,
+            output,
+            transport,
+        } => {
+            transport.apply();
+            doctor::doctor(&scope.resolve(&cwd), online, output.json)
+        }
         Command::Outdated {
             name,
             exit_code,

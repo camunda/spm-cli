@@ -23,11 +23,17 @@ anyhow = "1"
 directories = "5"
 jsonschema = { version = "0.17", default-features = false }
 semver = "1"
+yaml-rust2 = { version = "0.13", default-features = false }
 
 # Directory file identity (`pathid::DirId`): std's `MetadataExt::file_index`
 # is still unstable. Already in the lock through clap.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+# Effective write access (`fsutil::can_create_in`) without writing a probe
+# file. Already in the lock through clap.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 # Installs the committed git hooks in .cargo-husky/hooks/ into .git/hooks the
 # first time `cargo test`/`cargo build` runs — no manual setup step needed.

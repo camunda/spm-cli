@@ -23,6 +23,9 @@ allow = [
   "Unicode-3.0",
   "Unicode-DFS-2016",
   "MPL-2.0",
+  # Permissive (OSI-approved, Apache-2.0 compatible): foldhash, the default
+  # hasher of hashlink, which yaml-rust2 (SKILL.md frontmatter) depends on.
+  "Zlib",
 ]
 
 [bans]

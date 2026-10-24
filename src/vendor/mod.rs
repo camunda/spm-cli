@@ -168,6 +168,11 @@ pub trait Vendor {
         Ok(())
     }
 
+    /// The `.gitignore` entries a project-scope [`materialize`](Vendor::materialize)
+    /// of `skills` ensures (each with this vendor's comment), so spm's output
+    /// stays out of version control. The single source for both.
+    fn gitignore_entries(&self, skills: &[String]) -> Vec<String>;
+
     /// Report what this vendor has materialized in the given `scope`, compared
     /// against the declared `expected` skill names (from `ai.lock`).
     fn status(&self, scope: &Scope, expected: &[String]) -> Result<VendorStatus>;

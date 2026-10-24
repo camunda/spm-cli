@@ -107,9 +107,10 @@ pub(super) fn add(scope: &Scope, req: AddRequest) -> Result<()> {
             bail!(
                 "a {kind} named `{name}` already exists in {}; either give this one \
                  a different name with `--name <other>`, pass --force to overwrite \
-                 the existing entry, or `spm remove {}{name}` first",
+                 the existing entry, or `spm remove {}{}` first",
                 Manifest::path_in(&dir).display(),
-                if plugin { "--plugin " } else { "" }
+                if plugin { "--plugin " } else { "" },
+                crate::shell::operands([name.as_str()])
             );
         }
         let version = with_default_branch(&git, version)?;
@@ -197,8 +198,9 @@ fn add_all(
         if !force && manifest.skills.contains_key(sub) {
             bail!(
                 "a skill named `{sub}` already exists in {}; either pass --force to \
-                 overwrite the existing entries, or `spm remove {sub}` first",
-                Manifest::path_in(&dir).display()
+                 overwrite the existing entries, or `spm remove {}` first",
+                Manifest::path_in(&dir).display(),
+                crate::shell::operands([sub.as_str()])
             );
         }
     }

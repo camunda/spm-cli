@@ -2,6 +2,7 @@ use super::common::print_json;
 use crate::links::Links;
 use crate::lockfile::Lockfile;
 use crate::manifest::Manifest;
+use crate::owned::Ownership;
 use crate::paths;
 use crate::scope::Scope;
 use crate::vendor::{self, VendorStatus};
@@ -16,64 +17,82 @@ use std::path::PathBuf;
 /// [`outcome`]: StatusReport::outcome
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct StatusReport {
-    scope: &'static str,
+pub(super) struct StatusReport {
+    pub(super) scope: &'static str,
     /// Directory holding this scope's `ai.json`/`ai.lock`.
     #[serde(serialize_with = "crate::jsonutil::serialize_path")]
-    root: PathBuf,
+    pub(super) root: PathBuf,
     /// Skill names expected on disk: every `ai.lock` skill plus every
     /// plugin-bundled skill.
-    expected: Vec<ExpectedSkill>,
+    pub(super) expected: Vec<ExpectedSkill>,
     /// Plugins declared in `ai.json`.
-    plugins: Vec<String>,
+    pub(super) plugins: Vec<String>,
     /// Declared plugins with no `ai.lock` pin (never resolved here).
-    unlocked_plugins: Vec<String>,
-    collisions: Vec<Collision>,
+    pub(super) unlocked_plugins: Vec<String>,
+    pub(super) collisions: Vec<Collision>,
     /// Active `spm link` overrides (materialized from a local directory
     /// instead of the locked commit).
-    links: Vec<LinkStatus>,
-    targets: Vec<TargetStatus>,
-    complete: bool,
+    pub(super) links: Vec<LinkStatus>,
+    pub(super) targets: Vec<TargetStatus>,
+    pub(super) complete: bool,
     #[serde(skip)]
-    declared_skills: usize,
+    pub(super) declared_skills: usize,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ExpectedSkill {
-    name: String,
+pub(super) struct ExpectedSkill {
+    pub(super) name: String,
     /// Direct requester(s) of a transitively-resolved skill; empty otherwise.
-    requested_by: Vec<String>,
+    pub(super) requested_by: Vec<String>,
 }
 
 /// One `spm link` override.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct LinkStatus {
-    name: String,
+pub(super) struct LinkStatus {
+    pub(super) name: String,
     /// The linked directory, as recorded by `spm link`.
-    path: String,
+    pub(super) path: String,
     /// Whether `name` is still declared in `ai.json` (an undeclared link is
     /// ignored by syncs until `spm unlink` drops it).
-    declared: bool,
+    pub(super) declared: bool,
 }
 
 /// A skill name materialized in both scopes (they collide by name at runtime).
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Collision {
-    name: String,
-    other_scope: &'static str,
+pub(super) struct Collision {
+    pub(super) name: String,
+    pub(super) other_scope: &'static str,
+}
+
+/// A target's skills or plugins dir, always inspected so leftovers stay
+/// visible (e.g. to `doctor`), but serialized as `null` when nothing is
+/// expected there — the version-1 `--json` contract.
+pub(super) struct Inspected {
+    pub(super) status: VendorStatus,
+    pub(super) expected: bool,
+}
+
+impl Serialize for Inspected {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        if self.expected {
+            self.status.serialize(s)
+        } else {
+            s.serialize_none()
+        }
+    }
 }
 
 #[derive(Serialize)]
-struct TargetStatus {
-    target: String,
+pub(super) struct TargetStatus {
+    pub(super) target: String,
     /// `null` when no skills are expected.
-    skills: Option<VendorStatus>,
+    pub(super) skills: Inspected,
     /// `null` when no plugins are declared or the target only receives the
     /// plugins' bundled skills (already covered by `skills`).
-    plugins: Option<VendorStatus>,
+    pub(super) plugins: Option<Inspected>,
 }
 
 impl StatusReport {
@@ -117,7 +136,7 @@ pub(super) fn status(scope: &Scope, json: bool) -> Result<()> {
     report.outcome()
 }
 
-fn collect(scope: &Scope) -> Result<StatusReport> {
+pub(super) fn collect(scope: &Scope) -> Result<StatusReport> {
     let dir = scope.manifest_dir()?;
     let manifest = Manifest::load(&dir, scope)?;
     let lock = Lockfile::load_or_default(&dir)?;
@@ -127,6 +146,7 @@ fn collect(scope: &Scope) -> Result<StatusReport> {
     // would flag them as stale (present on disk, not declared). A linked
     // plugin contributes its working tree's bundled skills instead.
     let expected = links.effective_skill_names(&lock);
+    let ownership = Ownership::load(scope, &lock, &links.managed, &manifest.targets)?;
     let links = links
         .links
         .into_iter()
@@ -165,19 +185,37 @@ fn collect(scope: &Scope) -> Result<StatusReport> {
     let mut targets = Vec::new();
     for target in &manifest.targets {
         let vendor = vendor::for_target(target)?;
-        let skills = if expected.is_empty() {
-            None
-        } else {
-            Some(vendor.status(scope, &expected)?)
+        // Inspect even when nothing is expected: skills left behind in an
+        // spm-owned dir (e.g. after switching to a branch that declares none)
+        // are still loaded by the tool and must surface as stale.
+        let mut status = vendor.status(scope, &expected)?;
+        // A shared dir can't flag stale entries by listing it (the user's own
+        // skills live there too), but what spm recorded installing there and
+        // is no longer expected is its leftover all the same.
+        let dir = vendor.skills_dir(scope)?;
+        for name in ownership.for_target(target).skill_names() {
+            if !expected.contains(&name)
+                && !status.stale.contains(&name)
+                && dir.join(&name).is_dir()
+            {
+                status.stale.push(name);
+            }
+        }
+        status.stale.sort();
+        let skills = Inspected {
+            status,
+            expected: !expected.is_empty(),
         };
         // Full-plugin materialization is only meaningful for vendors that
         // register plugins beyond their bundled skills (currently Claude);
-        // `status_plugins` returns `None` for the rest.
-        let plugins = if declared_plugins.is_empty() {
-            None
-        } else {
-            vendor.status_plugins(scope, &declared_plugins)?
-        };
+        // `status_plugins` returns `None` for the rest. Inspected even with
+        // none declared, so a leftover registered plugin surfaces as stale.
+        let plugins = vendor
+            .status_plugins(scope, &declared_plugins)?
+            .map(|status| Inspected {
+                status,
+                expected: !declared_plugins.is_empty(),
+            });
         targets.push(TargetStatus {
             target: target.clone(),
             skills,
@@ -203,9 +241,8 @@ fn collect(scope: &Scope) -> Result<StatusReport> {
         })
         .collect();
 
-    let incomplete_here = |st: &Option<VendorStatus>| {
-        st.as_ref()
-            .is_some_and(|st| !st.missing.is_empty() || !st.notes.is_empty())
+    let incomplete_here = |st: Option<&VendorStatus>| {
+        st.is_some_and(|st| !st.missing.is_empty() || !st.notes.is_empty())
     };
     let mut report = StatusReport {
         scope: scope.label(),
@@ -225,9 +262,10 @@ fn collect(scope: &Scope) -> Result<StatusReport> {
         report.declared_skills == 0
     } else {
         report.unlocked_plugins.is_empty()
-            && !targets
-                .iter()
-                .any(|t| incomplete_here(&t.skills) || incomplete_here(&t.plugins))
+            && !targets.iter().any(|t| {
+                incomplete_here(Some(&t.skills.status))
+                    || incomplete_here(t.plugins.as_ref().map(|p| &p.status))
+            })
     };
     report.targets = targets;
     Ok(report)
@@ -250,12 +288,12 @@ fn render_text(report: &StatusReport) {
                 l.name, l.path
             );
         } else {
+            let g = if report.scope == "global" { " -g" } else { "" };
             println!(
-                "! linked: `{}` → {} is not declared in ai.json and is ignored — run `spm unlink {}{}`",
+                "! linked: `{}` → {} is not declared in ai.json and is ignored — run `spm unlink{g} {}`",
                 l.name,
                 l.path,
-                l.name,
-                if report.scope == "global" { " -g" } else { "" }
+                crate::shell::operands([l.name.as_str()])
             );
         }
     }
@@ -281,7 +319,8 @@ fn render_text(report: &StatusReport) {
 
     for t in &report.targets {
         let target = &t.target;
-        if let Some(st) = &t.skills {
+        if t.skills.expected {
+            let st = &t.skills.status;
             println!(
                 "\n[{target}]  {}/{} installed  {}",
                 st.present.len(),
@@ -310,7 +349,7 @@ fn render_text(report: &StatusReport) {
                 println!("  ! {note}");
             }
         }
-        if let Some(st) = &t.plugins {
+        if let Some(st) = t.plugins.as_ref().filter(|p| p.expected).map(|p| &p.status) {
             println!(
                 "\n[{target}] plugins  {}/{} installed  {}",
                 st.present.len(),

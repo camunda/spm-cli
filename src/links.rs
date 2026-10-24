@@ -248,9 +248,10 @@ impl Links {
         let dir = Self::base(scope)?.join(display);
         let g = if scope.is_global() { " -g" } else { "" };
         let canon = dir.canonicalize().with_context(|| {
+            let arg = crate::shell::operands([name]);
             format!(
                 "linked directory `{display}` for `{name}` not found — fix it with \
-                 `spm link {name} <dir>{g}` or drop it with `spm unlink {name}{g}`"
+                 `spm link{g} {arg} <dir>` or drop it with `spm unlink{g} {arg}`"
             )
         })?;
         if !canon.is_dir() {
