@@ -8,7 +8,7 @@ use anyhow::{anyhow, bail, Result};
 use std::path::{Path, PathBuf};
 
 /// One component of a path's filesystem identity (see [`identity`]).
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum NodeId {
     /// An existing entry, by device and inode (not following a final symlink).
     #[cfg(unix)]

@@ -31,21 +31,7 @@ pub(super) fn clean(scope: &Scope) -> Result<()> {
         .iter()
         .map(|t| ownership.for_target(t))
         .collect();
-    super::sync::guard_working_copies(
-        scope,
-        &dir,
-        &vendors,
-        &Default::default(),
-        &owned
-            .iter()
-            .flat_map(|o| o.skill_names())
-            .collect::<Vec<_>>(),
-        &owned
-            .iter()
-            .flat_map(|o| o.plugin_names())
-            .collect::<Vec<_>>(),
-        None,
-    )?;
+    super::sync::guard_working_copies(scope, &dir, &vendors, &Default::default(), &owned, None)?;
     for (vendor, names) in vendors.iter().zip(&owned) {
         vendor.clean(scope, &names.skill_names())?;
         vendor.clean_plugins(scope, &names.plugin_names())?;

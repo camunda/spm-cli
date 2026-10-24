@@ -82,6 +82,10 @@ impl Owned {
 #[serde(deny_unknown_fields)]
 struct Record {
     targets: BTreeMap<String, Owned>,
+    /// Per target holding skills, the identity of the skills dir they were
+    /// written into (see [`Ownership::load`]).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    dirs: BTreeMap<String, Vec<NodeId>>,
 }
 
 /// What spm owns in each target of a scope.
@@ -137,7 +141,19 @@ impl Ownership {
                 validate_skill_name(name).with_context(|| format!("in {}", p.display()))?;
             }
         }
-        let mut ownership = Self::Recorded(record.targets);
+        // Skill names are bound to the dir spm wrote them into: once a
+        // target's skills dir is gone or is a different directory (moved
+        // aside, or a symlink re-pointed at the user's own skills), the names
+        // recorded for the old one claim nothing there.
+        let mut map = record.targets;
+        for (target, owned) in map.iter_mut() {
+            if !owned.skills.is_empty()
+                && record.dirs.get(target) != skills_dir_identity(scope, target)?.as_ref()
+            {
+                owned.skills.clear();
+            }
+        }
+        let mut ownership = Self::Recorded(map);
         ownership.adopt_shared(scope, targets)?;
         Ok(ownership)
     }
@@ -155,13 +171,7 @@ impl Ownership {
         let Self::Recorded(map) = self else {
             return Ok(());
         };
-        let dir_of = |target: &str| -> Result<Option<Vec<NodeId>>> {
-            // A record entry spm no longer knows can't be compared.
-            let Ok(vendor) = crate::vendor::for_target(target) else {
-                return Ok(None);
-            };
-            existing_identity(&vendor.skills_dir(scope)?)
-        };
+        let dir_of = |target: &str| skills_dir_identity(scope, target);
         let mut unconfigured = Vec::new();
         for t in map.keys().filter(|t| !targets.contains(t)) {
             if let Some(id) = dir_of(t)? {
@@ -284,8 +294,10 @@ impl Ownership {
         }
     }
 
-    /// Persist a record. `Legacy` is not persisted: there is nothing exact to
-    /// write down.
+    /// Persist a record, binding each target's skills to its current skills
+    /// dir (every name was claimed in, or checked against, that very dir; the
+    /// vendors create it before claiming). `Legacy` is not persisted: there
+    /// is nothing exact to write down.
     pub fn save(&self, scope: &Scope) -> Result<()> {
         let Self::Recorded(targets) = self else {
             return Ok(());
@@ -293,13 +305,38 @@ impl Ownership {
         let p = Self::path(scope)?;
         let dir = p.parent().expect("record path has a parent");
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        let mut dirs = BTreeMap::new();
+        for (target, owned) in targets {
+            if owned.skills.is_empty() {
+                continue;
+            }
+            if let Some(id) = skills_dir_identity(scope, target)? {
+                dirs.insert(target.clone(), id);
+            }
+        }
         let record = Record {
             targets: targets.clone(),
+            dirs,
         };
         let text = serde_json::to_string_pretty(&record)?;
         replace_atomically(&p, (text + "\n").as_bytes(), |f, bytes| f.write_all(bytes))
             .with_context(|| format!("writing {}", p.display()))
     }
+}
+
+/// The identity of the directory `target`'s skills dir in `scope` resolves
+/// to, if it exists. A target spm no longer knows has none, so nothing
+/// recorded for it is trusted. On Unix it is the directory itself (its inode),
+/// not the route to it: moved, or reached through new symlinks, it still holds
+/// what spm wrote; a different directory at the same path does not.
+fn skills_dir_identity(scope: &Scope, target: &str) -> Result<Option<Vec<NodeId>>> {
+    let Ok(vendor) = crate::vendor::for_target(target) else {
+        return Ok(None);
+    };
+    let id = existing_identity(&vendor.skills_dir(scope)?)?;
+    #[cfg(unix)]
+    let id = id.map(|mut id| id.split_off(id.len().saturating_sub(1)));
+    Ok(id)
 }
 
 /// Replace `path` with `bytes` all at once: they are `write`n to a fresh

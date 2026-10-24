@@ -721,36 +721,33 @@ fn plan(
     // the plugins it (re)resolves, yet must not write a lock an install rejects.
     reject_case_folding_collisions("plugin", lock.plugins.keys().map(String::as_str))?;
     reject_locked_skill_collisions(&lock)?;
-    let output_skills: Vec<String> = materialized
-        .iter()
-        .map(|m| m.name.clone())
-        .chain(
-            manifest
-                .targets
-                .iter()
-                .flat_map(|t| previously_owned.for_target(t).skills),
-        )
-        .collect();
-    let output_plugins: Vec<String> = plugins
-        .iter()
-        .map(|p| p.name.clone())
-        .chain(
-            manifest
-                .targets
-                .iter()
-                .flat_map(|t| previously_owned.for_target(t).plugins),
-        )
-        .collect();
-    // A lock-only sync writes no target output — only `ai.json`, `ai.lock` and
+    // Each target writes what it held before plus the new set — its own names
+    // only, so another target's leftovers don't count as its output. A
+    // lock-only sync writes no target output — only `ai.json`, `ai.lock` and
     // machine-local state — so only those writes are guarded.
-    let guarded_vendors: &[Box<dyn Vendor>] = if lock_only { &[] } else { &vendors };
+    let (guarded_vendors, outputs): (&[Box<dyn Vendor>], Vec<Owned>) = if lock_only {
+        (&[], Vec::new())
+    } else {
+        let outputs = manifest
+            .targets
+            .iter()
+            .map(|t| {
+                let mut owned = previously_owned.for_target(t);
+                owned
+                    .skills
+                    .extend(materialized.iter().map(|m| m.name.clone()));
+                owned.plugins.extend(plugins.iter().map(|p| p.name.clone()));
+                owned
+            })
+            .collect();
+        (&vendors, outputs)
+    };
     guard_working_copies(
         scope,
         &dir,
         guarded_vendors,
         &linked,
-        &output_skills,
-        &output_plugins,
+        &outputs,
         snapshots.as_ref().map(|s| s.root.as_path()),
     )?;
     if locked {
@@ -916,7 +913,8 @@ struct Guarded {
     active: bool,
 }
 
-/// Before `vendors` write or delete anything for `skills`/`plugins`, reject
+/// Before `vendors` write or delete anything — each only for its own
+/// `outputs` entry (the names it holds or is about to write) — reject
 /// any overlap with a linked working copy: each `active` link, plus every one
 /// recorded on this machine — in this scope's links file (one being dropped by
 /// `spm unlink`, re-pointed by `spm link`, or ignored as undeclared) and in
@@ -930,10 +928,10 @@ pub(super) fn guard_working_copies(
     manifest_dir: &std::path::Path,
     vendors: &[Box<dyn Vendor>],
     active: &BTreeMap<String, Linked>,
-    skills: &[String],
-    plugins: &[String],
+    outputs: &[Owned],
     snapshot: Option<&std::path::Path>,
 ) -> Result<()> {
+    assert_eq!(vendors.len(), outputs.len(), "one output set per vendor");
     let mut guarded: Vec<Guarded> = active
         .iter()
         .map(|(n, l)| Guarded {
@@ -1006,8 +1004,7 @@ pub(super) fn guard_working_copies(
             state_files: &state_files,
             snapshot,
         },
-        skills,
-        plugins,
+        outputs,
     )
 }
 
@@ -1041,8 +1038,7 @@ fn reject_link_overlaps(
     vendors: &[Box<dyn Vendor>],
     guarded: &[Guarded],
     kept: Kept,
-    skills: &[String],
-    plugins: &[String],
+    names: &[Owned],
 ) -> Result<()> {
     use crate::pathid::{deletion_target, identity, resolve, NodeId};
     let Kept {
@@ -1063,11 +1059,12 @@ fn reject_link_overlaps(
     if let Scope::Project { root } = scope {
         patched.push(("spm", root.join(".gitignore")));
     }
-    for v in vendors {
-        let mut paths = v.clean_paths(scope, skills)?;
-        paths.extend(v.skill_paths(scope, skills)?);
-        paths.extend(v.plugin_clean_paths(scope, plugins)?);
-        paths.extend(v.plugin_paths(scope, plugins)?);
+    for (v, owned) in vendors.iter().zip(names) {
+        let (skills, plugins) = (owned.skill_names(), owned.plugin_names());
+        let mut paths = v.clean_paths(scope, &skills)?;
+        paths.extend(v.skill_paths(scope, &skills)?);
+        paths.extend(v.plugin_clean_paths(scope, &plugins)?);
+        paths.extend(v.plugin_paths(scope, &plugins)?);
         for p in paths {
             let id = identity(&deletion_target(&p)?)?;
             outputs.push((v.name(), p, id, false));

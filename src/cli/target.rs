@@ -173,14 +173,7 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
         &dir,
         &removed_vendors,
         &Default::default(),
-        &removed_owned
-            .iter()
-            .flat_map(|n| n.skill_names())
-            .collect::<Vec<_>>(),
-        &removed_owned
-            .iter()
-            .flat_map(|n| n.plugin_names())
-            .collect::<Vec<_>>(),
+        &removed_owned,
         None,
     )?;
     for ((t, v), names) in removed.iter().zip(&removed_vendors).zip(&removed_owned) {

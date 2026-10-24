@@ -12988,3 +12988,70 @@ fn clean_removes_what_a_target_sharing_the_skills_dir_installed() {
     sb.ok(&["clean"]);
     assert!(!greet.exists(), "amp's clean removed codex's greet");
 }
+
+/// What spm recorded installing is bound to the directory it wrote: once a
+/// target's skills dir is replaced (here by a symlink to the user's own skills),
+/// the names recorded for the old dir claim nothing in the new one.
+#[test]
+fn ownership_does_not_follow_a_retargeted_skills_dir() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "old"]);
+    let agents = sb.project.join(".agents");
+    assert!(agents.join("skills/old/SKILL.md").exists());
+    std::fs::rename(agents.join("skills"), agents.join("skills-moved")).unwrap();
+    let mine = sb.root.join("personal/old");
+    std::fs::create_dir_all(&mine).unwrap();
+    std::fs::write(
+        mine.join("SKILL.md"),
+        "---\nname: old\ndescription: Mine.\n---\n",
+    )
+    .unwrap();
+    symlink(sb.root.join("personal"), agents.join("skills"));
+    sb.ok(&["remove", "old"]);
+    assert!(
+        mine.join("SKILL.md").exists(),
+        "remove deleted the user's skill"
+    );
+    sb.ok(&["clean"]);
+    assert!(
+        mine.join("SKILL.md").exists(),
+        "clean deleted the user's skill"
+    );
+}
+
+/// The working-copy preflight checks each target's own output: a name only
+/// another target recorded doesn't make this target's same-named entry (here a
+/// linked working copy) count as output.
+#[test]
+fn preflight_checks_each_targets_own_recorded_names() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "old"]);
+    set_targets(&sb, &["cursor"]);
+    sb.ok(&["remove", "old"]);
+    set_targets(&sb, &["codex", "cursor"]);
+    let wc = sb.project.join(".cursor/skills/old");
+    std::fs::create_dir_all(&wc).unwrap();
+    std::fs::write(
+        wc.join("SKILL.md"),
+        "---\nname: old\ndescription: Say hello nicely.\n---\nWIP\n",
+    )
+    .unwrap();
+    let other = sb.root.join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    for args in [
+        &["init", "--target", "claude"][..],
+        &["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "old"],
+        &["link", "old", wc.to_str().unwrap()],
+    ] {
+        let out = sb.command(args).current_dir(&other).output().unwrap();
+        assert!(out.status.success(), "{args:?}: {}", stderr_of(&out));
+    }
+    sb.ok(&["install"]);
+    assert!(read_path(&wc.join("SKILL.md")).contains("WIP"), "wiped");
+    assert!(
+        !sb.project.join(".agents/skills/old").exists(),
+        "codex's old removed"
+    );
+}
