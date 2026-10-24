@@ -18,6 +18,15 @@ pub enum NodeId {
     Name(String),
 }
 
+/// The identity of the location `p` resolves to, if it exists.
+pub fn existing_identity(p: &Path) -> Result<Option<Vec<NodeId>>> {
+    let fin = resolve(p, &mut Vec::new())?;
+    if std::fs::symlink_metadata(&fin).is_err() {
+        return Ok(None);
+    }
+    identity(&fin).map(Some)
+}
+
 /// The identity of physical path `p` as one [`NodeId`] per component from the
 /// root, so `a` is `b` or an ancestor of it iff `identity(b)` starts with
 /// `identity(a)` — regardless of how either is spelled (e.g. `.AGENTS` vs

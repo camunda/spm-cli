@@ -11029,7 +11029,8 @@ fn commands_never_wipe_a_links_file_inside_target_output() {
 /// Every working copy linked on this machine is protected, whichever scope
 /// linked it: a global link — or another project's — pointing into this
 /// project's output makes every command that would rebuild or delete that
-/// output refuse, until it's unlinked where it was linked. The global case is
+/// output refuse, until it's unlinked where it was linked (a lock-only update,
+/// which writes no output, still runs). The global case is
 /// Unix only: on Windows the home dir (global output) can't be redirected into
 /// the sandbox.
 #[test]
@@ -11103,6 +11104,9 @@ fn links_from_other_scopes_are_guarded_too() {
             assert!(err.contains(&origin), "{origin} {args:?}: {err}");
             assert!(read_path(&wc.join("SKILL.md")).contains("WIP"), "wiped");
         }
+        // A lock-only update writes no target output, so the link can't block it.
+        sb.ok(&["update", "--lock-only"]);
+        assert!(read_path(&wc.join("SKILL.md")).contains("WIP"), "wiped");
         run(&["unlink", "greet"]);
         sb.ok(&["install"]);
     }
@@ -12945,4 +12949,42 @@ fn add_lock_only_rejects_a_plugin_differing_only_by_case_from_a_locked_one() {
         assert_eq!(sb.read("ai.json"), manifest);
         assert_eq!(sb.read("ai.lock"), lock);
     }
+}
+
+/// Targets sharing one skills dir (codex and amp both use `.agents/skills/`)
+/// share what spm installed there: switching a branch from one to the other
+/// still lets `remove` take out what the first installed — also after an
+/// install recorded it for the second and the branch switched back.
+#[test]
+fn a_target_sharing_a_skills_dir_removes_what_another_installed() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let greet = sb.project.join(".agents/skills/greet");
+    assert!(greet.join("SKILL.md").exists());
+    set_targets(&sb, &["amp"]);
+    sb.ok(&["remove", "greet"]);
+    assert!(!greet.exists(), "amp removed codex's greet");
+
+    set_targets(&sb, &["codex"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    set_targets(&sb, &["amp"]);
+    sb.ok(&["install"]);
+    set_targets(&sb, &["codex"]);
+    sb.ok(&["remove", "greet"]);
+    assert!(!greet.exists(), "codex removed the greet amp took over");
+}
+
+/// `clean` of a target removes what another target installed into the skills
+/// dir they share.
+#[test]
+fn clean_removes_what_a_target_sharing_the_skills_dir_installed() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let greet = sb.project.join(".agents/skills/greet");
+    assert!(greet.join("SKILL.md").exists());
+    set_targets(&sb, &["amp"]);
+    sb.ok(&["clean"]);
+    assert!(!greet.exists(), "amp's clean removed codex's greet");
 }

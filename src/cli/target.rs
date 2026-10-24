@@ -2,7 +2,7 @@ use super::sync::{save_and_sync, Apply};
 use crate::lockfile::Lockfile;
 use crate::manifest::Manifest;
 use crate::owned::Ownership;
-use crate::pathid::{deletion_target, identity, resolve, NodeId};
+use crate::pathid::{deletion_target, existing_identity, identity, resolve, NodeId};
 use crate::scope::Scope;
 use crate::vendor;
 use anyhow::{anyhow, bail, Context, Result};
@@ -118,7 +118,12 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
 
     let lock = Lockfile::load_or_default(&dir)?;
     // Each target's own spm output (see `crate::owned`).
-    let mut owned = Ownership::load(scope, &lock, &crate::links::Links::load(scope)?.managed)?;
+    let mut owned = Ownership::load(
+        scope,
+        &lock,
+        &crate::links::Links::load(scope)?.managed,
+        &manifest.targets,
+    )?;
     // Physical locations a remaining target still loads skills, plugins or
     // their metadata from (`content`), plus every location reaching them
     // depends on (`traversed`: symlinks, and dirs passed through before a
@@ -246,15 +251,6 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
     manifest.save(&dir)?;
     println!("removed target(s): {}", removed.join(", "));
     Ok(())
-}
-
-/// The identity of the location `p` resolves to, if it exists.
-fn existing_identity(p: &Path) -> Result<Option<Vec<NodeId>>> {
-    let fin = resolve(p, &mut Vec::new())?;
-    if std::fs::symlink_metadata(&fin).is_err() {
-        return Ok(None);
-    }
-    identity(&fin).map(Some)
 }
 
 /// Record what loading from `p` depends on: resolve it (pushing traversed

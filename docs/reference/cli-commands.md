@@ -143,7 +143,13 @@ updates the record, so names a lock merely passed through — or a target added
 since — are never claimed. The same applies when a pulled `ai.lock` drops them.
 The record lists what was actually written (a linked plugin's working copy
 included), and a target keeps its record until it is cleaned or removed, even
-while a branch's `ai.json` omits it.
+while a branch's `ai.json` omits it. Targets that share one skills dir (codex
+and amp both use `.agents/skills/`) share what spm installed there: when a
+branch switches from one to the other, the configured target takes over the
+other's names, so it removes them once they're no longer wanted. Targets with
+separate dirs never claim each other's names. `--lock-only` itself writes no
+target output, so a [linked](#spm-link-name-dir) working copy inside one does
+not block it.
 
 With `resolveTransitive` on, every other skill is still read (from the store, or
 fetched when missing) for its nested `ai.json`, which decides the transitive

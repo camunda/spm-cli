@@ -388,7 +388,9 @@ spm clean [-g]
 Removes the generated vendor config for this scope, including skills an
 earlier `--lock-only` change dropped from `ai.lock` but left installed (spm
 records what it installed into each target under
-`$SPM_HOME/owned/`, or in `$SPM_HOME/owned-global.json` with `-g`). `ai.json` and `ai.lock` stay, so `spm install` restores everything.
+`$SPM_HOME/owned/`, or in `$SPM_HOME/owned-global.json` with `-g`; targets
+sharing a skills dir, like codex and amp's `.agents/skills/`, share that
+record). `ai.json` and `ai.lock` stay, so `spm install` restores everything.
 
 ### `spm prune`
 

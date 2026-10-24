@@ -15,7 +15,12 @@ pub(super) fn clean(scope: &Scope) -> Result<()> {
     let _state_lock = crate::links::StateLock::acquire(scope, false)?;
     let manifest = Manifest::load(&dir, scope)?;
     let lock = Lockfile::load_or_default(&dir)?;
-    let ownership = Ownership::load(scope, &lock, &Links::load(scope)?.managed)?;
+    let ownership = Ownership::load(
+        scope,
+        &lock,
+        &Links::load(scope)?.managed,
+        &manifest.targets,
+    )?;
     let vendors = manifest
         .targets
         .iter()

@@ -354,7 +354,7 @@ fn plan(
     // What spm owns in each target before this sync (see `crate::owned`):
     // global/shared-dir vendors share a directory with the user's own skills,
     // so they purge only entries spm put there that are no longer wanted.
-    let previously_owned = Ownership::load(scope, &prev, &links.managed)?;
+    let previously_owned = Ownership::load(scope, &prev, &links.managed, &manifest.targets)?;
 
     // Stable, path-independent project id: reuse the locked one, else mint & persist.
     let id = if prev.id.is_empty() {
@@ -741,10 +741,13 @@ fn plan(
                 .flat_map(|t| previously_owned.for_target(t).plugins),
         )
         .collect();
+    // A lock-only sync writes no target output — only `ai.json`, `ai.lock` and
+    // machine-local state — so only those writes are guarded.
+    let guarded_vendors: &[Box<dyn Vendor>] = if lock_only { &[] } else { &vendors };
     guard_working_copies(
         scope,
         &dir,
-        &vendors,
+        guarded_vendors,
         &linked,
         &output_skills,
         &output_plugins,
