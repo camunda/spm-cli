@@ -749,6 +749,7 @@ fn plan(
         &linked,
         &outputs,
         snapshots.as_ref().map(|s| s.root.as_path()),
+        lock_only,
     )?;
     if locked {
         // Backstop for the whole defect class: whatever the specific checks above
@@ -922,7 +923,8 @@ struct Guarded {
 /// project's into another's). Each is still the user's data even when this
 /// command doesn't copy from it. A recorded dir that is gone has nothing left
 /// to protect. Every command that writes target output or deletes it (`sync`,
-/// `clean`, `target remove`) must call this first.
+/// `clean`, `target remove`) must call this first. A `lock_only` sync writes
+/// just `ai.json` and `ai.lock` (pass no `vendors`), so only those count.
 pub(super) fn guard_working_copies(
     scope: &Scope,
     manifest_dir: &std::path::Path,
@@ -930,6 +932,7 @@ pub(super) fn guard_working_copies(
     active: &BTreeMap<String, Linked>,
     outputs: &[Owned],
     snapshot: Option<&std::path::Path>,
+    lock_only: bool,
 ) -> Result<()> {
     assert_eq!(vendors.len(), outputs.len(), "one output set per vendor");
     let mut guarded: Vec<Guarded> = active
@@ -1003,6 +1006,7 @@ pub(super) fn guard_working_copies(
         Kept {
             state_files: &state_files,
             snapshot,
+            lock_only,
         },
         outputs,
     )
@@ -1016,6 +1020,9 @@ struct Kept<'a> {
     state_files: &'a [PathBuf],
     /// Where this command copied linked content to materialize it from.
     snapshot: Option<&'a std::path::Path>,
+    /// Writes only `ai.json` and `ai.lock`: neither the links file (nor its
+    /// removal) nor `.gitignore`.
+    lock_only: bool,
 }
 
 /// Reject a linked working copy that overlaps any location a target writes or
@@ -1044,6 +1051,7 @@ fn reject_link_overlaps(
     let Kept {
         state_files,
         snapshot,
+        lock_only,
     } = kept;
     // Nothing to protect: no working copy, and no links file to lose.
     if guarded.is_empty() && !state_files.iter().any(|f| f.symlink_metadata().is_ok()) {
@@ -1054,10 +1062,12 @@ fn reject_link_overlaps(
     let mut patched: Vec<(&str, PathBuf)> = vec![
         ("spm", Manifest::path_in(manifest_dir)),
         ("spm", Lockfile::path_in(manifest_dir)),
-        ("spm", Links::path(scope)?),
     ];
-    if let Scope::Project { root } = scope {
-        patched.push(("spm", root.join(".gitignore")));
+    if !lock_only {
+        patched.push(("spm", Links::path(scope)?));
+        if let Scope::Project { root } = scope {
+            patched.push(("spm", root.join(".gitignore")));
+        }
     }
     for (v, owned) in vendors.iter().zip(names) {
         let (skills, plugins) = (owned.skill_names(), owned.plugin_names());
@@ -1143,9 +1153,11 @@ fn reject_link_overlaps(
     }
     // This scope's links file is also deleted once it holds nothing, which
     // removes the entry at its path (not what a final symlink there points at).
-    let links_file = state_files[0].clone();
-    let id = identity(&deletion_target(&links_file)?)?;
-    outputs.push(("spm", links_file, id, false));
+    if !lock_only {
+        let links_file = state_files[0].clone();
+        let id = identity(&deletion_target(&links_file)?)?;
+        outputs.push(("spm", links_file, id, false));
+    }
     for g in guarded {
         let (name, display, active) = (&g.name, &g.display, g.active);
         let src = identity(&g.dir)?;

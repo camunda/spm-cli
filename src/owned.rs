@@ -20,7 +20,7 @@
 
 use crate::lockfile::Lockfile;
 use crate::manifest::validate_skill_name;
-use crate::pathid::{existing_identity, NodeId};
+use crate::pathid::{dir_id, DirId};
 use crate::paths;
 use crate::scope::Scope;
 use crate::vendor::Claim;
@@ -85,7 +85,7 @@ struct Record {
     /// Per target holding skills, the identity of the skills dir they were
     /// written into (see [`Ownership::load`]).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    dirs: BTreeMap<String, Vec<NodeId>>,
+    dirs: BTreeMap<String, DirId>,
 }
 
 /// What spm owns in each target of a scope.
@@ -228,10 +228,18 @@ impl Ownership {
             ahead.plugins.extend(desired.plugins.iter().cloned());
             record.insert(target.clone(), ahead);
             Self::Recorded(record.clone()).save(scope)?;
+            // The dir the record binds this target's skills to (see `save`).
+            // A vendor may create it, or recreate it (Claude rebuilds its
+            // marketplace), before claiming even names it already owned, so a
+            // claim saves whenever the name or the binding is new.
+            let mut bound = skills_dir_identity(scope, target)?;
             let mut claim = |name: &str| -> Result<()> {
                 let owned = record.get_mut(target).expect("target recorded above");
-                if owned.skills.insert(name.to_string()) {
+                let added = owned.skills.insert(name.to_string());
+                let dir = skills_dir_identity(scope, target)?;
+                if added || dir != bound {
                     Self::Recorded(record.clone()).save(scope)?;
+                    bound = dir;
                 }
                 Ok(())
             };
@@ -324,19 +332,16 @@ impl Ownership {
     }
 }
 
-/// The identity of the directory `target`'s skills dir in `scope` resolves
-/// to, if it exists. A target spm no longer knows has none, so nothing
-/// recorded for it is trusted. On Unix it is the directory itself (its inode),
-/// not the route to it: moved, or reached through new symlinks, it still holds
-/// what spm wrote; a different directory at the same path does not.
-fn skills_dir_identity(scope: &Scope, target: &str) -> Result<Option<Vec<NodeId>>> {
+/// The [`DirId`] of the directory `target`'s skills dir in `scope` resolves
+/// to, if it exists: the directory itself, not the route to it — moved, or
+/// reached through new symlinks, it still holds what spm wrote; a different
+/// directory at the same path does not. A target spm no longer knows has
+/// none, so nothing recorded for it is trusted.
+fn skills_dir_identity(scope: &Scope, target: &str) -> Result<Option<DirId>> {
     let Ok(vendor) = crate::vendor::for_target(target) else {
         return Ok(None);
     };
-    let id = existing_identity(&vendor.skills_dir(scope)?)?;
-    #[cfg(unix)]
-    let id = id.map(|mut id| id.split_off(id.len().saturating_sub(1)));
-    Ok(id)
+    dir_id(&vendor.skills_dir(scope)?)
 }
 
 /// Replace `path` with `bytes` all at once: they are `write`n to a fresh

@@ -8,7 +8,7 @@ use anyhow::{anyhow, bail, Result};
 use std::path::{Path, PathBuf};
 
 /// One component of a path's filesystem identity (see [`identity`]).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum NodeId {
     /// An existing entry, by device and inode (not following a final symlink).
     #[cfg(unix)]
@@ -16,6 +16,68 @@ pub enum NodeId {
     /// A component compared by name: a missing one, or on Windows any one,
     /// case-folded after canonicalizing its existing prefix.
     Name(String),
+}
+
+/// A directory's own file identity, independent of the route to it: moved,
+/// or reached through other symlinks, it stays the same; a different
+/// directory created at the same path gets a new one. Device and inode on
+/// Unix; volume serial number and file index on Windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DirId {
+    pub volume: u64,
+    pub index: u64,
+}
+
+/// The [`DirId`] of the directory `p` resolves to, if it exists.
+pub fn dir_id(p: &Path) -> Result<Option<DirId>> {
+    let fin = resolve(p, &mut Vec::new())?;
+    match std::fs::symlink_metadata(&fin) {
+        Ok(m) if m.is_dir() => file_id(&fin).map(Some),
+        Ok(_) => Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(anyhow!("inspecting {}: {e}", fin.display())),
+    }
+}
+
+#[cfg(unix)]
+fn file_id(p: &Path) -> Result<DirId> {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::symlink_metadata(p).map_err(|e| anyhow!("inspecting {}: {e}", p.display()))?;
+    Ok(DirId {
+        volume: m.dev(),
+        index: m.ino(),
+    })
+}
+
+#[cfg(windows)]
+fn file_id(p: &Path) -> Result<DirId> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT,
+    };
+    // No access rights are needed to query the identity; backup semantics
+    // are what lets a directory be opened at all.
+    let f = std::fs::OpenOptions::new()
+        .access_mode(0)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(p)
+        .map_err(|e| anyhow!("opening {}: {e}", p.display()))?;
+    // SAFETY: an all-zero BY_HANDLE_FILE_INFORMATION is a valid value (plain
+    // integers and FILETIMEs), and the handle stays open for the whole call.
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    if unsafe { GetFileInformationByHandle(f.as_raw_handle(), &mut info) } == 0 {
+        return Err(anyhow!(
+            "inspecting {}: {}",
+            p.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(DirId {
+        volume: u64::from(info.dwVolumeSerialNumber),
+        index: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+    })
 }
 
 /// The identity of the location `p` resolves to, if it exists.

@@ -13055,3 +13055,109 @@ fn preflight_checks_each_targets_own_recorded_names() {
         "codex's old removed"
     );
 }
+
+/// A first install from an existing lock (no ownership record yet: a fresh
+/// clone) binds what it copies to the dir it copied into as it goes, so when
+/// it fails part-way (here: `.gitignore` is a directory) a later `clean`
+/// still removes what was copied.
+#[test]
+fn a_failed_first_install_from_a_lock_records_where_it_copied() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let greet = sb.project.join(".agents/skills/greet");
+    std::fs::remove_file(sb.project_owned()).unwrap();
+    std::fs::remove_dir_all(sb.project.join(".agents")).unwrap();
+    let gitignore = sb.project.join(".gitignore");
+    let ignored = std::fs::read_to_string(&gitignore).unwrap_or_default();
+    let _ = std::fs::remove_file(&gitignore);
+    std::fs::create_dir(&gitignore).unwrap();
+    fails(&sb, &["install"]);
+    assert!(greet.join("SKILL.md").exists(), "copied before failing");
+    std::fs::remove_dir(&gitignore).unwrap();
+    std::fs::write(&gitignore, ignored).unwrap();
+    sb.ok(&["clean"]);
+    assert!(!greet.exists(), "greet cleaned");
+}
+
+/// A Claude reinstall recreates the marketplace, so even when it copies only
+/// names it already owned, it rebinds them to the new dir as it claims them:
+/// failing part-way (unparsable settings) keeps them owned, so a target
+/// aliasing the marketplace inherits them and a later `clean` removes them.
+#[test]
+fn a_failed_claude_reinstall_rebinds_the_names_it_copied() {
+    let sb = Sandbox::new();
+    std::fs::create_dir_all(sb.project.join(".cursor")).unwrap();
+    symlink(
+        "../.spm/claude/plugin/skills",
+        sb.project.join(".cursor/skills"),
+    );
+    sb.ok(&["init", "--target", "claude,cursor"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let settings = sb.project.join(".claude/settings.local.json");
+    let good = std::fs::read_to_string(&settings).unwrap();
+    std::fs::write(&settings, "{").unwrap();
+    fails(&sb, &["install"]);
+    let copied = sb.claude_market_dir().join("plugin/skills/greet/SKILL.md");
+    assert!(copied.exists(), "copied before failing");
+
+    std::fs::write(&settings, good).unwrap();
+    let out = sb.ok(&["target", "remove", "claude"]);
+    assert!(out.contains("still used by target `cursor`"), "{out}");
+    assert!(copied.exists(), "cursor still loads greet");
+    sb.ok(&["clean"]);
+    assert!(!copied.exists(), "greet cleaned through cursor");
+}
+
+/// A lock-only update writes only `ai.json` and `ai.lock`: a `.gitignore` or
+/// links file it leaves untouched may lead into a linked working copy.
+#[test]
+fn lock_only_ignores_untouched_files_leading_into_a_working_copy() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex"]);
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--name",
+        "greet",
+    ]);
+    let wc = sb.root.join("wc");
+    std::fs::create_dir_all(&wc).unwrap();
+    std::fs::write(
+        wc.join("SKILL.md"),
+        "---\nname: greet\ndescription: Say hello nicely.\n---\nWIP\n",
+    )
+    .unwrap();
+    sb.ok(&["link", "greet", wc.to_str().unwrap()]);
+    let gitignore = sb.project.join(".gitignore");
+    std::fs::rename(&gitignore, wc.join("ignored")).unwrap();
+    symlink(wc.join("ignored"), &gitignore);
+    sb.ok(&["update", "--lock-only"]);
+    assert!(read_path(&wc.join("SKILL.md")).contains("WIP"), "wiped");
+}
+
+/// The binding is to the directory itself, not its path: a new directory
+/// created where the old one was (the old moved aside) is the user's.
+#[test]
+fn ownership_does_not_carry_over_to_a_replacement_skills_dir() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "old"]);
+    let skills = sb.project.join(".agents/skills");
+    assert!(skills.join("old/SKILL.md").exists());
+    std::fs::rename(&skills, sb.project.join(".agents/skills-moved")).unwrap();
+    let mine = skills.join("old");
+    std::fs::create_dir_all(&mine).unwrap();
+    std::fs::write(
+        mine.join("SKILL.md"),
+        "---\nname: old\ndescription: Mine.\n---\n",
+    )
+    .unwrap();
+    sb.ok(&["clean"]);
+    assert!(
+        mine.join("SKILL.md").exists(),
+        "clean deleted the user's skill"
+    );
+}

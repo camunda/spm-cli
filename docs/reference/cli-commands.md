@@ -150,9 +150,10 @@ other's names, so it removes them once they're no longer wanted. Targets with
 separate dirs never claim each other's names. The record is bound to the
 directory spm wrote into: if a target's skills dir later leads to a different
 directory (say the original was moved aside and replaced by a symlink to your
-own skills), nothing recorded for the original is removed from it. `--lock-only` itself writes no
-target output, so a [linked](#spm-link-name-dir) working copy inside one does
-not block it.
+own skills), nothing recorded for the original is removed from it. `--lock-only` itself writes only
+`ai.json` and `ai.lock` (no target output, `.gitignore` or links file), so a
+[linked](#spm-link-name-dir) working copy that only those other files lead
+into does not block it.
 
 With `resolveTransitive` on, every other skill is still read (from the store, or
 fetched when missing) for its nested `ai.json`, which decides the transitive
