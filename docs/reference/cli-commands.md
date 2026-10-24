@@ -496,7 +496,7 @@ It checks:
 - **git** is installed (and its version) and the **store** (`$SPM_HOME/store`)
   is writable by you (asked of the OS, never by writing; not checked on
   Windows) — a store that doesn't exist yet is fine if it can be created, but
-  a dangling symlink in its place is an error;
+  a dangling symlink in its place or a non-directory `SPM_HOME` is an error;
 - **`ai.json`** exists, is valid and declares known **targets**;
 - the **source policy**: the machine policy (`SPM_POLICY` or
   `$SPM_HOME/policy.json`) parses, and every declared source and linked dir is
@@ -510,7 +510,8 @@ It checks:
   a plugin's bundled skills); it is reported as a warning rather than fetched;
 - what is **installed in each target**, as [`spm status`](#spm-status) reports it:
   missing skills/plugins or a stale Claude marketplace pointer are errors; skills
-  spm no longer manages and names [installed in both scopes](#scope-project-default-vs-global-g) are
+  and plugins spm no longer manages (even with nothing declared, e.g. after a
+  branch switch) and names [installed in both scopes](#scope-project-default-vs-global-g) are
   warnings;
 - project scope: the **`.gitignore`** entries `spm install` adds are present
   (also after an install with nothing declared, e.g. Claude's empty marketplace), and

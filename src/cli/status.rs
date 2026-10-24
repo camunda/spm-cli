@@ -66,15 +66,15 @@ pub(super) struct Collision {
     pub(super) other_scope: &'static str,
 }
 
-/// A target's skills dir, always inspected so leftovers stay visible (e.g.
-/// to `doctor`), but serialized as `null` when no skills are expected — the
-/// version-1 `--json` contract.
-pub(super) struct SkillsStatus {
+/// A target's skills or plugins dir, always inspected so leftovers stay
+/// visible (e.g. to `doctor`), but serialized as `null` when nothing is
+/// expected there — the version-1 `--json` contract.
+pub(super) struct Inspected {
     pub(super) status: VendorStatus,
     pub(super) expected: bool,
 }
 
-impl Serialize for SkillsStatus {
+impl Serialize for Inspected {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         if self.expected {
             self.status.serialize(s)
@@ -88,10 +88,10 @@ impl Serialize for SkillsStatus {
 pub(super) struct TargetStatus {
     pub(super) target: String,
     /// `null` when no skills are expected.
-    pub(super) skills: SkillsStatus,
+    pub(super) skills: Inspected,
     /// `null` when no plugins are declared or the target only receives the
     /// plugins' bundled skills (already covered by `skills`).
-    pub(super) plugins: Option<VendorStatus>,
+    pub(super) plugins: Option<Inspected>,
 }
 
 impl StatusReport {
@@ -186,18 +186,20 @@ pub(super) fn collect(scope: &Scope) -> Result<StatusReport> {
         // Inspect even when nothing is expected: skills left behind in an
         // spm-owned dir (e.g. after switching to a branch that declares none)
         // are still loaded by the tool and must surface as stale.
-        let skills = SkillsStatus {
+        let skills = Inspected {
             status: vendor.status(scope, &expected)?,
             expected: !expected.is_empty(),
         };
         // Full-plugin materialization is only meaningful for vendors that
         // register plugins beyond their bundled skills (currently Claude);
-        // `status_plugins` returns `None` for the rest.
-        let plugins = if declared_plugins.is_empty() {
-            None
-        } else {
-            vendor.status_plugins(scope, &declared_plugins)?
-        };
+        // `status_plugins` returns `None` for the rest. Inspected even with
+        // none declared, so a leftover registered plugin surfaces as stale.
+        let plugins = vendor
+            .status_plugins(scope, &declared_plugins)?
+            .map(|status| Inspected {
+                status,
+                expected: !declared_plugins.is_empty(),
+            });
         targets.push(TargetStatus {
             target: target.clone(),
             skills,
@@ -245,7 +247,8 @@ pub(super) fn collect(scope: &Scope) -> Result<StatusReport> {
     } else {
         report.unlocked_plugins.is_empty()
             && !targets.iter().any(|t| {
-                incomplete_here(Some(&t.skills.status)) || incomplete_here(t.plugins.as_ref())
+                incomplete_here(Some(&t.skills.status))
+                    || incomplete_here(t.plugins.as_ref().map(|p| &p.status))
             })
     };
     report.targets = targets;
@@ -330,7 +333,7 @@ fn render_text(report: &StatusReport) {
                 println!("  ! {note}");
             }
         }
-        if let Some(st) = &t.plugins {
+        if let Some(st) = t.plugins.as_ref().filter(|p| p.expected).map(|p| &p.status) {
             println!(
                 "\n[{target}] plugins  {}/{} installed  {}",
                 st.present.len(),

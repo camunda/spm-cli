@@ -13858,6 +13858,25 @@ fn doctor_flags_a_dangling_store_symlink() {
     assert!(!out.status.success());
 }
 
+/// A regular file as SPM_HOME can't hold a store, however permissive.
+#[cfg(unix)]
+#[test]
+fn doctor_flags_an_spm_home_that_is_not_a_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    std::fs::remove_dir_all(&sb.spm_home).ok();
+    std::fs::write(&sb.spm_home, "").unwrap();
+    std::fs::set_permissions(&sb.spm_home, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(!ok, "{doc:#}");
+    let c = check(&doc, "store", "error");
+    assert!(
+        c["message"].as_str().unwrap().contains("not a directory"),
+        "{c}"
+    );
+}
+
 /// Deletes the store checkout whose directory name starts with `prefix`.
 fn remove_store_checkout(sb: &Sandbox, prefix: &str) {
     let entry = std::fs::read_dir(sb.spm_home.join("store"))
@@ -14318,6 +14337,36 @@ fn doctor_flags_leftover_skills_when_nothing_is_declared() {
     assert!(ok, "{doc:#}");
     let c = check(&doc, "materialized", "warn");
     assert!(c["details"].to_string().contains("greet"), "{c}");
+    check(&doc, "gitignore", "ok");
+
+    // That branch's .gitignore may lack the entry: the leftovers still need it.
+    std::fs::write(sb.project.join(".gitignore"), "target/\n").unwrap();
+    let (_, doc) = doctor(&sb, &[]);
+    let c = check(&doc, "gitignore", "warn");
+    assert!(c["details"].to_string().contains("copilot"), "{c}");
+}
+
+/// Likewise a full plugin left registered after switching to a branch that
+/// declares no plugins is still loaded by Claude.
+#[test]
+fn doctor_flags_leftover_plugins_when_none_are_declared() {
+    let sb = Sandbox::new();
+    install_skill_and_plugin(&sb);
+    write_manifest(&sb, r#"{"targets":["claude"]}"#);
+    std::fs::remove_file(sb.project.join("ai.lock")).unwrap();
+
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(ok, "{doc:#}");
+    let c = check(&doc, "materialized", "warn");
+    assert!(c["details"].to_string().contains("ds"), "{c}");
+    assert!(!c["details"].to_string().contains(".claude-plugin"), "{c}");
+    let out = sb.spm(&["status", "--json"]);
+    assert!(json_doc(&out)["targets"][0]["plugins"].is_null());
+
+    sb.ok(&["install"]);
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(ok, "{doc:#}");
+    check(&doc, "materialized", "ok");
 }
 
 /// A link to a name no longer declared is ignored by every sync, so its

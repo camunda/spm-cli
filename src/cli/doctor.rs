@@ -293,6 +293,20 @@ fn check_store() -> Check {
         // existing ancestor.
         let parent = store.ancestors().skip(1).find(|a| a.exists());
         if let Some(parent) = parent {
+            if !parent.is_dir() {
+                return Check::error(
+                    "store",
+                    format!(
+                        "store {}{from} can't be created: {} is not a directory",
+                        store.display(),
+                        parent.display()
+                    ),
+                )
+                .fix(format!(
+                    "remove {} or point SPM_HOME elsewhere",
+                    parent.display()
+                ));
+            }
             if let Ok(Some(false)) = crate::fsutil::can_create_in(parent) {
                 return Check::error(
                     "store",
@@ -507,7 +521,7 @@ fn materialization_checks(scope: &Scope, report: &status::StatusReport) -> Vec<C
     for t in &report.targets {
         for (what, st) in [
             ("skills", Some(&t.skills.status)),
-            ("plugins", t.plugins.as_ref()),
+            ("plugins", t.plugins.as_ref().map(|p| &p.status)),
         ] {
             let Some(st) = st else { continue };
             if !st.missing.is_empty() {
@@ -519,8 +533,9 @@ fn materialization_checks(scope: &Scope, report: &status::StatusReport) -> Vec<C
             }
             problems.extend(st.notes.iter().map(|n| format!("{}: {n}", t.target)));
             if !st.stale.is_empty() {
+                let kind = if what == "plugins" { " plugins" } else { "" };
                 stale.push(format!(
-                    "{}: no longer declared: {}",
+                    "{}: no longer declared{kind}: {}",
                     t.target,
                     st.stale.join(", ")
                 ));
@@ -542,9 +557,12 @@ fn materialization_checks(scope: &Scope, report: &status::StatusReport) -> Vec<C
     }];
     if !stale.is_empty() {
         checks.push(
-            Check::warn("materialized", "targets hold skills spm no longer manages")
-                .details(stale)
-                .fix(install),
+            Check::warn(
+                "materialized",
+                "targets hold skills or plugins spm no longer manages",
+            )
+            .details(stale)
+            .fix(install),
         );
     }
     if !report.collisions.is_empty() {
@@ -597,7 +615,12 @@ fn check_gitignore(
             continue;
         }
         relevant = true;
-        match gitignore::missing(root, &v.gitignore_entries(&names)) {
+        // Leftover skills (e.g. from another branch) need their entries too.
+        let mut owned = names.clone();
+        if let Some(t) = report.targets.iter().find(|t| &t.target == target) {
+            owned.extend(t.skills.status.stale.iter().cloned());
+        }
+        match gitignore::missing(root, &v.gitignore_entries(&owned)) {
             Ok(m) => missing.extend(m.into_iter().map(|e| format!("{target}: {e}"))),
             Err(e) => missing.push(format!("{target}: {e:#}")),
         }

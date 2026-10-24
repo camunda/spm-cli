@@ -239,10 +239,11 @@ impl Vendor for Claude {
         expected: &[String],
     ) -> Result<Option<super::VendorStatus>> {
         let market_dir = plugins_managed_dir(scope)?;
-        // Each plugin is copied verbatim to `<market_dir>/<manifest-name>/`.
-        // Stale detection is disabled: `.claude-plugin/` (the marketplace
-        // manifest) lives directly under `market_dir` and is not a plugin.
-        let mut st = super::classify(&market_dir, expected, false);
+        // Each plugin is copied verbatim to `<market_dir>/<name>/`. The dir is
+        // spm-owned, so any other subdir is stale — except `.claude-plugin/`
+        // (the marketplace manifest), which is not a plugin.
+        let mut st = super::classify(&market_dir, expected, true);
+        st.stale.retain(|n| n != ".claude-plugin");
         // Verify the settings registration, mirroring the skills marketplace
         // check: a deleted `.spm/claude-plugins` or a fresh worktree that
         // inherited another checkout's absolute path both surface here.
