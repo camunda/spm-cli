@@ -495,7 +495,8 @@ It checks:
 
 - **git** is installed (and its version) and the **store** (`$SPM_HOME/store`)
   is writable by you (asked of the OS, never by writing; not checked on
-  Windows) — a store that doesn't exist yet is fine if it can be created, but
+  Windows) — a store that doesn't exist yet is fine if it can be created (a
+  relative `SPM_HOME` in the working directory), but
   a dangling symlink in its place or on its path, or a non-directory
   `SPM_HOME`, is an error;
 - **`ai.json`** exists, is valid and declares known **targets**;
@@ -534,7 +535,10 @@ It checks:
 the other protocol, the fix names the flag to pass. Without `--online` doctor
 never contacts a remote.
 
-Doctor never writes `ai.json`, `ai.lock`, links, the store or any target.
+Doctor never writes `ai.json`, `ai.lock`, links, the store or any target. It
+reads them under spm's shared state lock; if it can't take that lock, it reports
+a `state-lock` error and runs only the checks that read none of them (git, the
+store, the content scan setting and the machine policy).
 **Exits non-zero only when a check is an error** — warnings alone exit 0 — so it
 also works as a CI or git-hook gate. `--json` prints the checks as a
 [JSON document](#spm-doctor-json).

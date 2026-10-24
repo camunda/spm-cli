@@ -968,13 +968,20 @@ fn verified_lock_drift(
             .unwrap_or_default()
     };
     // The walk writes both lists sorted and deduplicated (see
-    // `transitive::expand`), so additions are only tolerated in that form.
+    // `transitive::expand`) and omits them when empty, so additions are only
+    // tolerated in that form.
     fn strict<T: Ord>(v: &[T]) -> bool {
         v.windows(2).all(|w| w[0] < w[1])
     }
     let canonical = |disk: &Value| {
-        serde_json::from_value::<LockedSkill>(disk.clone())
-            .is_ok_and(|l| strict(&l.requested_by) && strict(&l.also_satisfies))
+        let present_empty = ["requested_by", "also_satisfies"].iter().any(|k| {
+            disk.get(k)
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty)
+        });
+        !present_empty
+            && serde_json::from_value::<LockedSkill>(disk.clone())
+                .is_ok_and(|l| strict(&l.requested_by) && strict(&l.also_satisfies))
     };
     for (name, entry) in &lock.skills {
         let Some(disk) = on_disk["skills"].get(name) else {

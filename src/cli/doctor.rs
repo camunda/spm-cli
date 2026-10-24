@@ -154,15 +154,18 @@ fn diagnose(scope: &Scope, root: &Path, online: bool) -> Vec<Check> {
     }
 
     // Taken once, before reading ai.json, like every command that reads link
-    // state (shared machine-wide: doctor activates no link).
+    // state (shared machine-wide: doctor activates no link). Without it a
+    // concurrent command may be rewriting that state, so only the checks that
+    // read none of it still run.
     let state_lock = match StateLock::acquire(scope, false) {
-        Ok(lock) => Some(lock),
+        Ok(lock) => lock,
         Err(e) => {
             checks.push(Check::error(
                 "state-lock",
                 format!("can't lock spm state: {e:#}"),
             ));
-            None
+            checks.push(check_machine_policy());
+            return checks;
         }
     };
 
@@ -214,8 +217,8 @@ fn diagnose(scope: &Scope, root: &Path, online: bool) -> Vec<Check> {
         } else {
             Check::ok("lockfile", "no ai.lock (nothing declared yet)")
         });
-    } else if let Some(lock) = &state_lock {
-        match sync::check_lock(scope, &manifest, lock) {
+    } else {
+        match sync::check_lock(scope, &manifest, &state_lock) {
             Ok(verdict) => checks.extend(lock_checks(scope, verdict)),
             Err(e) => checks.push(
                 Check::error("lockfile", format!("ai.lock can't be checked: {e:#}")).fix(format!(
@@ -276,8 +279,16 @@ fn check_store() -> Check {
     if !store.exists() {
         // `spm install` creates it, if it can create it in its nearest
         // occupied ancestor (the store path itself may be occupied too).
+        // A relative store's last ancestor is "", i.e. the working directory.
         let occupied = store
             .ancestors()
+            .map(|a| {
+                if a.as_os_str().is_empty() {
+                    Path::new(".")
+                } else {
+                    a
+                }
+            })
             .find(|a| std::fs::symlink_metadata(a).is_ok());
         if let Some(parent) = occupied {
             if !parent.exists() {

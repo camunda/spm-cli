@@ -13839,6 +13839,54 @@ fn doctor_flags_a_missing_store_that_cannot_be_created() {
     );
 }
 
+/// A relative `SPM_HOME` resolves against the working directory, so a
+/// missing one is only creatable if that directory is writable.
+#[cfg(unix)]
+#[test]
+fn doctor_flags_a_missing_relative_store_in_a_read_only_cwd() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    let set = |mode| std::fs::set_permissions(&sb.project, std::fs::Permissions::from_mode(mode));
+    set(0o555).unwrap();
+    let mut cmd = sb.command(&["doctor", "--json"]);
+    cmd.env("SPM_HOME", "cache");
+    let (_, doc) = doctor_json(cmd);
+    set(0o755).unwrap();
+    let c = check(&doc, "store", "error");
+    assert!(
+        c["message"].as_str().unwrap().contains("can't be created"),
+        "{c}"
+    );
+}
+
+/// Without the state lock, a concurrent command may be rewriting ai.json,
+/// ai.lock, links or target output, so doctor must not diagnose them; checks
+/// that read none of that still run.
+#[test]
+fn doctor_skips_state_checks_when_the_state_lock_fails() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let lock = sb.spm_home.join("links.lock");
+    std::fs::remove_file(&lock).ok();
+    std::fs::create_dir_all(&lock).unwrap();
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(!ok, "{doc:#}");
+    check(&doc, "state-lock", "error");
+    check(&doc, "machine-policy", "ok");
+    for id in [
+        "manifest",
+        "lockfile",
+        "links",
+        "materialized",
+        "gitignore",
+        "skills",
+    ] {
+        assert!(checks(&doc, id).is_empty(), "{id} ran unlocked: {doc:#}");
+    }
+}
+
 /// A dangling `store` symlink occupies the path, so install can't create the
 /// store there even when its parent is writable.
 #[cfg(unix)]
@@ -14177,33 +14225,48 @@ fn doctor_rejects_extra_top_level_lock_fields_when_a_root_is_not_in_the_store() 
 /// non-canonical list on a walked entry is drift even while another root's
 /// subtree is unwalked.
 #[test]
-fn doctor_rejects_non_canonical_requested_by_when_another_root_is_not_in_the_store() {
-    let sb = Sandbox::new();
-    let (alpha, beta) = (transitive_root(&sb, "alpha"), transitive_root(&sb, "beta"));
-    sb.ok(&["init", "--target", "copilot"]);
-    write_manifest(
-        &sb,
-        &format!(
-            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{"alpha":{{"git":"{alpha}","branch":"main"}},"beta":{{"git":"{beta}","branch":"main"}}}}}}"#
-        ),
-    );
-    sb.ok(&["install"]);
-    let lock: serde_json::Value = serde_json::from_str(&sb.read("ai.lock")).unwrap();
-    let child = lock["skills"]
-        .as_object()
-        .unwrap()
-        .iter()
-        .find(|(_, l)| l["requested_by"] == serde_json::json!(["beta"]))
-        .map(|(n, _)| n.clone())
-        .unwrap();
-    remove_store_checkout(&sb, "alpha-");
-    edit_lock(&sb, |l| {
-        l["skills"][child.as_str()]["requested_by"] = serde_json::json!(["beta", "beta"])
-    });
-    let (ok, doc) = doctor(&sb, &[]);
-    assert!(!ok, "{doc:#}");
-    check(&doc, "lockfile", "error");
-    assert!(!sb.spm(&["install", "--locked"]).status.success());
+fn doctor_rejects_non_canonical_lists_when_another_root_is_not_in_the_store() {
+    // A duplicated requester, and an explicitly empty list (spm omits empty
+    // lists), on the transitive child and on the cached direct root.
+    let cases: [(&str, &str, serde_json::Value); 3] = [
+        ("child", "requested_by", serde_json::json!(["beta", "beta"])),
+        ("child", "also_satisfies", serde_json::json!([])),
+        ("beta", "also_satisfies", serde_json::json!([])),
+    ];
+    for (target, key, value) in cases {
+        let sb = Sandbox::new();
+        let (alpha, beta) = (transitive_root(&sb, "alpha"), transitive_root(&sb, "beta"));
+        sb.ok(&["init", "--target", "copilot"]);
+        write_manifest(
+            &sb,
+            &format!(
+                r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{"alpha":{{"git":"{alpha}","branch":"main"}},"beta":{{"git":"{beta}","branch":"main"}}}}}}"#
+            ),
+        );
+        sb.ok(&["install"]);
+        let lock: serde_json::Value = serde_json::from_str(&sb.read("ai.lock")).unwrap();
+        let child = lock["skills"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .find(|(_, l)| l["requested_by"] == serde_json::json!(["beta"]))
+            .map(|(n, _)| n.clone())
+            .unwrap();
+        let name = if target == "child" {
+            child.as_str()
+        } else {
+            target
+        };
+        remove_store_checkout(&sb, "alpha-");
+        edit_lock(&sb, |l| l["skills"][name][key] = value.clone());
+        let (ok, doc) = doctor(&sb, &[]);
+        assert!(!ok, "{name}.{key}: {doc:#}");
+        check(&doc, "lockfile", "error");
+        assert!(
+            !sb.spm(&["install", "--locked"]).status.success(),
+            "{name}.{key}"
+        );
+    }
 }
 
 #[test]
