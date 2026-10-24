@@ -17,7 +17,7 @@ spm unlink <name>|--all [-g]                       # drop link override(s), rest
 spm install [-g] [--locked]                        # rebuild from ai.lock (after clone); alias: i; --locked fails if ai.lock is out of sync (CI)
 spm list [-g] [--json]                             # show skills + pinned commits; alias: ls
 spm status [-g] [--json]                           # check skills are materialized in this checkout
-spm outdated [name] [-g] [--json] [--exit-code]       # report newer upstream versions (read-only)
+spm outdated [name] [-g] [--json] [--exit-code]    # report newer upstream versions (read-only)
 spm clean [-g]                                     # remove generated vendor config
 spm prune [--yes]                                  # wipe the global fetch cache ($SPM_HOME/store, default ~/.spm/store)
 spm scan [path] [--within <dir>] [--json]          # scan skill content for suspicious patterns (default: .)
@@ -495,7 +495,7 @@ plugin is scanned from its store checkout — fetched only when its pin is new o
 the cached checkout is missing or stale, so a cached dependency is scanned with
 no network access — and *before* it is copied into any agent-discovered
 directory, by every command that syncs skills:
-`spm add`, `spm install`, `spm update`, `spm remove`, and `spm target add`
+`spm add`, `spm install`, `spm update`, `spm remove`, `spm link`, `spm unlink`, and `spm target add`
 (each scans every dependency in `ai.json`). High/critical findings abort the command (nothing is materialized
 and `ai.lock` is not written); medium/low findings are surfaced as warnings.
 
@@ -691,7 +691,7 @@ of hanging on a prompt (helpers and ssh-agent still work).
 By default spm uses the URL exactly as you gave it: an SSH URL is contacted over
 SSH and an HTTPS URL over HTTPS, and a failure is reported as-is. Two opt-in
 flags (accepted by the commands that can contact a remote: `add`, `install`,
-`update`, `remove` and `target add`) help when your preferred
+`update`, `remove`, `link`, `unlink`, `target add` and `outdated`) help when your preferred
 protocol isn't set up on the current machine, e.g. no SSH key in CI, or HTTPS
 blocked but SSH allowed:
 

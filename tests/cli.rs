@@ -4848,7 +4848,8 @@ fn shipped_skill_dir() -> PathBuf {
 }
 
 /// Flags an `spm … --help` screen advertises, as `(long, short)` pairs (for
-/// example `("--global", Some("-g"))`), minus clap's own `--help`/`--version`.
+/// example `("--global", Some("-g"))`), minus clap's own `--help` and `-V, --version`
+/// (a value-taking `--version <RANGE>`, as on `spm add`, is kept).
 /// Only the flag column is parsed, so `--foo` mentioned in a description is not
 /// mistaken for a flag.
 fn help_flags(sb: &Sandbox, args: &[&str]) -> Vec<(String, Option<String>)> {
@@ -4866,7 +4867,9 @@ fn help_flags(sb: &Sandbox, args: &[&str]) -> Vec<(String, Option<String>)> {
         for tok in line.split_whitespace() {
             let tok = tok.trim_end_matches(',');
             if let Some(long) = tok.strip_prefix("--") {
-                if long != "help" && long != "version" {
+                let builtin =
+                    long == "help" || (long == "version" && short.as_deref() == Some("-V"));
+                if !builtin {
                     flags.push((tok.to_string(), short.take()));
                 }
                 break;
@@ -5046,6 +5049,72 @@ fn assert_skill_documents_cli(sb: &Sandbox, text: &str) {
                 "`{heading}` section does not mention `{long}` (from `spm {} --help`)",
                 args.join(" ")
             );
+        }
+    }
+}
+
+/// Drift guard: the command overview block in the README and the CLI reference
+/// must list every leaf command with every flag it accepts, so a new command or
+/// flag can't silently go undocumented there. `--protocol`/`--protocol-fallback`
+/// are shared by many commands and documented in prose instead.
+#[test]
+fn command_overviews_document_every_command_and_flag() {
+    let sb = Sandbox::new();
+    let leaves = leaf_commands(&sb, &[]);
+    assert!(
+        leaves.len() >= 11 && leaves.contains(&vec!["target".to_string(), "add".to_string()]),
+        "parsed too few commands: {leaves:?}"
+    );
+    // `add --version <RANGE>` is a real selector, unlike clap's built-in `-V, --version`.
+    assert!(
+        help_flags(&sb, &["add"])
+            .iter()
+            .any(|(l, _)| l == "--version"),
+        "help_flags dropped `add --version <RANGE>`"
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for (file, heading) in [
+        ("README.md", "## Commands"),
+        ("docs/reference/cli-commands.md", "# CLI Commands"),
+    ] {
+        let text = std::fs::read_to_string(root.join(file))
+            .unwrap()
+            .replace("\r\n", "\n");
+        let after = &text[text
+            .find(&format!("{heading}\n"))
+            .unwrap_or_else(|| panic!("{file} has no `{heading}` heading"))..];
+        let block = after
+            .split("```bash\n")
+            .nth(1)
+            .and_then(|b| b.split("\n```").next())
+            .unwrap_or_else(|| panic!("{file}: no ```bash block under `{heading}`"));
+        // One entry per `spm …` line, plus its indented continuation lines.
+        let mut entries: Vec<String> = Vec::new();
+        for line in block.lines() {
+            match entries.last_mut() {
+                Some(e) if line.starts_with(' ') => e.push_str(line),
+                _ => entries.push(line.to_string()),
+            }
+        }
+        for path in &leaves {
+            let prefix = format!("spm {} ", path.join(" "));
+            let entry = entries
+                .iter()
+                .find(|e| e.starts_with(&prefix))
+                .unwrap_or_else(|| panic!("{file}: command overview lacks `{}`", prefix.trim()));
+            let args: Vec<&str> = path.iter().map(String::as_str).collect();
+            for (long, short) in help_flags(&sb, &args) {
+                if long == "--protocol" || long == "--protocol-fallback" {
+                    continue;
+                }
+                let documented = entry.contains(&long)
+                    || short.is_some_and(|s| entry.contains(&format!("[{s}]")));
+                assert!(
+                    documented,
+                    "{file}: `{}` overview line does not mention `{long}`",
+                    prefix.trim()
+                );
+            }
         }
     }
 }

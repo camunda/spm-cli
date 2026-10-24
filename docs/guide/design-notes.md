@@ -12,9 +12,12 @@ The principles behind how spm is built. For the day-to-day model, see
 
 ## `SPM_HOME`
 
-`SPM_HOME` overrides the store root (default `~/.spm`, which holds only the fetch
-cache). It is primarily used by tests. **Vendor output is always project-local**
-and is *not* affected by `SPM_HOME`.
+`SPM_HOME` overrides spm's home (default `~/.spm`). It is primarily used by
+tests. It holds the fetch cache (`store/`), the [global-scope](/guide/global-skills)
+`ai.json`/`ai.lock`, machine-local `spm link` overrides (`links/`, `links.json`),
+the default `policy.json`, and the global Claude marketplace (`claude-global/`).
+**Project-scope vendor output is always project-local** and is *not* affected by
+`SPM_HOME`.
 
 ## `SPM_POLICY`
 
@@ -69,7 +72,8 @@ the checkout are detected and skipped rather than followed forever.
 
 ## Contributing
 
-`make check` runs the full CI gate locally (`fmt-check` + `clippy` + `test`). A
+`make check` runs the full CI gate locally (`fmt-check` + `clippy` + `test` +
+`test-action`). A
 pre-commit hook (fmt + clippy) installs itself automatically via `cargo-husky` —
 run `cargo test` (or `cargo build`) once after cloning. Bypass a single commit
 with `git commit --no-verify`.

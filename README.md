@@ -242,7 +242,7 @@ instead of hanging on a prompt (helpers and ssh-agent still work).
 By default spm uses the URL exactly as you gave it: an SSH URL is contacted over
 SSH and an HTTPS URL over HTTPS, and a failure is reported as-is. Two opt-in
 flags (accepted by the commands that can contact a remote: `add`, `install`,
-`update`, `remove`, `target add` and `outdated`) help when your preferred
+`update`, `remove`, `link`, `unlink`, `target add` and `outdated`) help when your preferred
 protocol isn't set up on the current machine, e.g. no SSH key in CI, or HTTPS
 blocked but SSH allowed:
 
@@ -336,22 +336,31 @@ make install PREFIX=~/.local  # or a custom prefix
 ```bash
 spm init [--target amp|claude|cline|codex|copilot|cursor|gemini|windsurf ...] [-g]  # scaffold ai.json (repeatable / comma-separated)
 spm add <git> [--tag|--branch|--commit <v>|--version "<range>"] \  # add + install a skill (no selector = default branch; github.com/owner/repo@ref also works)
-        [--path <subdir>] [--name <local-name>] [--all] [--lock-only] [-g]  # --all: add every skill under --path
+        [--path <subdir>] [--name <local-name>] [--all] [--force] [--lock-only] [-g]  # --all: add every skill under --path
         [--plugin]                                 # --plugin: add a full plugin (see "Full plugins")
 spm target add [vendor ...] [-g]                   # add target vendor(s); no arg = pick interactively
 spm target remove <vendor ...> [-g]               # drop target vendor(s) + clean their output; alias: rm
 spm remove <name> [--plugin] [-g]                  # drop a skill (or a plugin with --plugin); alias: rm
-spm update [name] [--lock-only] [-g]                # re-resolve branches/tags to latest; --lock-only: write ai.lock only
+spm update [name] [--lock-only] [-g]               # re-resolve branches/tags to latest; --lock-only: write ai.lock only
 spm link <name> <dir> [-g]                         # develop a declared skill/plugin from a local dir (machine-local override)
 spm unlink <name>|--all [-g]                       # drop link override(s), restore the locked version
 spm install [-g] [--locked]                        # rebuild from ai.lock (after clone); alias: i; --locked fails if ai.lock is out of sync (CI)
 spm list [-g] [--json]                             # show skills + pinned commits; alias: ls
 spm status [-g] [--json]                           # check skills are materialized in this checkout
-spm outdated [name] [-g] [--json] [--exit-code]       # report newer upstream versions (read-only)
+spm outdated [name] [-g] [--json] [--exit-code]    # report newer upstream versions (read-only)
 spm clean [-g]                                     # remove generated vendor config
 spm prune [--yes]                                  # wipe the global fetch cache ($SPM_HOME/store, default ~/.spm/store)
 spm scan [path] [--within <dir>] [--json]          # scan skill content for suspicious patterns (default: .)
 ```
+
+Four commands have short aliases that behave identically, including `-g`:
+`spm i` (`install`), `spm rm` (`remove`), `spm ls` (`list`) and `spm target rm`
+(`target remove`). `add`, `install`, `update`, `remove`, `link`, `unlink`,
+`target add` and `outdated` also accept `--protocol ssh|https` and
+`--protocol-fallback` (see [Protocol override](#protocol-override-and-opt-in-fallback)).
+`add --force` overwrites an existing entry of the same name instead of erroring.
+Run `spm <command> --help` for the authoritative, version-specific usage; the
+[CLI reference](docs/reference/cli-commands.md) covers every flag.
 
 `list`, `status`, `outdated` and `scan` accept `--json` for scripts, CI and agents: stdout
 then holds exactly one JSON document with a top-level `"schemaVersion": 1` and
@@ -410,7 +419,7 @@ directory. It flags:
 - **Auto-run triggers** — `postinstall` scripts, git hooks, bundled `Makefile`s.
 
 **High/critical findings block** every command that syncs skills (`add`, `install`,
-`update`, `remove` and `target add`). To review a source (or
+`update`, `remove`, `link`, `unlink` and `target add`). To review a source (or
 gate it in CI) run it standalone — it exits non-zero on any blocking finding:
 
 ```bash
@@ -453,11 +462,12 @@ Renovate alternative.
 ## Global skills (`-g` / `--global`)
 
 By default every command operates on the **project** in the current directory.
-Scope-aware commands (`init`, `add`, `remove`, `update`, `install`, `list`,
-`status`, `outdated`, `clean`) accept `-g` (`--global`) to instead manage a **user-global**
-set of skills that is available to your AI tools in *every* project. `spm target
-add`, `spm prune`, and `spm scan` aren't scope-aware: `prune` always wipes the
-shared global fetch cache and `scan` always operates on a path.
+Scope-aware commands (`init`, `add`, `remove`, `update`, `install`, `link`,
+`unlink`, `list`, `status`, `outdated`, `clean`, `target add`, `target remove`)
+accept `-g` (`--global`) to instead manage a **user-global** set of skills that
+is available to your AI tools in *every* project. `spm prune` and `spm scan`
+aren't scope-aware: `prune` always wipes the shared global fetch cache and
+`scan` always operates on a path.
 
 ```bash
 spm init -g --target copilot                       # create the global manifest ($SPM_HOME/ai.json)
@@ -553,13 +563,14 @@ To see what each harness actually loaded: `claude plugin list` /
 ## Design notes
 
 - **Cross-OS**: shells out to the system `git` (no libgit2 build deps); no symlinks; all paths via `std::path`. Runs on Linux, macOS, Windows.
-- **`SPM_HOME`** overrides the store root (default `~/.spm`, holding only the fetch cache) — used by tests. Vendor output is always project-local and is not affected by `SPM_HOME`.
+- **`SPM_HOME`** overrides spm's home (default `~/.spm`) — used by tests. It holds the fetch cache (`store/`), the global-scope `ai.json`/`ai.lock`, machine-local `spm link` overrides (`links/`, `links.json`), the default `policy.json`, and the global Claude marketplace (`claude-global/`). Project-scope vendor output is always project-local and is not affected by `SPM_HOME`.
 - **`SPM_POLICY`** names the machine source-policy file (default `$SPM_HOME/policy.json`); see [`allowedSources`](#source-allowlist-allowedsources).
 - **Vendor adapters**: adding a target means implementing one `Vendor` trait (`src/vendor/`). `claude` assembles a plugin-marketplace layout (`marketplace.json` → `plugin.json` → `skills/<name>/SKILL.md`) into the gitignored project-local `.spm/claude/` and points to it; `copilot` copies skills into the gitignored project-local `.agents/skills/spm-managed-skills/`; the remaining targets (`gemini`, `codex`, `cursor`, `cline`, `windsurf`, `amp`) copy skills one level deep into a shared, team-committable skills dir via the generic `src/vendor/shareddir.rs` adapter — each is just a config row naming its project/global dirs (which may differ, e.g. Windsurf's `~/.codeium/windsurf/skills` and Amp's `~/.config/agents/skills`). All share the `src/vendor/dirskills.rs` copy/remove helpers and keep their materialized files out of VCS via the shared `src/gitignore.rs` helper.
 
 ## Development
 
-`make check` runs the full CI gate locally (`fmt-check` + `clippy` + `test`).
+`make check` runs the full CI gate locally (`fmt-check` + `clippy` + `test` +
+`test-action`).
 
 To cut a release, bump the crate version (the single source of truth for
 crates.io, npm, and the GitHub Release) with `make bump` — `PART=patch|minor|major`
