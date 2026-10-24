@@ -511,7 +511,8 @@ It checks:
 - what is **installed in each target**, as [`spm status`](#spm-status) reports it:
   missing skills/plugins or a stale Claude marketplace pointer are errors; skills
   and plugins spm no longer manages (even with nothing declared, e.g. after a
-  branch switch) and names [installed in both scopes](#scope-project-default-vs-global-g) are
+  branch switch; in a dir shared with your own skills, only those spm recorded
+  installing) and names [installed in both scopes](#scope-project-default-vs-global-g) are
   warnings;
 - project scope: the **`.gitignore`** entries `spm install` adds are present
   (also after an install with nothing declared, e.g. Claude's empty marketplace), and

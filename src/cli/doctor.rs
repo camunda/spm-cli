@@ -464,8 +464,12 @@ fn check_links(scope: &Scope, manifest: &Manifest, links: Result<Links>) -> Vec<
                 Err(e) => Check::error("links", format!("{e:#}")).fix(unlink),
                 Ok(linked) => {
                     let display = linked.as_ref().map(|l| l.display.as_str()).unwrap_or("");
-                    // Resolving only canonicalizes it: install must also read it.
-                    match linked.as_ref().map(|l| std::fs::read_dir(&l.dir)) {
+                    // Resolving only canonicalizes it: install must also list
+                    // it and read inside it (`dir/.` needs search permission).
+                    match linked
+                        .as_ref()
+                        .map(|l| std::fs::read_dir(&l.dir).and(std::fs::read_dir(l.dir.join("."))))
+                    {
                         Some(Err(e)) => Check::error(
                             "links",
                             format!("`{name}` is linked to {display}, which can't be read: {e}"),
@@ -608,18 +612,24 @@ fn check_gitignore(
         // Even with nothing declared, an install may have written output
         // (e.g. Claude's empty marketplace) that must stay ignored.
         let has_output = || {
-            v.clean_paths(scope, &[])
-                .is_ok_and(|paths| paths.iter().any(|p| p.exists()))
+            [v.clean_paths(scope, &[]), v.plugin_clean_paths(scope, &[])]
+                .into_iter()
+                .flatten()
+                .flatten()
+                .any(|p| p.exists())
         };
-        if !declares_any && !has_output() {
+        // Leftover skills (e.g. from another branch) need their entries too.
+        let stale = report
+            .targets
+            .iter()
+            .find(|t| &t.target == target)
+            .map(|t| t.skills.status.stale.clone())
+            .unwrap_or_default();
+        if !declares_any && stale.is_empty() && !has_output() {
             continue;
         }
         relevant = true;
-        // Leftover skills (e.g. from another branch) need their entries too.
-        let mut owned = names.clone();
-        if let Some(t) = report.targets.iter().find(|t| &t.target == target) {
-            owned.extend(t.skills.status.stale.iter().cloned());
-        }
+        let owned: Vec<String> = names.iter().cloned().chain(stale).collect();
         match gitignore::missing(root, &v.gitignore_entries(&owned)) {
             Ok(m) => missing.extend(m.into_iter().map(|e| format!("{target}: {e}"))),
             Err(e) => missing.push(format!("{target}: {e:#}")),

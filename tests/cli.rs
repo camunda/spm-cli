@@ -14363,10 +14363,62 @@ fn doctor_flags_leftover_plugins_when_none_are_declared() {
     let out = sb.spm(&["status", "--json"]);
     assert!(json_doc(&out)["targets"][0]["plugins"].is_null());
 
+    // Only the plugin tree left, unignored: it still needs `.spm/`.
+    std::fs::remove_dir_all(sb.project.join(".spm/claude")).unwrap();
+    std::fs::write(sb.project.join(".gitignore"), "target/\n").unwrap();
+    let (_, doc) = doctor(&sb, &[]);
+    let c = check(&doc, "gitignore", "warn");
+    assert_eq!(c["details"], serde_json::json!(["claude: .spm/"]), "{c}");
+
     sb.ok(&["install"]);
     let (ok, doc) = doctor(&sb, &[]);
     assert!(ok, "{doc:#}");
     check(&doc, "materialized", "ok");
+}
+
+/// A shared skills dir (Codex's `.agents/skills/`) also holds the user's own
+/// skills, so leftovers there are only what spm recorded installing.
+#[test]
+fn doctor_flags_leftover_shared_dir_skills_but_not_user_skills() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let mine = sb.project.join(".agents/skills/mine");
+    std::fs::create_dir_all(&mine).unwrap();
+    std::fs::write(
+        mine.join("SKILL.md"),
+        "---\nname: mine\ndescription: M.\n---\n",
+    )
+    .unwrap();
+    write_manifest(&sb, r#"{"targets":["codex"]}"#);
+    std::fs::remove_file(sb.project.join("ai.lock")).unwrap();
+    std::fs::write(sb.project.join(".gitignore"), "target/\n").unwrap();
+
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(ok, "{doc:#}");
+    let c = check(&doc, "materialized", "warn");
+    assert_eq!(
+        c["details"],
+        serde_json::json!(["codex: no longer declared: greet"]),
+        "{c}"
+    );
+    let c = check(&doc, "gitignore", "warn");
+    assert_eq!(
+        c["details"],
+        serde_json::json!(["codex: .agents/skills/greet/"]),
+        "{c}"
+    );
+
+    sb.ok(&["install"]);
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(ok, "{doc:#}");
+    assert!(
+        checks(&doc, "materialized")
+            .iter()
+            .all(|c| c["status"] == "ok"),
+        "{doc:#}"
+    );
+    assert!(mine.exists());
 }
 
 /// A link to a name no longer declared is ignored by every sync, so its
@@ -14404,17 +14456,20 @@ fn doctor_flags_an_unreadable_linked_dir() {
     let dev = local_skill_checkout(&sb, "dev", "LOCAL");
     sb.ok(&["link", "greet", "../dev"]);
     let set = |mode| std::fs::set_permissions(&dev, std::fs::Permissions::from_mode(mode));
-    set(0o000).unwrap();
-    let (ok, doc) = doctor(&sb, &[]);
-    let install_ok = sb.spm(&["install"]).status.success();
-    set(0o755).unwrap();
-    assert!(!install_ok);
-    assert!(!ok, "{doc:#}");
-    let c = check(&doc, "links", "error");
-    assert!(
-        c["message"].as_str().unwrap().contains("can't be read"),
-        "{c}"
-    );
+    // 0400 can be listed but not searched, so its files can't be read.
+    for mode in [0o000, 0o400] {
+        set(mode).unwrap();
+        let (ok, doc) = doctor(&sb, &[]);
+        let install_ok = sb.spm(&["install"]).status.success();
+        set(0o755).unwrap();
+        assert!(!install_ok, "{mode:o}");
+        assert!(!ok, "{mode:o}: {doc:#}");
+        let c = check(&doc, "links", "error");
+        assert!(
+            c["message"].as_str().unwrap().contains("can't be read"),
+            "{c}"
+        );
+    }
 }
 
 #[test]

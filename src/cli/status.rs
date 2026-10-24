@@ -2,6 +2,7 @@ use super::common::print_json;
 use crate::links::Links;
 use crate::lockfile::Lockfile;
 use crate::manifest::Manifest;
+use crate::owned::Ownership;
 use crate::paths;
 use crate::scope::Scope;
 use crate::vendor::{self, VendorStatus};
@@ -145,6 +146,7 @@ pub(super) fn collect(scope: &Scope) -> Result<StatusReport> {
     // would flag them as stale (present on disk, not declared). A linked
     // plugin contributes its working tree's bundled skills instead.
     let expected = links.effective_skill_names(&lock);
+    let ownership = Ownership::load(scope, &lock, &links.managed, &manifest.targets)?;
     let links = links
         .links
         .into_iter()
@@ -186,8 +188,22 @@ pub(super) fn collect(scope: &Scope) -> Result<StatusReport> {
         // Inspect even when nothing is expected: skills left behind in an
         // spm-owned dir (e.g. after switching to a branch that declares none)
         // are still loaded by the tool and must surface as stale.
+        let mut status = vendor.status(scope, &expected)?;
+        // A shared dir can't flag stale entries by listing it (the user's own
+        // skills live there too), but what spm recorded installing there and
+        // is no longer expected is its leftover all the same.
+        let dir = vendor.skills_dir(scope)?;
+        for name in ownership.for_target(target).skill_names() {
+            if !expected.contains(&name)
+                && !status.stale.contains(&name)
+                && dir.join(&name).is_dir()
+            {
+                status.stale.push(name);
+            }
+        }
+        status.stale.sort();
         let skills = Inspected {
-            status: vendor.status(scope, &expected)?,
+            status,
             expected: !expected.is_empty(),
         };
         // Full-plugin materialization is only meaningful for vendors that
