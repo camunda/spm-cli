@@ -898,9 +898,10 @@ pub(super) fn check_lock(
 
 /// The whole-lock backstop of `--locked` for a walk that left `unverified`
 /// subtrees unwalked: every entry the walk built must equal its `on_disk`
-/// counterpart, except that an unwalked subtree may add requesters (an
-/// unverified skill, or a pin the walk didn't reach) and `also_satisfies`
-/// evidence. Entries the walk didn't build are judged by the miss and stale
+/// counterpart, except that an unwalked subtree may add to a *skill* entry
+/// requesters (an unverified skill, or a pin the walk didn't reach) and
+/// `also_satisfies` evidence. Plugins are never walked, so they must match
+/// exactly. Entries the walk didn't build are judged by the miss and stale
 /// checks instead.
 fn verified_lock_drift(
     on_disk: &serde_json::Value,
@@ -933,7 +934,12 @@ fn verified_lock_drift(
             };
             let mut disk = disk.clone();
             let entry = serde_json::to_value(entry)?;
-            for key in ["requested_by", "also_satisfies"] {
+            let tolerated: &[&str] = if kind == "skill" {
+                &["requested_by", "also_satisfies"]
+            } else {
+                &[]
+            };
+            for &key in tolerated {
                 let (ours, theirs) = (list(&entry, key), list(&disk, key));
                 let added_by_unwalked = ours.iter().all(|v| theirs.contains(v))
                     && theirs

@@ -13815,6 +13815,30 @@ fn doctor_flags_a_store_the_current_user_cannot_write() {
     );
 }
 
+/// A missing store is fine only if `spm install` can create it.
+#[cfg(unix)]
+#[test]
+fn doctor_flags_a_missing_store_that_cannot_be_created() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    std::fs::remove_dir_all(sb.spm_home.join("store")).ok();
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(ok, "{doc:#}");
+    check(&doc, "store", "ok");
+
+    let set = |mode| std::fs::set_permissions(&sb.spm_home, std::fs::Permissions::from_mode(mode));
+    set(0o555).unwrap();
+    let (ok, doc) = doctor(&sb, &[]);
+    set(0o755).unwrap();
+    assert!(!ok, "{doc:#}");
+    let c = check(&doc, "store", "error");
+    assert!(
+        c["message"].as_str().unwrap().contains("can't be created"),
+        "{c}"
+    );
+}
+
 /// Deletes the store checkout whose directory name starts with `prefix`.
 fn remove_store_checkout(sb: &Sandbox, prefix: &str) {
     let entry = std::fs::read_dir(sb.spm_home.join("store"))
@@ -13918,18 +13942,25 @@ fn doctor_compares_verified_lock_entries_when_another_root_is_not_in_the_store()
         ),
     );
     sb.ok(&["install"]);
+    let installed = sb.read("ai.lock");
     remove_store_checkout(&sb, "alpha-");
     let (ok, doc) = doctor(&sb, &[]);
     assert!(ok, "only unverified: {doc:#}");
 
-    edit_lock(&sb, |l| {
-        l["plugins"]["ds"]["bundled_skills"] = serde_json::json!([])
-    });
-    let (ok, doc) = doctor(&sb, &[]);
-    assert!(!ok, "{doc:#}");
-    let c = check(&doc, "lockfile", "error");
-    assert!(c["details"].to_string().contains("`ds`"), "{c}");
-    assert!(!sb.spm(&["install", "--locked"]).status.success());
+    // Plugins are never walked, so no unwalked subtree explains a difference.
+    for (key, value) in [
+        ("bundled_skills", serde_json::json!([])),
+        ("also_satisfies", serde_json::json!(["branch:dev"])),
+    ] {
+        std::fs::write(sb.project.join("ai.lock"), &installed).unwrap();
+        edit_lock(&sb, |l| l["plugins"]["ds"][key] = value);
+        let (ok, doc) = doctor(&sb, &[]);
+        assert!(!ok, "{key}: {doc:#}");
+        let c = check(&doc, "lockfile", "error");
+        assert!(c["details"].to_string().contains("`ds`"), "{c}");
+        assert!(!sb.spm(&["install", "--locked"]).status.success());
+        remove_store_checkout(&sb, "alpha-");
+    }
 }
 
 #[test]
@@ -14105,6 +14136,29 @@ fn doctor_reports_links() {
     let (ok, doc) = doctor(&sb, &[]);
     assert!(!ok);
     assert_eq!(check(&doc, "links", "error")["fix"], "spm unlink greet");
+}
+
+/// A link to a name no longer declared is ignored by every sync, so its
+/// directory being gone is no error: it is only reported as dropped-able.
+#[test]
+fn doctor_warns_about_an_undeclared_link_whose_dir_is_gone() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let dev = local_skill_checkout(&sb, "dev", "LOCAL");
+    sb.ok(&["link", "greet", "../dev"]);
+    write_manifest(&sb, r#"{"targets":["copilot"]}"#);
+    std::fs::remove_dir_all(&dev).unwrap();
+    sb.ok(&["install"]);
+
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(ok, "{doc:#}");
+    let c = check(&doc, "links", "warn");
+    assert!(
+        c["message"].as_str().unwrap().contains("not declared"),
+        "{c}"
+    );
+    assert_eq!(c["fix"], "spm unlink greet");
 }
 
 /// A linked directory that still resolves but can't be read fails `spm

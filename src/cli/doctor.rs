@@ -259,7 +259,7 @@ fn check_git() -> Check {
 }
 
 /// The store root must be writable once `spm install` needs it. A missing
-/// store is fine (created on first install); doctor never creates or writes it.
+/// store is fine if install can create it; doctor never creates or writes it.
 fn check_store() -> Check {
     let store = match paths::store_dir() {
         Ok(s) => s,
@@ -271,6 +271,25 @@ fn check_store() -> Check {
         ""
     };
     if !store.exists() {
+        // `spm install` creates it, if it can create it in its nearest
+        // existing ancestor.
+        let parent = store.ancestors().skip(1).find(|a| a.exists());
+        if let Some(parent) = parent {
+            if let Ok(Some(false)) = crate::fsutil::can_create_in(parent) {
+                return Check::error(
+                    "store",
+                    format!(
+                        "store {}{from} can't be created: {} is not writable by you",
+                        store.display(),
+                        parent.display()
+                    ),
+                )
+                .fix(format!(
+                    "make {} writable or point SPM_HOME elsewhere",
+                    parent.display()
+                ));
+            }
+        }
         return Check::ok(
             "store",
             format!(
@@ -400,13 +419,17 @@ fn check_links(scope: &Scope, manifest: &Manifest, links: Result<Links>) -> Vec<
             let unlink = sync::unlink_command(scope, name);
             let declared =
                 manifest.skills.contains_key(name) || manifest.plugins.contains_key(name);
-            match links.resolve(scope, name) {
-                Err(e) => Check::error("links", format!("{e:#}")).fix(unlink),
-                Ok(_) if !declared => Check::warn(
+            // Like every sync, before resolving: an ignored link's directory
+            // doesn't matter.
+            if !declared {
+                return Check::warn(
                     "links",
                     format!("`{name}` is linked but not declared in ai.json (ignored)"),
                 )
-                .fix(unlink),
+                .fix(unlink);
+            }
+            match links.resolve(scope, name) {
+                Err(e) => Check::error("links", format!("{e:#}")).fix(unlink),
                 Ok(linked) => {
                     let display = linked.as_ref().map(|l| l.display.as_str()).unwrap_or("");
                     // Resolving only canonicalizes it: install must also read it.

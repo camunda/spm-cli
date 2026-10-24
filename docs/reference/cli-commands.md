@@ -495,7 +495,7 @@ It checks:
 
 - **git** is installed (and its version) and the **store** (`$SPM_HOME/store`)
   is writable by you (asked of the OS, never by writing; not checked on
-  Windows) — a store that doesn't exist yet is fine;
+  Windows) — a store that doesn't exist yet is fine if it can be created;
 - **`ai.json`** exists, is valid and declares known **targets**;
 - the **source policy**: the machine policy (`SPM_POLICY` or
   `$SPM_HOME/policy.json`) parses, and every declared source and linked dir is
