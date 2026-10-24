@@ -6358,11 +6358,7 @@ fn status_json_reports_unlocked_skills_and_plugins() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("ai.lock has none"));
     let doc = json_doc(&out);
     assert_eq!(doc["complete"], false, "{doc}");
-    assert_eq!(
-        doc["targets"][0]["skills"]["missing"],
-        serde_json::json!([]),
-        "{doc}"
-    );
+    assert!(doc["targets"][0]["skills"].is_null(), "{doc}");
 }
 
 #[test]
@@ -13843,6 +13839,25 @@ fn doctor_flags_a_missing_store_that_cannot_be_created() {
     );
 }
 
+/// A dangling `store` symlink occupies the path, so install can't create the
+/// store there even when its parent is writable.
+#[cfg(unix)]
+#[test]
+fn doctor_flags_a_dangling_store_symlink() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    let store = sb.spm_home.join("store");
+    std::fs::remove_dir_all(&store).ok();
+    std::fs::create_dir_all(&sb.spm_home).unwrap();
+    std::os::unix::fs::symlink(sb.root.join("gone"), &store).unwrap();
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(!ok, "{doc:#}");
+    let c = check(&doc, "store", "error");
+    assert!(c["fix"].as_str().unwrap().contains("remove"), "{c}");
+    let out = sb.spm(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    assert!(!out.status.success());
+}
+
 /// Deletes the store checkout whose directory name starts with `prefix`.
 fn remove_store_checkout(sb: &Sandbox, prefix: &str) {
     let entry = std::fs::read_dir(sb.spm_home.join("store"))
@@ -13940,6 +13955,77 @@ fn doctor_keeps_lock_drift_of_an_independent_root_when_another_is_not_in_the_sto
 /// A missing checkout leaves only what it contributes unverified: a cached
 /// plugin's hand-edited `bundled_skills` is still drift the whole-lock
 /// backstop of `install --locked` rejects, so doctor must flag it too.
+/// Two roots share a dependency at different selectors: the lock pins it
+/// under the first root's edge and records the second selector as
+/// `also_satisfies` evidence. With the first root not in the store, the
+/// second root's miss is only uncertain while that evidence still covers its
+/// selector; without it `install --locked` fails, so doctor must too.
+#[test]
+fn doctor_keeps_a_diamond_miss_whose_selector_the_unreached_pin_does_not_cover() {
+    let sb = Sandbox::new();
+    let shared_dir = sb.root.join("shared");
+    let shared = make_repo(
+        &shared_dir,
+        &[("SKILL.md", "---\nname: shared\ndescription: S.\n---\n")],
+    );
+    git_in(&shared_dir, &["tag", "v1"]);
+    let root = |name: &str, selector: &str| {
+        make_repo(
+            &sb.root.join(name),
+            &[
+                (
+                    "SKILL.md",
+                    &format!("---\nname: {name}\ndescription: R.\n---\n"),
+                ),
+                (
+                    "ai.json",
+                    &format!(r#"{{"skills":{{"shared":{{"git":"{shared}",{selector}}}}}}}"#),
+                ),
+            ],
+        )
+    };
+    let (alpha, beta) = (
+        root("alpha", r#""branch":"main""#),
+        root("beta", r#""tag":"v1""#),
+    );
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{"alpha":{{"git":"{alpha}","branch":"main"}},"beta":{{"git":"{beta}","branch":"main"}}}}}}"#
+        ),
+    );
+    sb.ok(&["install"]);
+    let installed = sb.read("ai.lock");
+    let lock: serde_json::Value = serde_json::from_str(&installed).unwrap();
+    let pin = lock["skills"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .find(|(_, l)| l["requested_by"] == serde_json::json!(["alpha", "beta"]))
+        .map(|(n, _)| n.clone())
+        .unwrap();
+    assert_eq!(
+        lock["skills"][&pin]["also_satisfies"],
+        serde_json::json!(["tag:v1"]),
+        "{lock:#}"
+    );
+    remove_store_checkout(&sb, "alpha-");
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(ok, "evidence covers beta's selector: {doc:#}");
+
+    edit_lock(&sb, |l| {
+        l["skills"][&pin]
+            .as_object_mut()
+            .unwrap()
+            .remove("also_satisfies");
+    });
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(!ok, "{doc:#}");
+    check(&doc, "lockfile", "error");
+    assert!(!sb.spm(&["install", "--locked"]).status.success());
+}
+
 #[test]
 fn doctor_compares_verified_lock_entries_when_another_root_is_not_in_the_store() {
     let sb = Sandbox::new();
@@ -14091,6 +14177,27 @@ fn doctor_flags_missing_gitignore_entries() {
     sb.ok(&["install"]);
     let (_, doc) = doctor(&sb, &[]);
     check(&doc, "gitignore", "ok");
+}
+
+/// An install with nothing declared still writes Claude's marketplace, so its
+/// ignore entry matters even though no skill is expected; a never-installed
+/// project has no output to ignore.
+#[test]
+fn doctor_checks_gitignore_for_an_empty_claude_install() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    std::fs::write(sb.project.join(".gitignore"), "target/\n").unwrap();
+    std::fs::remove_dir_all(sb.project.join(".spm")).ok();
+    let (_, doc) = doctor(&sb, &[]);
+    assert!(checks(&doc, "gitignore").is_empty(), "{doc:#}");
+
+    sb.ok(&["install"]);
+    assert!(sb.project.join(".spm").exists());
+    std::fs::write(sb.project.join(".gitignore"), "target/\n").unwrap();
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(ok, "{doc:#}");
+    let c = check(&doc, "gitignore", "warn");
+    assert_eq!(c["details"], serde_json::json!(["claude: .spm/"]), "{c}");
 }
 
 /// Claude's settings.local.json holds a machine-specific path: flag it when

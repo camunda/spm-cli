@@ -153,13 +153,22 @@ struct Resolved {
 /// growing output. Bundled into one value so the traversal function stays within
 /// a sane argument count (and reads as "walk state + this node") instead of
 /// passing each accumulator by hand.
+/// A requirement the lock has no pin for under its synthesized name.
+struct Miss {
+    key: Key,
+    name: String,
+    /// The selector label the edge requested.
+    requested: String,
+    problem: String,
+}
+
 struct Walk {
     stack: Vec<(Key, String)>,
     resolved: std::collections::HashMap<Key, Resolved>,
     out: Output,
-    /// Every lock miss with the identity it is for, sorted into
-    /// [`Output::lock_misses`] and [`Output::uncertain_misses`] after the walk.
-    misses: Vec<(Key, String, String)>,
+    /// Every lock miss, sorted into [`Output::lock_misses`] and
+    /// [`Output::uncertain_misses`] after the walk.
+    misses: Vec<Miss>,
     /// Total transitive edges examined across the whole walk, capped by
     /// [`MAX_EDGES`] to bound per-edge work that does not create a new node.
     edges: usize,
@@ -457,20 +466,29 @@ pub fn expand(direct: &BTreeMap<String, LockedSkill>, ctx: &Ctx) -> Result<Outpu
 
     let mut out = w.out;
     let reached: BTreeSet<&str> = out.transitive.iter().map(|(n, _)| n.as_str()).collect();
-    let claimable: BTreeSet<Key> = if out.unverified.is_empty() {
-        BTreeSet::new()
+    // A miss is only uncertain when an unverified subtree may own the pin:
+    // the lock pins the same identity under a name the walk didn't reach, and
+    // that pin covers the requested selector (as its own reference or as
+    // `also_satisfies` evidence) exactly as the dedup would require.
+    let unreached: Vec<&LockedSkill> = if out.unverified.is_empty() {
+        Vec::new()
     } else {
         ctx.prev
             .iter()
             .filter(|(n, l)| !l.requested_by.is_empty() && !reached.contains(n.as_str()))
-            .map(|(_, l)| key_of(&l.git, &l.path))
+            .map(|(_, l)| l)
             .collect()
     };
-    for (key, name, problem) in w.misses {
-        if claimable.contains(&key) && !ctx.prev.contains_key(&name) {
-            out.uncertain_misses.push(name);
+    for m in w.misses {
+        let covered = unreached.iter().any(|l| {
+            key_of(&l.git, &l.path) == m.key
+                && (l.reference == m.requested
+                    || l.also_satisfies.iter().any(|s| s.reference == m.requested))
+        });
+        if covered && !ctx.prev.contains_key(&m.name) {
+            out.uncertain_misses.push(m.name);
         } else {
-            out.lock_misses.push((name, problem));
+            out.lock_misses.push((m.name, m.problem));
         }
     }
     // Stable committed lockfile: provenance lists must not churn with traversal
@@ -697,11 +715,12 @@ fn visit(
                         format!("resolving nested skill `{declared}` of `{name}`")
                     })?
                     else {
-                        w.misses.push((
-                            ckey.clone(),
-                            synth.clone(),
-                            lock_miss(&synth, declared, name, spec, ctx)?,
-                        ));
+                        w.misses.push(Miss {
+                            key: ckey.clone(),
+                            name: synth.clone(),
+                            requested: requested.clone(),
+                            problem: lock_miss(&synth, declared, name, spec, ctx)?,
+                        });
                         continue;
                     };
                     (child.commit, child.resolved_tag)
@@ -780,11 +799,12 @@ fn visit(
         let Some(mut child) = resolve_child(spec, &synth, ctx)
             .with_context(|| format!("resolving nested skill `{declared}` of `{name}`"))?
         else {
-            w.misses.push((
-                ckey,
-                synth.clone(),
-                lock_miss(&synth, declared, name, spec, ctx)?,
-            ));
+            w.misses.push(Miss {
+                key: ckey,
+                name: synth.clone(),
+                requested: spec.version()?.label(),
+                problem: lock_miss(&synth, declared, name, spec, ctx)?,
+            });
             continue;
         };
         child.requested_by = vec![name.to_string()];

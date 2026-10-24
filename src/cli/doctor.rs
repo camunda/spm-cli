@@ -273,6 +273,21 @@ fn check_store() -> Check {
     } else {
         ""
     };
+    if !store.exists() && std::fs::symlink_metadata(&store).is_ok() {
+        // Something (e.g. a dangling symlink) occupies the path, so install
+        // can't create the store there.
+        return Check::error(
+            "store",
+            format!(
+                "store {}{from} is a symlink that doesn't resolve",
+                store.display()
+            ),
+        )
+        .fix(format!(
+            "remove {} or point SPM_HOME elsewhere",
+            store.display()
+        ));
+    }
     if !store.exists() {
         // `spm install` creates it, if it can create it in its nearest
         // existing ancestor.
@@ -490,7 +505,10 @@ fn materialization_checks(scope: &Scope, report: &status::StatusReport) -> Vec<C
         problems.push(format!("plugin `{p}` is declared but not locked"));
     }
     for t in &report.targets {
-        for (what, st) in [("skills", Some(&t.skills)), ("plugins", t.plugins.as_ref())] {
+        for (what, st) in [
+            ("skills", Some(&t.skills.status)),
+            ("plugins", t.plugins.as_ref()),
+        ] {
             let Some(st) = st else { continue };
             if !st.missing.is_empty() {
                 problems.push(format!(
@@ -562,17 +580,29 @@ fn check_gitignore(
 ) -> Vec<Check> {
     let mut checks = Vec::new();
     let mut missing = Vec::new();
-    if !report.expected.is_empty() || !report.plugins.is_empty() {
-        let names: Vec<String> = report.expected.iter().map(|e| e.name.clone()).collect();
-        for target in &manifest.targets {
-            let Ok(v) = vendor::for_target(target) else {
-                continue;
-            };
-            match gitignore::missing(root, &v.gitignore_entries(&names)) {
-                Ok(m) => missing.extend(m.into_iter().map(|e| format!("{target}: {e}"))),
-                Err(e) => missing.push(format!("{target}: {e:#}")),
-            }
+    let mut relevant = false;
+    let names: Vec<String> = report.expected.iter().map(|e| e.name.clone()).collect();
+    let declares_any = !names.is_empty() || !report.plugins.is_empty();
+    for target in &manifest.targets {
+        let Ok(v) = vendor::for_target(target) else {
+            continue;
+        };
+        // Even with nothing declared, an install may have written output
+        // (e.g. Claude's empty marketplace) that must stay ignored.
+        let has_output = || {
+            v.clean_paths(scope, &[])
+                .is_ok_and(|paths| paths.iter().any(|p| p.exists()))
+        };
+        if !declares_any && !has_output() {
+            continue;
         }
+        relevant = true;
+        match gitignore::missing(root, &v.gitignore_entries(&names)) {
+            Ok(m) => missing.extend(m.into_iter().map(|e| format!("{target}: {e}"))),
+            Err(e) => missing.push(format!("{target}: {e:#}")),
+        }
+    }
+    if relevant {
         checks.push(if missing.is_empty() {
             Check::ok("gitignore", "spm's output is gitignored")
         } else {
@@ -615,7 +645,7 @@ fn check_loadable(scope: &Scope, report: &status::StatusReport) -> Vec<Check> {
     let mut seen = BTreeSet::new();
     let mut problems = Vec::new();
     for t in &report.targets {
-        let st = &t.skills;
+        let st = &t.skills.status;
         let Ok(dir) = vendor::for_target(&t.target).and_then(|v| v.skills_dir(scope)) else {
             continue;
         };

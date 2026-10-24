@@ -66,10 +66,29 @@ pub(super) struct Collision {
     pub(super) other_scope: &'static str,
 }
 
+/// A target's skills dir, always inspected so leftovers stay visible (e.g.
+/// to `doctor`), but serialized as `null` when no skills are expected — the
+/// version-1 `--json` contract.
+pub(super) struct SkillsStatus {
+    pub(super) status: VendorStatus,
+    pub(super) expected: bool,
+}
+
+impl Serialize for SkillsStatus {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        if self.expected {
+            self.status.serialize(s)
+        } else {
+            s.serialize_none()
+        }
+    }
+}
+
 #[derive(Serialize)]
 pub(super) struct TargetStatus {
     pub(super) target: String,
-    pub(super) skills: VendorStatus,
+    /// `null` when no skills are expected.
+    pub(super) skills: SkillsStatus,
     /// `null` when no plugins are declared or the target only receives the
     /// plugins' bundled skills (already covered by `skills`).
     pub(super) plugins: Option<VendorStatus>,
@@ -167,7 +186,10 @@ pub(super) fn collect(scope: &Scope) -> Result<StatusReport> {
         // Inspect even when nothing is expected: skills left behind in an
         // spm-owned dir (e.g. after switching to a branch that declares none)
         // are still loaded by the tool and must surface as stale.
-        let skills = vendor.status(scope, &expected)?;
+        let skills = SkillsStatus {
+            status: vendor.status(scope, &expected)?,
+            expected: !expected.is_empty(),
+        };
         // Full-plugin materialization is only meaningful for vendors that
         // register plugins beyond their bundled skills (currently Claude);
         // `status_plugins` returns `None` for the rest.
@@ -222,9 +244,9 @@ pub(super) fn collect(scope: &Scope) -> Result<StatusReport> {
         report.declared_skills == 0
     } else {
         report.unlocked_plugins.is_empty()
-            && !targets
-                .iter()
-                .any(|t| incomplete_here(Some(&t.skills)) || incomplete_here(t.plugins.as_ref()))
+            && !targets.iter().any(|t| {
+                incomplete_here(Some(&t.skills.status)) || incomplete_here(t.plugins.as_ref())
+            })
     };
     report.targets = targets;
     Ok(report)
@@ -278,8 +300,8 @@ fn render_text(report: &StatusReport) {
 
     for t in &report.targets {
         let target = &t.target;
-        {
-            let st = &t.skills;
+        if t.skills.expected {
+            let st = &t.skills.status;
             println!(
                 "\n[{target}]  {}/{} installed  {}",
                 st.present.len(),

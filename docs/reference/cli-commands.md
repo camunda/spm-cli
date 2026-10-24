@@ -495,7 +495,8 @@ It checks:
 
 - **git** is installed (and its version) and the **store** (`$SPM_HOME/store`)
   is writable by you (asked of the OS, never by writing; not checked on
-  Windows) — a store that doesn't exist yet is fine if it can be created;
+  Windows) — a store that doesn't exist yet is fine if it can be created, but
+  a dangling symlink in its place is an error;
 - **`ai.json`** exists, is valid and declares known **targets**;
 - the **source policy**: the machine policy (`SPM_POLICY` or
   `$SPM_HOME/policy.json`) parses, and every declared source and linked dir is
@@ -511,7 +512,8 @@ It checks:
   missing skills/plugins or a stale Claude marketplace pointer are errors; skills
   spm no longer manages and names [installed in both scopes](#scope-project-default-vs-global-g) are
   warnings;
-- project scope: the **`.gitignore`** entries `spm install` adds are present, and
+- project scope: the **`.gitignore`** entries `spm install` adds are present
+  (also after an install with nothing declared, e.g. Claude's empty marketplace), and
   `.claude/settings.local.json` (which holds a machine-specific path) is
   gitignored and not committed;
 - every installed skill has a **`SKILL.md` with `name` and `description`**
@@ -654,7 +656,7 @@ To override the gate for content you trust (or a false positive), set
   "targets": [
     {
       "target": "claude",
-      "skills": {                           // always present, even with none expected
+      "skills": {                           // null when no skills are expected
         "location": "/path/to/project/.spm/claude/plugin/skills",
         "present": ["pdf-tools"],
         "missing": [],
