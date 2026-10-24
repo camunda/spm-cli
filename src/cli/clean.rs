@@ -1,5 +1,4 @@
 use super::common::{confirm, human_size};
-use super::sync::owned_in;
 use crate::links::Links;
 use crate::lockfile::Lockfile;
 use crate::manifest::Manifest;
@@ -8,7 +7,6 @@ use crate::scope::Scope;
 use crate::vendor;
 use crate::{paths, store};
 use anyhow::Result;
-use std::collections::BTreeMap;
 
 pub(super) fn clean(scope: &Scope) -> Result<()> {
     let dir = scope.manifest_dir()?;
@@ -17,8 +15,7 @@ pub(super) fn clean(scope: &Scope) -> Result<()> {
     let _state_lock = crate::links::StateLock::acquire(scope, false)?;
     let manifest = Manifest::load(&dir, scope)?;
     let lock = Lockfile::load_or_default(&dir)?;
-    let ownership = Ownership::load(scope, &lock)?;
-    let linked = Links::load(scope)?.managed;
+    let ownership = Ownership::load(scope, &lock, &Links::load(scope)?.managed)?;
     let vendors = manifest
         .targets
         .iter()
@@ -27,7 +24,7 @@ pub(super) fn clean(scope: &Scope) -> Result<()> {
     let owned: Vec<_> = manifest
         .targets
         .iter()
-        .map(|t| owned_in(&ownership, t, &linked))
+        .map(|t| ownership.for_target(t))
         .collect();
     super::sync::guard_working_copies(
         scope,
@@ -48,9 +45,7 @@ pub(super) fn clean(scope: &Scope) -> Result<()> {
         vendor.clean(scope, &names.skill_names())?;
         vendor.clean_plugins(scope, &names.plugin_names())?;
     }
-    // Nothing of spm's is installed any more — recorded explicitly, so a later
-    // install does not fall back to treating the lock's names as spm's.
-    Ownership::Recorded(BTreeMap::new()).save(scope)?;
+    ownership.cleaned(&manifest.targets).save(scope)?;
     println!(
         "cleaned generated {} config for target(s): {}",
         scope.label(),

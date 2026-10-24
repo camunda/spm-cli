@@ -11345,9 +11345,10 @@ fn commands_waiting_on_the_links_lock_never_restore_stale_overrides() {
 }
 
 /// Cleanup computes what it owns only once it holds the links lock, so a skill
-/// a linked plugin started bundling while it waited (recorded in the links
-/// file's `managed` list by the concurrent `link`/`install`) is cleaned up too,
-/// rather than left behind in a shared skills dir that nothing tracks anymore.
+/// a linked plugin started bundling while it waited (recorded by the
+/// concurrent `link`/`install` in the links file's `managed` list and in the
+/// target's ownership record) is cleaned up too, rather than left behind in a
+/// shared skills dir that nothing tracks anymore.
 #[test]
 fn cleanup_waiting_on_the_links_lock_removes_skills_managed_meanwhile() {
     let sb = Sandbox::new();
@@ -11374,6 +11375,13 @@ fn cleanup_waiting_on_the_links_lock_removes_skills_managed_meanwhile() {
         )
         .unwrap();
         edit_project_links(&sb, |doc| doc["managed"] = serde_json::json!(["extra"]));
+        let owned = sb.project_owned();
+        let mut record: serde_json::Value = serde_json::from_str(&read_path(&owned)).unwrap();
+        record["targets"]["codex"]["skills"]
+            .as_array_mut()
+            .unwrap()
+            .push("extra".into());
+        std::fs::write(&owned, serde_json::to_string_pretty(&record).unwrap()).unwrap();
         drop(held);
         blocked.finish();
         assert!(!extra.exists(), "{args:?}");
@@ -12766,4 +12774,175 @@ fn a_failure_before_the_vendor_reaches_a_user_skill_does_not_claim_it() {
     sb.ok(&["clean"]);
     assert_eq!(sb.read(".agents/skills/mine/SKILL.md"), "Mine.\n");
     assert!(!dir.join("base").exists(), "installed `base` cleaned");
+}
+
+/// Point `ai.json`'s `targets` at `targets` without syncing (e.g. checking out
+/// a branch that declares other targets).
+fn set_targets(sb: &Sandbox, targets: &[&str]) {
+    let mut doc: serde_json::Value = serde_json::from_str(&sb.read("ai.json")).unwrap();
+    doc["targets"] = serde_json::json!(targets);
+    write_manifest(sb, &serde_json::to_string_pretty(&doc).unwrap());
+}
+
+/// An install for a branch's targets keeps the record of a target that branch
+/// omits, so returning to it still removes what spm installed there.
+#[test]
+fn install_keeps_ownership_of_a_target_the_manifest_omits() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let greet = sb.project.join(".agents/skills/greet");
+    assert!(greet.join("SKILL.md").exists());
+    set_targets(&sb, &["cursor"]);
+    sb.ok(&["install"]);
+    set_targets(&sb, &["codex"]);
+    sb.ok(&["remove", "greet"]);
+    assert!(!greet.exists(), "codex's greet removed");
+}
+
+/// `clean` forgets only the targets it cleaned: one the manifest omits keeps
+/// its record, so cleaning it later still removes its output.
+#[test]
+fn clean_keeps_ownership_of_a_target_the_manifest_omits() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let greet = sb.project.join(".agents/skills/greet");
+    assert!(greet.join("SKILL.md").exists());
+    set_targets(&sb, &["cursor"]);
+    sb.ok(&["clean"]);
+    set_targets(&sb, &["codex"]);
+    sb.ok(&["clean"]);
+    assert!(!greet.exists(), "codex's greet cleaned");
+}
+
+/// `target remove` hands a remaining target only output the removed one
+/// installed (or loads through a symlink), never a location a symlink nested
+/// inside that output points at: there, the user's own skill stays theirs.
+#[test]
+fn target_remove_does_not_hand_over_through_a_nested_link() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "codex"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let user = sb.project.join(".cursor/skills/greet");
+    std::fs::create_dir_all(&user).unwrap();
+    std::fs::write(user.join("SKILL.md"), "Mine.\n").unwrap();
+    symlink(
+        "../../../.cursor/skills",
+        sb.project.join(".agents/skills/greet/link"),
+    );
+    set_targets(&sb, &["codex", "cursor"]);
+    sb.ok(&["target", "remove", "codex"]);
+    sb.ok(&["clean"]);
+    assert_eq!(sb.read(".cursor/skills/greet/SKILL.md"), "Mine.\n");
+}
+
+/// The `ds` plugin's working copy at `<root>/dev-plugin`, bundling `composer`
+/// (as locked) and an `extra` skill.
+fn dev_plugin(sb: &Sandbox) -> PathBuf {
+    let dev = sb.root.join("dev-plugin");
+    local_skill_checkout(sb, "dev-repo", "unused");
+    std::fs::rename(sb.root.join("dev-repo/pkg"), &dev).unwrap();
+    let extra = dev.join("skills/extra");
+    std::fs::create_dir_all(&extra).unwrap();
+    std::fs::write(extra.join("SKILL.md"), "---\nname: extra\n---\nExtra.\n").unwrap();
+    dev
+}
+
+fn codex_with_plugin(sb: &Sandbox) {
+    sb.add_plugin();
+    sb.ok(&["init", "--target", "codex"]);
+    write_manifest(
+        sb,
+        &format!(
+            r#"{{"targets":["codex"],"plugins":{{"ds":{{"git":"{}","branch":"main","path":"pkg"}}}}}}"#,
+            sb.skill_url()
+        ),
+    );
+    sb.ok(&["install"]);
+}
+
+/// A skill one target got from a linked plugin is that target's: adding
+/// another target after the working copy dropped it leaves the new target's
+/// same-named skill (the user's own) alone.
+#[test]
+fn target_add_keeps_a_users_skill_another_target_got_from_a_linked_plugin() {
+    let sb = Sandbox::new();
+    codex_with_plugin(&sb);
+    let dev = dev_plugin(&sb);
+    sb.ok(&["link", "ds", "../dev-plugin"]);
+    let shared = sb.project.join(".agents/skills");
+    assert!(shared.join("extra/SKILL.md").exists());
+    std::fs::remove_dir_all(dev.join("skills/extra")).unwrap();
+    let user = sb.project.join(".cursor/skills/extra");
+    std::fs::create_dir_all(&user).unwrap();
+    std::fs::write(user.join("SKILL.md"), "Mine.\n").unwrap();
+    sb.ok(&["target", "add", "cursor"]);
+    assert_eq!(sb.read(".cursor/skills/extra/SKILL.md"), "Mine.\n");
+    assert!(!shared.join("extra").exists(), "codex's extra purged");
+}
+
+/// Ownership follows what was materialized, not `ai.lock`: a locked bundled
+/// skill a linked working copy dropped is never written to a new target, so a
+/// same-named skill there stays the user's.
+#[test]
+fn a_linked_plugins_reduced_bundle_is_not_claimed_on_a_new_target() {
+    let sb = Sandbox::new();
+    codex_with_plugin(&sb);
+    let dev = dev_plugin(&sb);
+    std::fs::remove_dir_all(dev.join("skills/composer")).unwrap();
+    sb.ok(&["link", "ds", "../dev-plugin"]);
+    let user = sb.project.join(".cursor/skills/composer");
+    std::fs::create_dir_all(&user).unwrap();
+    std::fs::write(user.join("SKILL.md"), "Mine.\n").unwrap();
+    sb.ok(&["target", "add", "cursor"]);
+    sb.ok(&["clean"]);
+    assert_eq!(sb.read(".cursor/skills/composer/SKILL.md"), "Mine.\n");
+    assert!(!sb.project.join(".cursor/skills/extra").exists());
+}
+
+/// Plugin names are checked against every locked plugin, not just the ones a
+/// lock-only add fetched: `ds` next to a locked `Ds` is rejected before
+/// anything is written, as without `--lock-only`.
+#[test]
+fn add_lock_only_rejects_a_plugin_differing_only_by_case_from_a_locked_one() {
+    let sb = Sandbox::new();
+    sb.add_plugin();
+    sb.ok(&["init", "--target", "codex"]);
+    sb.ok(&[
+        "add",
+        &sb.skill_url(),
+        "--branch",
+        "main",
+        "--path",
+        "pkg",
+        "--plugin",
+        "--name",
+        "Ds",
+    ]);
+    let other = make_repo(
+        &sb.root.join("other"),
+        &[
+            (
+                "pkg/.claude-plugin/plugin.json",
+                r#"{"name":"other","version":"1.0.0","skills":"./skills/"}"#,
+            ),
+            ("pkg/skills/tool/SKILL.md", "---\nname: tool\n---\nTool.\n"),
+        ],
+    );
+    let (manifest, lock) = (sb.read("ai.json"), sb.read("ai.lock"));
+    for lock_only in [false, true] {
+        let mut args = vec![
+            "add", &other, "--branch", "main", "--path", "pkg", "--plugin", "--name", "ds",
+        ];
+        if lock_only {
+            args.push("--lock-only");
+        }
+        let out = sb.spm(&args);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "lock_only={lock_only}: must fail");
+        assert!(err.contains("differ only by case"), "{err}");
+        assert_eq!(sb.read("ai.json"), manifest);
+        assert_eq!(sb.read("ai.lock"), lock);
+    }
 }

@@ -141,6 +141,9 @@ can't supply it), so the next `spm install` or `spm clean` removes exactly those
 shared skills dirs without touching your own skills. Only an install or clean
 updates the record, so names a lock merely passed through — or a target added
 since — are never claimed. The same applies when a pulled `ai.lock` drops them.
+The record lists what was actually written (a linked plugin's working copy
+included), and a target keeps its record until it is cleaned or removed, even
+while a branch's `ai.json` omits it.
 
 With `resolveTransitive` on, every other skill is still read (from the store, or
 fetched when missing) for its nested `ai.json`, which decides the transitive

@@ -129,9 +129,13 @@ impl Vendor for Claude {
         Ok(())
     }
 
+    fn skills_dir(&self, scope: &Scope) -> Result<PathBuf> {
+        Ok(managed_dir(scope)?.join("plugin").join("skills"))
+    }
+
     fn status(&self, scope: &Scope, expected: &[String]) -> Result<super::VendorStatus> {
         let market_dir = managed_dir(scope)?;
-        let skills_dir = market_dir.join("plugin").join("skills");
+        let skills_dir = self.skills_dir(scope)?;
         // The marketplace dir is spm-owned in both scopes, so stale detection is
         // always meaningful here.
         let mut st = super::classify(&skills_dir, expected, true);

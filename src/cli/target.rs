@@ -1,4 +1,4 @@
-use super::sync::{owned_in, save_and_sync, Apply};
+use super::sync::{save_and_sync, Apply};
 use crate::lockfile::Lockfile;
 use crate::manifest::Manifest;
 use crate::owned::Ownership;
@@ -118,8 +118,7 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
 
     let lock = Lockfile::load_or_default(&dir)?;
     // Each target's own spm output (see `crate::owned`).
-    let mut owned = Ownership::load(scope, &lock)?;
-    let linked = crate::links::Links::load(scope)?.managed;
+    let mut owned = Ownership::load(scope, &lock, &crate::links::Links::load(scope)?.managed)?;
     // Physical locations a remaining target still loads skills, plugins or
     // their metadata from (`content`), plus every location reaching them
     // depends on (`traversed`: symlinks, and dirs passed through before a
@@ -137,12 +136,12 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
     // the removed targets' names from. Protecting more only keeps more.
     let mut inferred = crate::owned::Owned::default();
     for t in &removed {
-        inferred.extend(&owned_in(&owned, t, &linked));
+        inferred.extend(&owned.for_target(t));
     }
     let mut needed: Vec<(&str, Vec<NodeId>, bool)> = Vec::new();
     for t in &remaining {
         let v = vendor::for_target(t)?;
-        let mut names = owned_in(&owned, t, &linked);
+        let mut names = owned.for_target(t);
         names.extend(&inferred);
         let mut paths = v.skill_paths(scope, &names.skill_names())?;
         paths.extend(v.plugin_paths(scope, &names.plugin_names())?);
@@ -163,10 +162,7 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
         .iter()
         .map(|t| vendor::for_target(t))
         .collect::<Result<Vec<_>>>()?;
-    let removed_owned: Vec<_> = removed
-        .iter()
-        .map(|t| owned_in(&owned, t, &linked))
-        .collect();
+    let removed_owned: Vec<_> = removed.iter().map(|t| owned.for_target(t)).collect();
     super::sync::guard_working_copies(
         scope,
         &dir,
@@ -189,24 +185,12 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
         for p in &candidates {
             spans.push(identity(&deletion_target(p)?)?);
         }
-        // Also where `t` loads its payload from through symlinks (e.g. its
-        // skills dir linked elsewhere) — content only: a location merely
-        // traversed on the way is not `t`'s output.
-        let mut loads = v.skill_paths(scope, &names.skill_names())?;
-        loads.extend(v.plugin_paths(scope, &names.plugin_names())?);
-        let (mut traversed, mut content) = (Vec::new(), Vec::new());
-        let mut visited = std::collections::HashSet::new();
-        for p in loads {
-            reach(&p, &mut traversed, &mut content, &mut visited)?;
-        }
-        for c in content {
-            spans.push(identity(&c)?);
-        }
         // What a remaining target loads from inside `t`'s output — the same
-        // shared entry, one nested in `t`'s container, or a payload `t` loads
-        // through a symlink — is kept (protected above) and is now that
-        // target's: hand it over so a later `clean` or install still removes
-        // it.
+        // shared entry, or one nested in `t`'s container — or the very entry
+        // `t` loads a skill from (e.g. both reach it through symlinks) is kept
+        // (protected above) and is now that target's: hand it over so a later
+        // `clean` or install still removes it. A location a symlink nested
+        // inside `t`'s entry points at is not `t`'s output, so is never handed.
         for x in &remaining {
             let xv = vendor::for_target(x)?;
             let mut handed = crate::owned::Owned::default();
@@ -216,19 +200,17 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
                 .map(|n| (n, false))
                 .chain(names.plugin_names().into_iter().map(|n| (n, true)))
             {
-                let one = std::slice::from_ref(&name);
-                let paths = if is_plugin {
-                    xv.plugin_paths(scope, one)?
+                let (paths, ours) = if is_plugin {
+                    (xv.plugin_paths(scope, std::slice::from_ref(&name))?, None)
                 } else {
-                    xv.skill_paths(scope, one)?
+                    let ours = existing_identity(&v.skills_dir(scope)?.join(&name))?;
+                    (vec![xv.skills_dir(scope)?.join(&name)], ours)
                 };
                 for q in paths {
-                    let fin = resolve(&q, &mut Vec::new())?;
-                    if std::fs::symlink_metadata(&fin).is_err() {
+                    let Some(id) = existing_identity(&q)? else {
                         continue;
-                    }
-                    let id = identity(&fin)?;
-                    if spans.iter().any(|s| id.starts_with(s)) {
+                    };
+                    if Some(&id) == ours.as_ref() || spans.iter().any(|s| id.starts_with(s)) {
                         let set = if is_plugin {
                             &mut handed.plugins
                         } else {
@@ -264,6 +246,15 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
     manifest.save(&dir)?;
     println!("removed target(s): {}", removed.join(", "));
     Ok(())
+}
+
+/// The identity of the location `p` resolves to, if it exists.
+fn existing_identity(p: &Path) -> Result<Option<Vec<NodeId>>> {
+    let fin = resolve(p, &mut Vec::new())?;
+    if std::fs::symlink_metadata(&fin).is_err() {
+        return Ok(None);
+    }
+    identity(&fin).map(Some)
 }
 
 /// Record what loading from `p` depends on: resolve it (pushing traversed

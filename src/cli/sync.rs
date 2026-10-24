@@ -192,8 +192,6 @@ struct Plan {
     materialized: Vec<MaterializedSkill>,
     plugins: Vec<MaterializedPlugin>,
     previously_owned: Ownership,
-    /// [`Links::managed`] before this sync (see [`owned_in`]).
-    previously_linked: Vec<String>,
     locked: bool,
     /// The `spm link` overrides to persist after applying (with `managed`
     /// refreshed), or `None` when the links file is already up to date.
@@ -356,8 +354,7 @@ fn plan(
     // What spm owns in each target before this sync (see `crate::owned`):
     // global/shared-dir vendors share a directory with the user's own skills,
     // so they purge only entries spm put there that are no longer wanted.
-    let previously_owned = Ownership::load(scope, &prev)?;
-    let previously_linked = links.managed.clone();
+    let previously_owned = Ownership::load(scope, &prev, &links.managed)?;
 
     // Stable, path-independent project id: reuse the locked one, else mint & persist.
     let id = if prev.id.is_empty() {
@@ -720,7 +717,9 @@ fn plan(
     // materialized set (direct, transitive, and plugin-bundled skills) and,
     // separately, across plugins — before any vendor writes a byte.
     reject_case_folding_collisions("skill", materialized.iter().map(|m| m.name.as_str()))?;
-    reject_case_folding_collisions("plugin", plugins.iter().map(|p| p.name.as_str()))?;
+    // From the lock, not the fetched `plugins`: a lock-only sync fetches only
+    // the plugins it (re)resolves, yet must not write a lock an install rejects.
+    reject_case_folding_collisions("plugin", lock.plugins.keys().map(String::as_str))?;
     reject_locked_skill_collisions(&lock)?;
     let output_skills: Vec<String> = materialized
         .iter()
@@ -729,7 +728,7 @@ fn plan(
             manifest
                 .targets
                 .iter()
-                .flat_map(|t| owned_in(&previously_owned, t, &previously_linked).skills),
+                .flat_map(|t| previously_owned.for_target(t).skills),
         )
         .collect();
     let output_plugins: Vec<String> = plugins
@@ -799,7 +798,6 @@ fn plan(
         materialized,
         plugins,
         previously_owned,
-        previously_linked,
         locked,
         links,
         _snapshots: snapshots,
@@ -827,11 +825,11 @@ impl Plan {
         if self.declares_any {
             println!("materializing: {}", self.targets.join(", "));
         }
-        // Skills copied from a linked plugin's working tree are owned only via
-        // the links file. Record the planned ones alongside the previous ones
-        // before any vendor writes, so a failure part-way through never leaves
-        // an agent-discovered skill that no later sync or `clean` knows to
-        // remove; the final links file (below) narrows it once all succeeded.
+        // Skills copied from a linked plugin's working tree are listed in the
+        // links file (an spm without an ownership record falls back to it).
+        // Record the planned ones alongside the previous ones before any
+        // vendor writes; the final links file (below) narrows it once all
+        // succeeded. Each target's record claims them as they are written.
         if let Some(links) = &self.links {
             let on_disk = Links::load(scope)?;
             let mut pending = on_disk.clone();
@@ -842,14 +840,13 @@ impl Plan {
                 pending.save(scope)?;
             }
         }
+        let desired = Owned {
+            skills: self.materialized.iter().map(|m| m.name.clone()).collect(),
+            plugins: self.plugins.iter().map(|p| p.name.clone()).collect(),
+        };
         self.previously_owned
-            .install(scope, &self.targets, lock, |i, _, claim| {
+            .install(scope, &self.targets, &desired, |i, owned, claim| {
                 let vendor = &self.vendors[i];
-                let owned = owned_in(
-                    &self.previously_owned,
-                    &self.targets[i],
-                    &self.previously_linked,
-                );
                 vendor.materialize(
                     scope,
                     &lock.id,
@@ -872,15 +869,6 @@ impl Plan {
         }
         Ok(lock.skills.len() + lock.plugins.len())
     }
-}
-
-/// What spm owns in `target` before writing it: its ownership record plus the
-/// skills last materialized from linked plugins (see [`Links::managed`]), which
-/// `ai.lock` — and so the record — does not list, and which every target got.
-pub(super) fn owned_in(ownership: &Ownership, target: &str, linked_managed: &[String]) -> Owned {
-    let mut owned = ownership.for_target(target);
-    owned.skills.extend(linked_managed.iter().cloned());
-    owned
 }
 
 /// Resolve every `spm link` override that names a declared skill or plugin to

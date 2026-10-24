@@ -149,6 +149,10 @@ pub trait Vendor {
     /// `.agents/skills/<name>/`.
     fn skill_paths(&self, scope: &Scope, managed: &[String]) -> Result<Vec<PathBuf>>;
 
+    /// The directory this vendor writes each skill into in `scope`, as
+    /// `<dir>/<name>/` (also where [`status`](Vendor::status) looks).
+    fn skills_dir(&self, scope: &Scope) -> Result<PathBuf>;
+
     /// Files this vendor edits *in place* in `scope` (e.g. Claude's settings),
     /// writing through a symlink at their path instead of replacing it — unlike
     /// [`clean_paths`](Vendor::clean_paths), whose final symlink is removed.

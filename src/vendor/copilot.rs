@@ -93,6 +93,10 @@ impl Vendor for Copilot {
         }
     }
 
+    fn skills_dir(&self, scope: &Scope) -> Result<PathBuf> {
+        skills_dir(scope)
+    }
+
     fn skill_paths(&self, scope: &Scope, managed: &[String]) -> Result<Vec<PathBuf>> {
         let dir = skills_dir(scope)?;
         Ok(managed.iter().map(|n| dir.join(n)).collect())

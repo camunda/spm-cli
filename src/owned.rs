@@ -103,8 +103,10 @@ impl Ownership {
         })
     }
 
-    /// The recorded ownership, or `lock`'s set when nothing was recorded yet.
-    pub fn load(scope: &Scope, lock: &Lockfile) -> Result<Self> {
+    /// The recorded ownership, or — when nothing was recorded yet — `lock`'s
+    /// set plus `linked`, the skills last materialized from linked plugins
+    /// (see [`crate::links::Links::managed`]), which every target got.
+    pub fn load(scope: &Scope, lock: &Lockfile, linked: &[String]) -> Result<Self> {
         let p = Self::path(scope)?;
         // Only a record that is truly absent falls back to the lock: one that
         // can't be inspected must stop the caller before it deletes anything.
@@ -112,7 +114,9 @@ impl Ownership {
             .try_exists()
             .with_context(|| format!("inspecting {}", p.display()))?
         {
-            return Ok(Self::Legacy(Owned::from_lock(lock)));
+            let mut owned = Owned::from_lock(lock);
+            owned.skills.extend(linked.iter().cloned());
+            return Ok(Self::Legacy(owned));
         }
         let text =
             std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))?;
@@ -136,25 +140,27 @@ impl Ownership {
         }
     }
 
-    /// Install `lock`'s set into each of `targets` with `install(index, prior
-    /// ownership, claim)`, keeping the record true at every step: a failure
-    /// part-way leaves nothing spm touched unrecorded, and claims nothing it
-    /// did not touch. A skill name is recorded when the vendor `claim`s it,
-    /// right before modifying its entry; plugin output lives only in
-    /// spm-owned locations, so the new plugins are recorded up front. Once a
-    /// target is written it holds exactly the new set.
+    /// Install `desired` — the names actually materialized, which a linked
+    /// plugin's working copy may make differ from `ai.lock` — into each of
+    /// `targets` with `install(index, prior ownership, claim)`, keeping the
+    /// record true at every step: a failure part-way leaves nothing spm
+    /// touched unrecorded, and claims nothing it did not touch. A skill name is
+    /// recorded when the vendor `claim`s it, right before modifying its entry;
+    /// plugin output lives only in spm-owned locations, so the new plugins are
+    /// recorded up front. Once a target is written it holds exactly the new
+    /// set. Targets not installed now (e.g. ones another branch's `ai.json`
+    /// declares) keep their record.
     pub fn install(
         &self,
         scope: &Scope,
         targets: &[String],
-        lock: &Lockfile,
+        desired: &Owned,
         mut install: impl FnMut(usize, &Owned, Claim) -> Result<()>,
     ) -> Result<()> {
-        let desired = Owned::from_lock(lock);
-        let mut record: BTreeMap<String, Owned> = targets
-            .iter()
-            .map(|t| (t.clone(), self.for_target(t)))
-            .collect();
+        let mut record = self.recorded();
+        for t in targets {
+            record.insert(t.clone(), self.for_target(t));
+        }
         for (i, target) in targets.iter().enumerate() {
             let prior = self.for_target(target);
             let mut ahead = prior.clone();
@@ -185,6 +191,26 @@ impl Ownership {
                     .save(scope)
             }
         }
+    }
+
+    /// The exact per-target record; a legacy assumption covers no particular
+    /// target, so it records none.
+    fn recorded(&self) -> BTreeMap<String, Owned> {
+        match self {
+            Self::Recorded(map) => map.clone(),
+            Self::Legacy(_) => BTreeMap::new(),
+        }
+    }
+
+    /// The record once `targets` were cleaned: they hold nothing of spm's —
+    /// recorded explicitly, so a later install does not fall back to the
+    /// lock — while every other target keeps its record.
+    pub fn cleaned(&self, targets: &[String]) -> Self {
+        let mut map = self.recorded();
+        for t in targets {
+            map.remove(t);
+        }
+        Self::Recorded(map)
     }
 
     /// Forget `target` (its spm output was removed).
@@ -314,7 +340,7 @@ mod tests {
         fail_at: usize,
     ) -> String {
         let err = owned
-            .install(scope, targets, lock, |i, _, claim| {
+            .install(scope, targets, &Owned::from_lock(lock), |i, _, claim| {
                 claim("touched")?;
                 if i == fail_at {
                     anyhow::bail!("boom")
@@ -342,7 +368,7 @@ mod tests {
         assert_eq!(err.to_string(), "disk full");
         assert_eq!(std::fs::read(&path).unwrap(), before, "record unchanged");
         assert_eq!(
-            Ownership::load(&scope, &Lockfile::default()).unwrap(),
+            Ownership::load(&scope, &Lockfile::default(), &[]).unwrap(),
             first
         );
         let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
@@ -356,7 +382,7 @@ mod tests {
         second.grant("codex", &Owned::from_lock(&lock_with(&["b"])));
         second.save(&scope).unwrap();
         assert_eq!(
-            Ownership::load(&scope, &Lockfile::default()).unwrap(),
+            Ownership::load(&scope, &Lockfile::default(), &[]).unwrap(),
             second
         );
         std::fs::remove_dir_all(&root).unwrap();
@@ -391,39 +417,65 @@ mod tests {
     #[test]
     fn records_per_target_outside_the_checkout() {
         let (root, scope, _home) = sandbox("roundtrip");
-        let legacy = Ownership::load(&scope, &lock_with(&["a"])).unwrap();
+        // With no record, every target is assumed to hold the lock's names
+        // plus what linked plugins last materialized.
+        let linked = Ownership::load(&scope, &lock_with(&["a"]), &["x".to_string()]).unwrap();
+        assert_eq!(linked.for_target("codex").skills, set(&["a", "x"]));
+        let legacy = Ownership::load(&scope, &lock_with(&["a"]), &[]).unwrap();
         assert_eq!(legacy.for_target("codex").skills, set(&["a"]));
         // A legacy assumption is written out once; afterwards it is exact and
         // no later lock (lock-only writes) changes it.
         legacy.freeze(&scope, &["codex".to_string()]).unwrap();
-        let recorded = Ownership::load(&scope, &lock_with(&["b"])).unwrap();
+        let recorded = Ownership::load(&scope, &lock_with(&["b"]), &[]).unwrap();
         assert_eq!(recorded.for_target("codex").skills, set(&["a"]));
         assert_eq!(recorded.for_target("cursor"), Owned::default());
         recorded.freeze(&scope, &["cursor".to_string()]).unwrap();
-        assert_eq!(Ownership::load(&scope, &lock_with(&[])).unwrap(), recorded);
+        assert_eq!(
+            Ownership::load(&scope, &lock_with(&[]), &[]).unwrap(),
+            recorded
+        );
 
         let targets = ["codex".to_string(), "cursor".to_string()];
         let err = installed_err(&scope, &recorded, &targets, &lock_with(&["b"]), 1);
         assert!(err.contains("boom"), "{err}");
         // `codex` was written; `cursor` failed part-way, so it holds its prior
         // set plus exactly what it claimed — not the rest of the new set.
-        let partial = Ownership::load(&scope, &lock_with(&[])).unwrap();
+        let partial = Ownership::load(&scope, &lock_with(&[]), &[]).unwrap();
         assert_eq!(partial.for_target("codex").skills, set(&["b"]));
         assert_eq!(partial.for_target("cursor").skills, set(&["touched"]));
         let mut seen = Vec::new();
         recorded
-            .install(&scope, &targets[..1], &lock_with(&["b"]), |i, prior, _| {
-                seen.push((i, prior.skill_names()));
-                Ok(())
-            })
+            .install(
+                &scope,
+                &targets[..1],
+                &Owned::from_lock(&lock_with(&["b"])),
+                |i, prior, _| {
+                    seen.push((i, prior.skill_names()));
+                    Ok(())
+                },
+            )
             .unwrap();
         assert_eq!(seen, [(0, vec!["a".to_string()])]);
-        let installed = Ownership::load(&scope, &lock_with(&[])).unwrap();
+        let installed = Ownership::load(&scope, &lock_with(&[]), &[]).unwrap();
         assert_eq!(installed.for_target("codex").skills, set(&["b"]));
         assert_eq!(installed.for_target("cursor"), Owned::default());
+        // A target not installed now (absent from this branch's ai.json) keeps
+        // its record, and `cleaned` forgets only the targets it is given.
+        partial
+            .install(&scope, &targets[..1], &Owned::default(), |_, _, _| Ok(()))
+            .unwrap();
+        let kept = Ownership::load(&scope, &lock_with(&[]), &[]).unwrap();
+        assert_eq!(kept.for_target("codex"), Owned::default());
+        assert_eq!(kept.for_target("cursor").skills, set(&["touched"]));
+        let cleaned = kept.cleaned(&targets[..1]);
+        assert_eq!(cleaned.for_target("cursor").skills, set(&["touched"]));
+        assert_eq!(
+            Ownership::Legacy(Owned::from_lock(&lock_with(&["a"]))).cleaned(&[]),
+            Ownership::Recorded(BTreeMap::new())
+        );
         // An explicitly empty record stays exact rather than falling back to the lock.
         installed.without("codex").save(&scope).unwrap();
-        let empty = Ownership::load(&scope, &lock_with(&["b"])).unwrap();
+        let empty = Ownership::load(&scope, &lock_with(&["b"]), &[]).unwrap();
         assert_eq!(empty, Ownership::Recorded(BTreeMap::new()));
         let path = Ownership::path(&scope).unwrap();
         assert!(
@@ -448,7 +500,7 @@ mod tests {
             r#"{"targets":{"codex":{"skills":["users-own"]}}}"#,
         )
         .unwrap();
-        let loaded = Ownership::load(&scope, &lock_with(&["a"])).unwrap();
+        let loaded = Ownership::load(&scope, &lock_with(&["a"]), &[]).unwrap();
         assert_eq!(
             loaded,
             Ownership::Legacy(Owned::from_lock(&lock_with(&["a"])))
@@ -471,7 +523,7 @@ mod tests {
             std::fs::write(&path, format!(r#"{{"targets":{{"codex":{owned}}}}}"#)).unwrap();
             let err = format!(
                 "{:#}",
-                Ownership::load(&scope, &Lockfile::default()).unwrap_err()
+                Ownership::load(&scope, &Lockfile::default(), &[]).unwrap_err()
             );
             assert!(err.contains("invalid skill name"), "{owned}: {err}");
         }
