@@ -60,14 +60,10 @@ struct Checkout {
 
 impl Checkout {
     fn of(locked: &LockedSkill) -> Result<Self> {
-        // Defense in depth: `store` and `commit` are appended into filesystem paths
-        // that get recursively removed and rewritten by `ensure`. Every
-        // construction path (lockfile load, direct/plugin resolve, and transitive
-        // resolve) is expected to hand us an already-validated entry, but
-        // re-validate at this single choke point so no path can inject a
-        // separator or `..` into the store location.
-        crate::lockfile::validate_commit(&locked.commit)?;
-        crate::lockfile::validate_store_key(&locked.store)?;
+        // `store` and `commit` are appended into filesystem paths that get
+        // recursively removed and rewritten by `ensure`; their types
+        // (`StoreKey`, `CommitSha`) guarantee neither can carry a separator or
+        // `..` into the store location, however the entry was built.
         // The source policy applies to every checkout handed out, including one
         // already cached in the store, so a lock entry (even a hand-edited one)
         // cannot smuggle a denied source in through the shared cache.
@@ -105,7 +101,7 @@ impl Checkout {
                 "path `{}` not found in {}@{}",
                 locked.path.as_deref().unwrap_or("."),
                 locked.git,
-                &locked.commit[..locked.commit.len().min(8)]
+                locked.commit.short()
             );
         }
         // Defense in depth: the subdir is validated lexically upstream, but a
@@ -232,6 +228,7 @@ fn dir_size(path: &Path) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ids::{CommitSha, LockReference, StoreKey};
     use crate::paths::SpmHomeGuard;
     use std::process::Command as StdCommand;
 
@@ -335,11 +332,14 @@ mod tests {
 
         let locked = LockedSkill {
             git: format!("file://{}", src.display()),
-            reference: "branch:main".into(),
-            commit: sha.clone(),
+            reference: LockReference::try_from("branch:main").unwrap(),
+            commit: CommitSha::try_from(sha.as_str()).unwrap(),
             resolved_tag: None,
             path: None,
-            store: crate::lockfile::store_key(&format!("file://{}", src.display()), &sha),
+            store: StoreKey::derive(
+                &format!("file://{}", src.display()),
+                &CommitSha::try_from(sha.as_str()).unwrap(),
+            ),
             bundled_skills: Vec::new(),
             requested_by: Vec::new(),
             also_satisfies: Vec::new(),
@@ -374,11 +374,11 @@ mod tests {
 
         let locked = LockedSkill {
             git: git_url.clone(),
-            reference: "branch:main".into(),
-            commit: sha.clone(),
+            reference: LockReference::try_from("branch:main").unwrap(),
+            commit: CommitSha::try_from(sha.as_str()).unwrap(),
             resolved_tag: None,
             path: Some("does/not/exist".into()),
-            store: crate::lockfile::store_key(&git_url, &sha),
+            store: StoreKey::derive(&git_url, &CommitSha::try_from(sha.as_str()).unwrap()),
             bundled_skills: Vec::new(),
             requested_by: Vec::new(),
             also_satisfies: Vec::new(),
@@ -438,11 +438,11 @@ mod tests {
 
         let locked = LockedSkill {
             git: git_url.clone(),
-            reference: "branch:main".into(),
-            commit: sha.clone(),
+            reference: LockReference::try_from("branch:main").unwrap(),
+            commit: CommitSha::try_from(sha.as_str()).unwrap(),
             resolved_tag: None,
             path: Some("escape".into()),
-            store: crate::lockfile::store_key(&git_url, &sha),
+            store: StoreKey::derive(&git_url, &CommitSha::try_from(sha.as_str()).unwrap()),
             bundled_skills: Vec::new(),
             requested_by: Vec::new(),
             also_satisfies: Vec::new(),

@@ -34,8 +34,9 @@
 //! across runs (letting the sync reuse fast-path key on it), collision-resistant
 //! across unrelated dependencies, and free of path separators.
 
-use crate::lockfile::{store_key, LockedSkill, Satisfied};
-use crate::manifest::{validate_skill_name, DependencyManifest, Manifest, SkillSpec};
+use crate::ids::{CommitSha, DepName, LockReference, StoreKey};
+use crate::lockfile::{LockedSkill, Satisfied};
+use crate::manifest::{DependencyManifest, Manifest, SkillSpec};
 use crate::resolver;
 use crate::store;
 use crate::vendor::MaterializedSkill;
@@ -81,7 +82,7 @@ type Key = (String, Option<String>);
 pub struct Ctx<'a> {
     /// The previous lockfile's skill entries, consulted to reuse a pinned commit
     /// for an unchanged transitive child (avoiding an `ls-remote` every sync).
-    pub prev: &'a BTreeMap<String, LockedSkill>,
+    pub prev: &'a BTreeMap<DepName, LockedSkill>,
     /// Whether transitive resolution is enabled (root manifest's flag).
     pub resolve_transitive: bool,
     /// Re-resolve transitive children to their latest commit. This is a single
@@ -107,7 +108,7 @@ pub struct Ctx<'a> {
     /// the local directory instead of the store checkout. With transitive
     /// resolution on, the root's nested `ai.json` is still read from its locked
     /// checkout, so `ai.lock` is unaffected by the override.
-    pub links: &'a BTreeMap<String, crate::links::Linked>,
+    pub links: &'a BTreeMap<DepName, crate::links::Linked>,
 }
 
 /// Result of the walk: the flattened, deduplicated skill list to hand to the
@@ -115,11 +116,11 @@ pub struct Ctx<'a> {
 pub struct Output {
     pub materialized: Vec<MaterializedSkill>,
     /// Synthesized-name → locked entry for every transitively-resolved skill.
-    pub transitive: Vec<(String, LockedSkill)>,
+    pub transitive: Vec<(DepName, LockedSkill)>,
     /// `also_satisfies` evidence recorded for *direct* roots (by name): the
     /// other selectors nested edges requested for a root's identity that
     /// resolved to the root's commit. Transitive entries carry theirs in place.
-    pub direct_also_satisfies: BTreeMap<String, Vec<Satisfied>>,
+    pub direct_also_satisfies: BTreeMap<DepName, Vec<Satisfied>>,
     /// `--locked` only: `(synthesized name, description)` for each transitive
     /// edge that would have needed a fresh resolution because `ai.lock` has no
     /// matching pin for it. That edge's subtree is not walked.
@@ -137,8 +138,8 @@ pub struct Output {
 
 /// One resolved identity in the global dedup/conflict map.
 struct Resolved {
-    commit: String,
-    reference: String,
+    commit: CommitSha,
+    reference: LockReference,
     /// Names, from a direct root down to this node, at first resolution — used to
     /// render a readable requester chain in a conflict error.
     chain: Vec<String>,
@@ -157,8 +158,8 @@ struct Resolved {
 struct Miss {
     key: Key,
     name: String,
-    /// The selector label the edge requested.
-    requested: String,
+    /// The selector the edge requested.
+    requested: LockReference,
     problem: String,
 }
 
@@ -178,14 +179,14 @@ struct Walk {
 /// would be) resolved at, plus the requester chain that led there. Grouping the
 /// two symmetric sides keeps [`conflict_error`] to a readable argument list.
 struct ConflictSide<'a> {
-    reference: &'a str,
-    commit: &'a str,
+    reference: &'a LockReference,
+    commit: &'a CommitSha,
     chain: &'a [String],
 }
 
 /// Normalize a git URL for transitive identity purposes only (cycle stack,
 /// dedup map, conflict key, and the name-synthesis hash). This intentionally
-/// does **not** feed [`store_key`]/store dedup — that is an orthogonal,
+/// does **not** feed [`StoreKey::derive`]/store dedup — that is an orthogonal,
 /// pre-existing behavior. The normalization: strip a trailing `/`, strip a
 /// trailing `.git` **only for remote sources**, then lowercase the scheme +
 /// authority while preserving the path's case (paths are case-sensitive on the
@@ -393,7 +394,7 @@ fn nested_manifest_path(content: &Path, root: &Path) -> Result<Option<PathBuf>> 
 /// Fetch, security-scan, and materialize every direct skill, then (when opted
 /// in) recursively resolve and materialize the skills their nested `ai.json`
 /// files declare.
-pub fn expand(direct: &BTreeMap<String, LockedSkill>, ctx: &Ctx) -> Result<Output> {
+pub fn expand(direct: &BTreeMap<DepName, LockedSkill>, ctx: &Ctx) -> Result<Output> {
     let mut resolved: std::collections::HashMap<Key, Resolved> = std::collections::HashMap::new();
 
     // Seed the dedup/conflict map with the direct skills. Two direct skills that
@@ -423,7 +424,7 @@ pub fn expand(direct: &BTreeMap<String, LockedSkill>, ctx: &Ctx) -> Result<Outpu
                         ConflictSide {
                             reference: &locked.reference,
                             commit: &locked.commit,
-                            chain: std::slice::from_ref(name),
+                            chain: &[name.to_string()],
                         },
                     ));
                 }
@@ -433,7 +434,7 @@ pub fn expand(direct: &BTreeMap<String, LockedSkill>, ctx: &Ctx) -> Result<Outpu
                     Resolved {
                         commit: locked.commit.clone(),
                         reference: locked.reference.clone(),
-                        chain: vec![name.clone()],
+                        chain: vec![name.to_string()],
                         out_idx: None,
                     },
                 );
@@ -485,7 +486,7 @@ pub fn expand(direct: &BTreeMap<String, LockedSkill>, ctx: &Ctx) -> Result<Outpu
                 && (l.reference == m.requested
                     || l.also_satisfies.iter().any(|s| s.reference == m.requested))
         });
-        if covered && !ctx.prev.contains_key(&m.name) {
+        if covered && !ctx.prev.contains_key(m.name.as_str()) {
             out.uncertain_misses.push(m.name);
         } else {
             out.lock_misses.push((m.name, m.problem));
@@ -508,10 +509,10 @@ pub fn expand(direct: &BTreeMap<String, LockedSkill>, ctx: &Ctx) -> Result<Outpu
 
 fn visit(
     w: &mut Walk,
-    name: &str,
+    name: &DepName,
     locked: &LockedSkill,
     depth: usize,
-    direct: &BTreeMap<String, LockedSkill>,
+    direct: &BTreeMap<DepName, LockedSkill>,
     ctx: &Ctx,
 ) -> Result<()> {
     let width = ctx.width;
@@ -532,7 +533,7 @@ fn visit(
         crate::scan::enforce(name, &l.content, &l.content)
             .with_context(|| format!("scanning linked skill `{name}`"))?;
         w.out.materialized.push(MaterializedSkill {
-            name: name.to_string(),
+            name: name.clone(),
             path: l.content.clone(),
             root: l.content.clone(),
         });
@@ -566,7 +567,7 @@ fn visit(
         crate::skillcheck::warn_if_not_loadable(
             name,
             &locked.git,
-            &locked.reference,
+            &locked.reference.label(),
             locked.path.as_deref(),
             &ensured.path,
             &ensured.root,
@@ -581,7 +582,7 @@ fn visit(
     }
     if link.is_none() {
         w.out.materialized.push(MaterializedSkill {
-            name: name.to_string(),
+            name: name.clone(),
             path: ensured.path.clone(),
             root: ensured.root.clone(),
         });
@@ -628,7 +629,7 @@ fn visit(
         w.edges += 1;
         if w.edges > MAX_EDGES {
             let mut chain: Vec<String> = w.stack.iter().map(|(_, n)| n.clone()).collect();
-            chain.push(declared.clone());
+            chain.push(declared.to_string());
             bail!(
                 "transitive dependency edge cap ({MAX_EDGES}) exceeded at: {}\n\
                  a dependency graph this wide is almost certainly a mistake (or hostile); \
@@ -640,7 +641,7 @@ fn visit(
         // resolution or fetch, naming the chain of requesters that led here.
         if let Err(e) = ctx.policy.check(&spec.git) {
             let mut chain: Vec<String> = w.stack.iter().map(|(_, n)| n.clone()).collect();
-            chain.push(declared.clone());
+            chain.push(declared.to_string());
             return Err(e.context(format!(
                 "nested skill `{declared}` required by `{name}` (via {})",
                 chain_str(&chain)
@@ -699,11 +700,11 @@ fn visit(
             // commit; that evidence is reused (unless refreshing) so this edge is
             // re-checked without a remote lookup — and `install --locked` accepts
             // a lock that plain `install` produced.
-            let requested = spec.version()?.label();
+            let requested = LockReference::from(spec.version()?);
             if requested != existing.reference {
                 let pinned = match existing.out_idx {
                     Some(idx) => ctx.prev.get(&w.out.transitive[idx].0),
-                    None => direct.get(&existing.chain[0]),
+                    None => direct.get(existing.chain[0].as_str()),
                 };
                 let evidence = pinned
                     .filter(|p| !ctx.refresh && p.commit == existing.commit)
@@ -728,7 +729,7 @@ fn visit(
                 if existing.commit != child_commit {
                     let mut cur_chain: Vec<String> =
                         w.stack.iter().map(|(_, n)| n.clone()).collect();
-                    cur_chain.push(declared.clone());
+                    cur_chain.push(declared.to_string());
                     return Err(conflict_error(
                         &ckey,
                         ConflictSide {
@@ -752,7 +753,7 @@ fn visit(
                     None => w
                         .out
                         .direct_also_satisfies
-                        .entry(existing.chain[0].clone())
+                        .entry(DepName::try_from(&existing.chain[0])?)
                         .or_default()
                         .push(requested),
                 }
@@ -765,7 +766,7 @@ fn visit(
             // requested_by — a root is pre-seeded with `out_idx: None`, so a
             // root diamond appends nothing).
             if let Some(idx) = existing.out_idx {
-                w.out.transitive[idx].1.requested_by.push(name.to_string());
+                w.out.transitive[idx].1.requested_by.push(name.clone());
             }
             continue;
         }
@@ -774,14 +775,14 @@ fn visit(
         // resolving, so a collision or bad name fails fast without a needless
         // remote lookup. The synthesized name also scopes lockfile reuse to this
         // exact edge (see `resolve_child`).
-        validate_skill_name(&synth)
+        let synth = DepName::try_from(synth)
             .with_context(|| format!("synthesized name for nested skill `{declared}`"))?;
         // Node budget: a fresh node is the expensive unit (remote resolve,
         // checkout, scan, materialize). Refuse before resolving it once the
         // whole-walk cap is hit, so a wide fan-out cannot exhaust time/disk.
         if w.out.transitive.len() >= MAX_NODES {
             let mut chain: Vec<String> = w.stack.iter().map(|(_, n)| n.clone()).collect();
-            chain.push(declared.clone());
+            chain.push(declared.to_string());
             bail!(
                 "transitive dependency node cap ({MAX_NODES}) exceeded at: {}\n\
                  a dependency graph this large is almost certainly a mistake (or hostile); \
@@ -801,16 +802,16 @@ fn visit(
         else {
             w.misses.push(Miss {
                 key: ckey,
-                name: synth.clone(),
-                requested: spec.version()?.label(),
+                name: synth.to_string(),
+                requested: LockReference::from(spec.version()?),
                 problem: lock_miss(&synth, declared, name, spec, ctx)?,
             });
             continue;
         };
-        child.requested_by = vec![name.to_string()];
+        child.requested_by = vec![name.clone()];
 
         let mut child_chain: Vec<String> = w.stack.iter().map(|(_, n)| n.clone()).collect();
-        child_chain.push(synth.clone());
+        child_chain.push(synth.to_string());
         let idx = w.out.transitive.len();
         w.resolved.insert(
             ckey,
@@ -871,8 +872,8 @@ fn resolve_child(spec: &SkillSpec, synth: &str, ctx: &Ctx) -> Result<Option<Lock
                 let commit = prev.commit.clone();
                 return Ok(Some(LockedSkill {
                     git: spec.git.clone(),
-                    reference: spec.version()?.label(),
-                    store: store_key(&spec.git, &commit),
+                    reference: LockReference::from(spec.version()?),
+                    store: StoreKey::derive(&spec.git, &commit),
                     path: spec.path.clone(),
                     commit,
                     resolved_tag: prev.resolved_tag.clone(),
@@ -910,7 +911,6 @@ fn lock_miss(
 }
 
 fn conflict_error(key: &Key, a: ConflictSide, b: ConflictSide) -> anyhow::Error {
-    let short = |c: &str| c[..c.len().min(8)].to_string();
     let path_note = key
         .1
         .as_deref()
@@ -923,10 +923,10 @@ fn conflict_error(key: &Key, a: ConflictSide, b: ConflictSide) -> anyhow::Error 
         key.0,
         path_note,
         a.reference,
-        short(a.commit),
+        a.commit.short(),
         chain_str(a.chain),
         b.reference,
-        short(b.commit),
+        b.commit.short(),
         chain_str(b.chain),
     )
 }
@@ -1070,7 +1070,7 @@ mod tests {
         let b = synth_name("foo", "helper", &key);
         assert_eq!(a, b, "deterministic");
         assert!(
-            validate_skill_name(&a).is_ok(),
+            DepName::try_from(a.as_str()).is_ok(),
             "must be a valid skill name: {a}"
         );
         assert!(a.starts_with("foo__helper-"));
@@ -1083,7 +1083,7 @@ mod tests {
         for _ in 0..MAX_DEPTH {
             name = synth_name(&name, &"d".repeat(100), &key);
             assert!(name.len() <= MAX_SYNTH_NAME_BYTES, "{} bytes", name.len());
-            assert!(validate_skill_name(&name).is_ok());
+            assert!(DepName::try_from(name.as_str()).is_ok());
             assert!(name.ends_with(&format!("-{}", short_hash(&key))));
         }
     }
@@ -1093,7 +1093,7 @@ mod tests {
         let key = ("https://github.com/o/r".to_string(), None);
         let name = synth_name(&"é".repeat(300), &"ü".repeat(300), &key);
         assert!(name.len() <= MAX_SYNTH_NAME_BYTES);
-        assert!(validate_skill_name(&name).is_ok());
+        assert!(DepName::try_from(name.as_str()).is_ok());
     }
 
     #[test]

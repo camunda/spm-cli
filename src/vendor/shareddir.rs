@@ -19,6 +19,7 @@
 
 use super::dirskills::{copy_skills_into, remove_managed};
 use super::{Claim, MaterializedSkill, Vendor};
+use crate::ids::DepName;
 use crate::scope::Scope;
 use crate::{gitignore, paths};
 use anyhow::Result;
@@ -132,14 +133,14 @@ impl Vendor for SharedDirVendor {
         scope: &Scope,
         _project_id: &str,
         skills: &[MaterializedSkill],
-        previously_managed: &[String],
+        previously_managed: &[DepName],
         claim: Claim,
     ) -> Result<()> {
         let dir = self.skills_dir(scope)?;
         // Shared dir: remove only the entries spm owns (previously-managed ∪
         // about-to-write), then copy the current set. Never wipe the whole dir.
-        let mut owned: BTreeSet<&str> = previously_managed.iter().map(String::as_str).collect();
-        owned.extend(skills.iter().map(|s| s.name.as_str()));
+        let mut owned: BTreeSet<&DepName> = previously_managed.iter().collect();
+        owned.extend(skills.iter().map(|s| &s.name));
         remove_managed(&dir, owned.iter().copied(), claim)?;
         if !skills.is_empty() {
             copy_skills_into(&dir, skills, claim)?;
@@ -147,7 +148,7 @@ impl Vendor for SharedDirVendor {
         // Keep spm's skills out of VCS without ignoring the user's own committed
         // skills in the same shared dir: ignore each managed subdir by name.
         if let Scope::Project { root } = scope {
-            let names: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
+            let names: Vec<DepName> = skills.iter().map(|s| s.name.clone()).collect();
             for entry in self.gitignore_entries(&names) {
                 gitignore::ensure(root, self.gitignore_comment, &entry)?;
             }
@@ -155,7 +156,7 @@ impl Vendor for SharedDirVendor {
         Ok(())
     }
 
-    fn gitignore_entries(&self, skills: &[String]) -> Vec<String> {
+    fn gitignore_entries(&self, skills: &[DepName]) -> Vec<String> {
         // Each managed subdir by name: the user's own skills share the dir.
         // A `[` would start a pattern class (`g[1]/` matches `g1/`); the other
         // glob characters are not valid in names.
@@ -166,7 +167,7 @@ impl Vendor for SharedDirVendor {
             .collect()
     }
 
-    fn clean_paths(&self, scope: &Scope, managed: &[String]) -> Result<Vec<PathBuf>> {
+    fn clean_paths(&self, scope: &Scope, managed: &[DepName]) -> Result<Vec<PathBuf>> {
         // Shared dir: only the skills spm owns, never the whole dir.
         // `.gitignore` is intentionally left untouched: the per-skill entries spm
         // added are harmless once the materialized dirs are gone, and rewriting a
@@ -181,12 +182,12 @@ impl Vendor for SharedDirVendor {
         }
     }
 
-    fn skill_paths(&self, scope: &Scope, managed: &[String]) -> Result<Vec<PathBuf>> {
+    fn skill_paths(&self, scope: &Scope, managed: &[DepName]) -> Result<Vec<PathBuf>> {
         let dir = self.skills_dir(scope)?;
         Ok(managed.iter().map(|n| dir.join(n)).collect())
     }
 
-    fn status(&self, scope: &Scope, expected: &[String]) -> Result<super::VendorStatus> {
+    fn status(&self, scope: &Scope, expected: &[DepName]) -> Result<super::VendorStatus> {
         // The dir is shared with the user's own skills in *both* scopes, so stale
         // detection would mislabel those — never enable it here.
         Ok(super::classify(&self.skills_dir(scope)?, expected, false))
@@ -200,6 +201,7 @@ fn join_all(base: &Path, segs: &[&str]) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ids::dep;
 
     fn scratch(name: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -217,7 +219,7 @@ mod tests {
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(src.join("SKILL.md"), format!("---\nname: {name}\n---\n")).unwrap();
         MaterializedSkill {
-            name: name.to_string(),
+            name: DepName::try_from(name).unwrap(),
             path: src,
             root: root.to_path_buf(),
         }
@@ -227,32 +229,32 @@ mod tests {
     fn presets_report_expected_names_and_dirs() {
         assert_eq!(gemini().name(), "gemini");
         assert_eq!(
-            gemini().gitignore_entries(&["greet".into()])[0],
+            gemini().gitignore_entries(&[dep("greet")])[0],
             ".gemini/skills/greet/"
         );
         assert_eq!(codex().name(), "codex");
         assert_eq!(
-            codex().gitignore_entries(&["greet".into()])[0],
+            codex().gitignore_entries(&[dep("greet")])[0],
             ".agents/skills/greet/"
         );
         assert_eq!(cursor().name(), "cursor");
         assert_eq!(
-            cursor().gitignore_entries(&["greet".into()])[0],
+            cursor().gitignore_entries(&[dep("greet")])[0],
             ".cursor/skills/greet/"
         );
         assert_eq!(cline().name(), "cline");
         assert_eq!(
-            cline().gitignore_entries(&["greet".into()])[0],
+            cline().gitignore_entries(&[dep("greet")])[0],
             ".cline/skills/greet/"
         );
         assert_eq!(windsurf().name(), "windsurf");
         assert_eq!(
-            windsurf().gitignore_entries(&["greet".into()])[0],
+            windsurf().gitignore_entries(&[dep("greet")])[0],
             ".windsurf/skills/greet/"
         );
         assert_eq!(amp().name(), "amp");
         assert_eq!(
-            amp().gitignore_entries(&["greet".into()])[0],
+            amp().gitignore_entries(&[dep("greet")])[0],
             ".agents/skills/greet/"
         );
     }
@@ -304,7 +306,7 @@ mod tests {
             &scope,
             "spm-1234",
             &[greet],
-            &["old-skill".to_string()],
+            &[dep("old-skill")],
             &mut |_| Ok(()),
         )
         .unwrap();
@@ -332,7 +334,7 @@ mod tests {
             std::fs::create_dir_all(dir.join(n)).unwrap();
             std::fs::write(dir.join(n).join("SKILL.md"), "x\n").unwrap();
         }
-        remove_managed(&dir, ["greet"].into_iter(), &mut |_| Ok(())).unwrap();
+        remove_managed(&dir, [&dep("greet")].into_iter(), &mut |_| Ok(())).unwrap();
         assert!(!dir.join("greet").exists(), "managed skill removed");
         assert!(dir.join("user-skill").exists(), "user skill preserved");
         std::fs::remove_dir_all(&tmp).unwrap();

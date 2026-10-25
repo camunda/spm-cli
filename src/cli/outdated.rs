@@ -1,6 +1,7 @@
 use super::common::print_json;
 use super::session::{Access, ScopeSession};
 use crate::git;
+use crate::ids::{DepName, LockReference};
 use crate::lockfile::{LockedSkill, Lockfile};
 use crate::manifest::{semver_of_tag, Manifest, Version};
 use crate::scope::Scope;
@@ -89,7 +90,7 @@ struct Row<'a> {
     outdated: bool,
     /// Resolved through another skill's `ai.json`: update it there, not here.
     transitive: bool,
-    requested_by: &'a [String],
+    requested_by: &'a [DepName],
     /// How an upstream bump of this transitive skill reaches the project
     /// (read from the whole lockfile, so a name filter cannot change it).
     #[serde(skip)]
@@ -153,25 +154,28 @@ struct Upgrade {
 }
 
 impl Upgrade {
-    fn plan(requested_by: &[String], lock: &Lockfile, manifest: &Manifest) -> Self {
+    fn plan(requested_by: &[DepName], lock: &Lockfile, manifest: &Manifest) -> Self {
         let mut up = Upgrade::default();
         let mut seen = std::collections::BTreeSet::new();
-        let mut queue: std::collections::VecDeque<&String> = requested_by.iter().collect();
+        let mut queue: std::collections::VecDeque<&DepName> = requested_by.iter().collect();
         while let Some(req) = queue.pop_front() {
-            if !seen.insert(req.clone()) {
+            if !seen.insert(req) {
                 continue;
             }
             let locked = lock.skills.get(req).or_else(|| lock.plugins.get(req));
-            let selector = locked.and_then(|q| Version::from_label(&q.reference));
+            let selector = locked.map(|q| q.reference.version());
             let local = manifest.skills.contains_key(req) || manifest.plugins.contains_key(req);
             match (locked, selector) {
                 (_, Some(Version::Branch(_))) => up.via_branch = true,
-                (_, Some(Version::Range(r))) => up.in_range.push((req.clone(), r)),
+                (_, Some(Version::Range(r))) => up.in_range.push((req.to_string(), r.clone())),
                 (Some(q), _) if !local && !q.requested_by.is_empty() => {
-                    up.republish.push((req.clone(), q.requested_by.clone()));
+                    up.republish.push((
+                        req.to_string(),
+                        q.requested_by.iter().map(DepName::to_string).collect(),
+                    ));
                     queue.extend(&q.requested_by);
                 }
-                _ => up.local_edits.push(req.clone()),
+                _ => up.local_edits.push(req.to_string()),
             }
         }
         up
@@ -357,13 +361,14 @@ fn check<'a>(
 /// so neither can miss a check the other gets. `resolved_tag` is the tag a
 /// `version` range is locked to.
 fn evaluate(
-    label: &str,
+    reference: &LockReference,
     git: &str,
     locked: &str,
     resolved_tag: Option<&str>,
     remotes: &mut Remotes,
 ) -> SelectorCheck {
-    let selector = Version::from_label(label);
+    let label = &reference.label();
+    let selector = Some(reference.version().clone());
     let mut out = SelectorCheck {
         selector: None,
         resolved_tag: resolved_tag.map(str::to_string),
@@ -846,6 +851,7 @@ fn summary(report: &OutdatedReport) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{newest_tag, summary, OutdatedReport, Row, Status, Upgrade};
+    use crate::ids::{dep, DepName};
     use std::collections::BTreeMap;
 
     fn refs(tags: &[&str]) -> BTreeMap<String, String> {
@@ -884,7 +890,7 @@ mod tests {
         assert_eq!(newest_tag(&r, "v1.2.3+build.1"), None);
     }
 
-    fn row<'a>(name: &'a str, status: Status, requested_by: &'a [String]) -> Row<'a> {
+    fn row<'a>(name: &'a str, status: Status, requested_by: &'a [DepName]) -> Row<'a> {
         Row {
             plugin: false,
             name,
@@ -910,8 +916,8 @@ mod tests {
 
     #[test]
     fn summary_routes_each_kind_of_change_to_the_command_that_applies_it() {
-        let via = ["top".to_string()];
-        let pinned_via = ["fixed".to_string()];
+        let via = [dep("top")];
+        let pinned_via = [dep("fixed")];
         let report = OutdatedReport {
             scope: "global",
             skills: vec![
@@ -983,7 +989,7 @@ mod tests {
 
     #[test]
     fn summary_ends_a_transitive_chain_at_a_range_tracking_requester() {
-        let via = ["mid".to_string()];
+        let via = [dep("mid")];
         let report = OutdatedReport {
             scope: "project",
             skills: vec![Row {

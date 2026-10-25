@@ -3,6 +3,7 @@ use super::common::VersionArg;
 use super::session::{Access, ScopeSession};
 use super::shorthand;
 use super::sync::{save_and_sync, Apply};
+use crate::ids::DepName;
 use crate::manifest::{Manifest, SkillSpec};
 use crate::scope::Scope;
 use crate::{resolver, store};
@@ -63,10 +64,10 @@ pub(super) fn add(scope: &Scope, req: AddRequest) -> Result<()> {
             // path yields nothing usable as a skill name (e.g. `.`, `foo/.`, ``).
             path.as_deref()
                 .map(default_name)
-                .filter(|n| crate::manifest::validate_skill_name(n).is_ok())
+                .filter(|n| DepName::try_from(n).is_ok())
                 .unwrap_or_else(|| default_name(&git))
         });
-        crate::manifest::validate_skill_name(&name)?;
+        let name = DepName::try_from(name)?;
         // A dependency name lives in one flat namespace shared by `skills` and
         // `plugins` (see `Manifest::load`), so a name already taken by the
         // *other* map is always a hard error — even with --force, since --force
@@ -193,9 +194,10 @@ fn add_all(
     // Reject the whole batch on the first collision so the manifest is never
     // left half-populated — unless --force opts into overwriting existing
     // entries. Name validation still runs regardless.
+    let mut names = Vec::with_capacity(subs.len());
     for sub in &subs {
-        crate::manifest::validate_skill_name(sub)?;
-        if !force && manifest.skills.contains_key(sub) {
+        let sub = DepName::try_from(sub)?;
+        if !force && manifest.skills.contains_key(&sub) {
             bail!(
                 "a skill named `{sub}` already exists in {}; either pass --force to \
                  overwrite the existing entries, or `spm remove {}` first",
@@ -203,9 +205,10 @@ fn add_all(
                 crate::shell::operands([sub.as_str()])
             );
         }
+        names.push(sub);
     }
 
-    for sub in &subs {
+    for sub in &names {
         let subpath = crate::skillcheck::join_subpath(path.as_deref(), sub);
         manifest.skills.insert(
             sub.clone(),

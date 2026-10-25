@@ -1,3 +1,4 @@
+use crate::ids::DepName;
 use crate::scope::Scope;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -34,7 +35,7 @@ pub struct Manifest {
     )]
     pub allowed_sources: Option<Vec<String>>,
     #[serde(default, deserialize_with = "deserialize_unique_skills")]
-    pub skills: BTreeMap<String, SkillSpec>,
+    pub skills: BTreeMap<DepName, SkillSpec>,
     /// Full-plugin dependencies (agents/MCP servers/hooks/scripts + bundled
     /// skills), keyed by local name. Unlike a `skills` entry — which points at a
     /// single `SKILL.md` folder — a plugin `path` points at a Claude Code plugin
@@ -44,7 +45,7 @@ pub struct Manifest {
         skip_serializing_if = "BTreeMap::is_empty",
         deserialize_with = "deserialize_unique_plugins"
     )]
-    pub plugins: BTreeMap<String, SkillSpec>,
+    pub plugins: BTreeMap<DepName, SkillSpec>,
 }
 
 /// Deserialize the `skills` map while rejecting duplicate names. A plain
@@ -52,7 +53,7 @@ pub struct Manifest {
 /// keys to last-wins, which would drop an earlier skill without warning. We see
 /// both entries only by streaming the map ourselves — so `Manifest::load` must
 /// deserialize from the raw text, not from an already-collapsed `Value`.
-fn deserialize_unique_skills<'de, D>(d: D) -> Result<BTreeMap<String, SkillSpec>, D::Error>
+fn deserialize_unique_skills<'de, D>(d: D) -> Result<BTreeMap<DepName, SkillSpec>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -61,7 +62,7 @@ where
 
 /// Same duplicate-key rejection as [`deserialize_unique_skills`], for the
 /// `plugins` map.
-fn deserialize_unique_plugins<'de, D>(d: D) -> Result<BTreeMap<String, SkillSpec>, D::Error>
+fn deserialize_unique_plugins<'de, D>(d: D) -> Result<BTreeMap<DepName, SkillSpec>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -74,14 +75,14 @@ where
 fn deserialize_unique_map<'de, D>(
     d: D,
     kind: &'static str,
-) -> Result<BTreeMap<String, SkillSpec>, D::Error>
+) -> Result<BTreeMap<DepName, SkillSpec>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     use serde::de::{self, MapAccess, Visitor};
     struct MapVisitor(&'static str);
     impl<'de> Visitor<'de> for MapVisitor {
-        type Value = BTreeMap<String, SkillSpec>;
+        type Value = BTreeMap<DepName, SkillSpec>;
         fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
             write!(f, "a map of unique {} names", self.0)
         }
@@ -91,7 +92,7 @@ where
         {
             let kind = self.0;
             let mut out = BTreeMap::new();
-            while let Some((name, spec)) = map.next_entry::<String, SkillSpec>()? {
+            while let Some((name, spec)) = map.next_entry::<DepName, SkillSpec>()? {
                 if out.contains_key(&name) {
                     return Err(de::Error::custom(format!(
                         "duplicate {kind} name `{name}` in the `{kind}s` map; \
@@ -129,7 +130,7 @@ pub struct SkillSpec {
 
 /// The version selector, normalized. Serializes externally tagged
 /// (`{"tag": "v1.2.0"}`), mirroring how the selector is written in `ai.json`.
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Version {
     Tag(String),
@@ -141,27 +142,14 @@ pub enum Version {
 }
 
 impl Version {
-    /// Stable human label stored in ai.lock and used to detect request changes.
+    /// Stable human label stored in ai.lock (see [`LockReference`](crate::ids::LockReference)) and used
+    /// to detect request changes.
     pub fn label(&self) -> String {
         match self {
             Version::Tag(t) => format!("tag:{t}"),
             Version::Branch(b) => format!("branch:{b}"),
             Version::Commit(c) => format!("commit:{c}"),
             Version::Range(r) => format!("version:{r}"),
-        }
-    }
-
-    /// Inverse of [`label`](Version::label): parse an `ai.lock` `reference`
-    /// back into a selector. `None` for a label of unknown shape.
-    pub fn from_label(label: &str) -> Option<Version> {
-        let (kind, value) = label.split_once(':')?;
-        let value = value.to_string();
-        match kind {
-            "tag" => Some(Version::Tag(value)),
-            "branch" => Some(Version::Branch(value)),
-            "commit" => Some(Version::Commit(value)),
-            "version" => Some(Version::Range(value)),
-            _ => None,
         }
     }
 }
@@ -217,61 +205,6 @@ impl SkillSpec {
     }
 }
 
-/// Reject a skill name that is unsafe or unportable as a path component. Names
-/// come straight from `ai.json` keys (root *and* nested dependency manifests)
-/// and become directory components under each vendor's skills dir, so this is
-/// the single canonical gate for every name that reaches the filesystem.
-///
-/// Two classes are rejected:
-///   1. **Path escapes** — `..`, `/`, `\`, or NUL would let a hostile manifest
-///      write outside the intended directory (`skills_dir.join(name)`).
-///   2. **Platform-invalid / reserved names** — characters and reserved device
-///      names that are illegal, silently rewritten, or map to device files on
-///      Windows (which is in CI and a supported platform). Rejecting them here
-///      fails fast with a clear local error instead of surfacing as a confusing
-///      filesystem error deep inside materialization on another OS — and does so
-///      *before* a nested dependency is synthesized or fetched.
-pub fn validate_skill_name(name: &str) -> Result<()> {
-    let path_bad = name.is_empty()
-        || name == "."
-        || name == ".."
-        || name.contains('/')
-        || name.contains('\\')
-        || name.contains('\0');
-    if path_bad {
-        bail!(
-            "invalid skill name `{name}`: names must be non-empty and must not contain \
-             path separators, `.`, `..`, or NUL"
-        );
-    }
-    if let Some(c) = name
-        .chars()
-        .find(|c| matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*') || c.is_control())
-    {
-        bail!(
-            "invalid skill name `{name}`: character {c:?} is not allowed — names become \
-             directory components, and `< > : \" | ? *` and control characters are invalid \
-             in file names on Windows"
-        );
-    }
-    if name.ends_with('.') || name.ends_with(' ') {
-        bail!(
-            "invalid skill name `{name}`: names must not end with a space or `.` — Windows \
-             silently strips trailing spaces and dots, which would collide two distinct names"
-        );
-    }
-    // Windows reserves device names matched on the stem before the first dot, so
-    // `CON`, `con.txt`, and `aux.anything` all resolve to a device, not a file.
-    let stem = name.split('.').next().unwrap_or(name);
-    if is_windows_reserved_device_name(stem) {
-        bail!(
-            "invalid skill name `{name}`: `{stem}` is a reserved device name on Windows — \
-             choose another name"
-        );
-    }
-    Ok(())
-}
-
 /// Maximum size (bytes) of a nested dependency `ai.json`. A nested manifest is
 /// untrusted and parsed (twice) into memory before any edge budget applies, so
 /// the size is bounded up front; this comfortably fits `MAX_EDGES` declarations.
@@ -303,22 +236,12 @@ fn read_bounded(p: &Path) -> Result<String> {
     })
 }
 
-/// Whether `stem` is a Windows reserved device name (case-insensitive):
-/// `CON`, `PRN`, `AUX`, `NUL`, `COM1`–`COM9`, or `LPT1`–`LPT9`.
-fn is_windows_reserved_device_name(stem: &str) -> bool {
-    let s = stem.to_ascii_uppercase();
-    matches!(s.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-        || ((s.starts_with("COM") || s.starts_with("LPT"))
-            && s.len() == 4
-            && matches!(s.as_bytes()[3], b'1'..=b'9'))
-}
-
 /// Reject a `commit` selector that is not a full 40-character hex SHA.
 ///
 /// The root `ai.json` is guarded by the JSON schema, whose `commit` pattern
 /// (`^[0-9a-fA-F]{40}$`) is the only thing keeping an untrusted commit string
 /// out of the store path: `resolver::resolve` feeds a `commit` selector verbatim
-/// into `store_key`, which appends it into a directory name that `store::ensure`
+/// into `StoreKey::derive`, which appends it into a directory name that `store::ensure`
 /// joins onto the store root and recursively removes/rewrites. A *nested*
 /// (`DependencyManifest`) spec bypasses that schema, so a hostile dependency
 /// could otherwise smuggle slashes or `..` into the store path via the commit
@@ -395,7 +318,6 @@ impl Manifest {
                 .with_context(|| format!("`allowedSources` in {}", p.display()))?;
         }
         for (name, spec) in &manifest.skills {
-            validate_skill_name(name).with_context(|| format!("in {}", p.display()))?;
             spec.version()
                 .with_context(|| format!("skill `{name}` in {}", p.display()))?;
             if let Some(sub) = &spec.path {
@@ -404,7 +326,6 @@ impl Manifest {
             }
         }
         for (name, spec) in &manifest.plugins {
-            validate_skill_name(name).with_context(|| format!("in {}", p.display()))?;
             spec.version()
                 .with_context(|| format!("plugin `{name}` in {}", p.display()))?;
             if let Some(sub) = &spec.path {
@@ -455,7 +376,7 @@ impl Manifest {
 #[derive(Debug, Clone, Deserialize)]
 pub struct DependencyManifest {
     #[serde(default, deserialize_with = "deserialize_unique_skills")]
-    pub skills: BTreeMap<String, SkillSpec>,
+    pub skills: BTreeMap<DepName, SkillSpec>,
 }
 
 impl DependencyManifest {
@@ -501,7 +422,6 @@ impl DependencyManifest {
         let dep: Self = serde_json::from_str(&text)
             .with_context(|| format!("parsing nested {}", p.display()))?;
         for (name, spec) in &dep.skills {
-            validate_skill_name(name).with_context(|| format!("in nested {}", p.display()))?;
             // The root schema constrains these fields to a non-empty string
             // (`minLength: 1`); a nested manifest bypasses the schema, so an
             // empty `git`/`tag`/`branch`/`path` would otherwise slip through and
@@ -539,7 +459,7 @@ impl DependencyManifest {
             }
             // The root schema constrains `commit` to a full hex SHA; nested
             // manifests skip the schema, so enforce it here before the value can
-            // reach `resolver::resolve`/`store_key` and become part of a store
+            // reach `resolver::resolve`/`StoreKey::derive` and become part of a store
             // path (see `validate_commit_selector`).
             if let Some(commit) = &spec.commit {
                 validate_commit_selector(commit)
@@ -666,18 +586,39 @@ mod tests {
         ));
     }
 
+    /// Root manifests reject invalid dependency names in either map, and a
+    /// name declared both as a skill and a plugin.
     #[test]
-    fn version_label_round_trips_through_from_label() {
-        for v in [
-            Version::Tag("v1.2.0".into()),
-            Version::Branch("feat/x:y".into()),
-            Version::Commit("a".repeat(40)),
-            Version::Range(">=1.2, <2".into()),
+    fn parse_rejects_bad_names_and_cross_map_collisions() {
+        let p = Path::new("ai.json");
+        let dep = r#"{"git":"u","branch":"main"}"#;
+        let ok =
+            format!(r#"{{"targets":["claude"],"skills":{{"a":{dep}}},"plugins":{{"b":{dep}}}}}"#);
+        let m = Manifest::parse(&ok, p).unwrap();
+        assert!(m.skills.contains_key("a") && m.plugins.contains_key("b"));
+        for (json, needle) in [
+            (
+                format!(
+                    r#"{{"targets":["claude"],"skills":{{"x":{dep}}},"plugins":{{"x":{dep}}}}}"#
+                ),
+                "name collision",
+            ),
+            (
+                format!(r#"{{"targets":["claude"],"skills":{{"a:b":{dep}}}}}"#),
+                "invalid skill name",
+            ),
+            (
+                format!(r#"{{"targets":["claude"],"plugins":{{"..":{dep}}}}}"#),
+                "invalid skill name",
+            ),
+            (
+                format!(r#"{{"targets":["claude"],"plugins":{{"aux":{dep}}}}}"#),
+                "reserved device name",
+            ),
         ] {
-            assert_eq!(Version::from_label(&v.label()), Some(v));
+            let err = Manifest::parse(&json, p).unwrap_err();
+            assert!(format!("{err:#}").contains(needle), "{json}: {err:#}");
         }
-        assert_eq!(Version::from_label("rev:abc"), None);
-        assert_eq!(Version::from_label("no-colon"), None);
     }
 
     #[test]
@@ -692,65 +633,10 @@ mod tests {
         assert!(validate_subpath(".").is_ok());
     }
 
-    #[test]
-    fn validate_skill_name_accepts_ordinary_names() {
-        for name in [
-            "foo", "my-skill", "foo.bar", "com0", "lpt10", "comic", "console",
-        ] {
-            assert!(
-                validate_skill_name(name).is_ok(),
-                "`{name}` should be accepted"
-            );
-        }
-    }
-
-    #[test]
-    fn validate_skill_name_rejects_windows_invalid_chars() {
-        for name in [
-            "foo:bar",
-            "a*b",
-            "what?",
-            "pipe|d",
-            "lt<gt>",
-            "quo\"te",
-            "ctrl\u{1}x",
-        ] {
-            let err = validate_skill_name(name).unwrap_err();
-            assert!(
-                format!("{err}").contains("not allowed"),
-                "`{name}` should be rejected: {err}"
-            );
-        }
-    }
-
-    #[test]
-    fn validate_skill_name_rejects_trailing_dot_or_space() {
-        for name in ["foo.", "foo ", "bar. "] {
-            let err = validate_skill_name(name).unwrap_err();
-            assert!(
-                format!("{err}").contains("space or `.`"),
-                "`{name}` should be rejected: {err}"
-            );
-        }
-    }
-
-    #[test]
-    fn validate_skill_name_rejects_windows_reserved_device_names() {
-        for name in [
-            "con", "CON", "Prn", "aux", "nul", "com1", "LPT9", "con.txt", "aux.md",
-        ] {
-            let err = validate_skill_name(name).unwrap_err();
-            assert!(
-                format!("{err}").contains("reserved device name"),
-                "`{name}` should be rejected: {err}"
-            );
-        }
-    }
-
     /// A nested manifest bypasses the root JSON schema, so a `commit` selector
     /// that is not a full hex SHA (here one carrying path separators aimed at
     /// the store path) must be rejected by `DependencyManifest::load_file` before it
-    /// can reach `resolver::resolve`/`store_key`.
+    /// can reach `resolver::resolve`/`StoreKey::derive`.
     #[test]
     fn dependency_manifest_rejects_non_sha_commit() {
         let dir = std::env::temp_dir().join(format!(

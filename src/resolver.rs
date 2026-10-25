@@ -1,5 +1,6 @@
 use crate::git;
-use crate::lockfile::{store_key, LockedSkill};
+use crate::ids::{CommitSha, LockReference, StoreKey};
+use crate::lockfile::LockedSkill;
 use crate::manifest::{parse_version_req, semver_of_tag, SkillSpec, Version};
 use anyhow::{bail, Result};
 use std::collections::BTreeMap;
@@ -7,7 +8,6 @@ use std::collections::BTreeMap;
 /// Resolve a single skill spec to a locked entry (ref -> commit SHA + store key).
 pub fn resolve(spec: &SkillSpec) -> Result<LockedSkill> {
     let version = spec.version()?;
-    let reference = version.label();
     let mut resolved_tag = None;
     let commit = match &version {
         Version::Commit(c) => c.clone(),
@@ -30,15 +30,15 @@ pub fn resolve(spec: &SkillSpec) -> Result<LockedSkill> {
     };
     // Normalize to lowercase so the pin matches git's lowercase `rev-parse HEAD`
     // (otherwise an uppercase SHA is treated as stale and refetched every run).
-    let commit = commit.to_lowercase();
+    let commit = CommitSha::try_from(commit.to_lowercase())?;
 
     Ok(LockedSkill {
         git: spec.git.clone(),
-        reference,
-        store: store_key(&spec.git, &commit),
+        store: StoreKey::derive(&spec.git, &commit),
         path: spec.path.clone(),
         commit,
         resolved_tag,
+        reference: LockReference::from(version),
         bundled_skills: Vec::new(),
         requested_by: Vec::new(),
         also_satisfies: Vec::new(),

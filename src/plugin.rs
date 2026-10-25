@@ -12,7 +12,8 @@
 //!    understand `SKILL.md` and cannot register agents/MCP/hooks — still gets
 //!    the plugin's skills (a graceful, skills-only degradation).
 
-use crate::manifest::{validate_skill_name, validate_subpath};
+use crate::ids::DepName;
+use crate::manifest::validate_subpath;
 use crate::vendor::MaterializedSkill;
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -53,12 +54,11 @@ pub fn looks_like_plugin(root: &Path) -> bool {
 /// `fallback` (the manifest key) when the plugin omits it. The returned value
 /// feeds the Claude marketplace/enabled-plugins keys, so it is validated to be a
 /// safe single token.
-pub fn plugin_name(root: &Path, fallback: &str) -> Result<String> {
+pub fn plugin_name(root: &Path, fallback: &DepName) -> Result<DepName> {
     let declared = read_plugin_json(root)?.name;
-    match declared {
-        Some(n) if validate_skill_name(&n).is_ok() => Ok(n),
-        _ => Ok(fallback.to_string()),
-    }
+    Ok(declared
+        .and_then(|n| DepName::try_from(n).ok())
+        .unwrap_or_else(|| fallback.clone()))
 }
 
 /// Enumerate the plugin's bundled skills as [`MaterializedSkill`]s: every
@@ -136,11 +136,10 @@ pub fn plugin_skills(root: &Path, boundary: &Path) -> Result<Vec<MaterializedSki
         let name = path
             .file_name()
             .and_then(|n| n.to_str())
-            .map(str::to_string)
             .with_context(|| format!("non-UTF-8 skill dir name under {}", skills_dir.display()))?;
         // The subdir name becomes a path component in every vendor's skills dir,
         // so it must pass the same escape checks as a manifest skill name.
-        validate_skill_name(&name)
+        let name = DepName::try_from(name)
             .with_context(|| format!("bundled skill in plugin at {}", root.display()))?;
         out.push(MaterializedSkill {
             name,
@@ -190,12 +189,18 @@ mod tests {
     fn plugin_name_prefers_declared_then_falls_back() {
         let root = scratch("name");
         make_plugin(&root, r#"{"name":"declared-name"}"#, &[]);
-        assert_eq!(plugin_name(&root, "fallback").unwrap(), "declared-name");
+        assert_eq!(
+            plugin_name(&root, &DepName::try_from("fallback").unwrap()).unwrap(),
+            "declared-name"
+        );
         std::fs::remove_dir_all(&root).unwrap();
 
         let root2 = scratch("name-missing");
         make_plugin(&root2, r#"{}"#, &[]);
-        assert_eq!(plugin_name(&root2, "fallback").unwrap(), "fallback");
+        assert_eq!(
+            plugin_name(&root2, &DepName::try_from("fallback").unwrap()).unwrap(),
+            "fallback"
+        );
         std::fs::remove_dir_all(&root2).unwrap();
     }
 
@@ -206,7 +211,7 @@ mod tests {
         let mut got: Vec<String> = plugin_skills(&root, &root)
             .unwrap()
             .into_iter()
-            .map(|s| s.name)
+            .map(|s| s.name.to_string())
             .collect();
         got.sort();
         assert_eq!(got, vec!["a".to_string(), "b".to_string()]);
@@ -251,7 +256,7 @@ mod tests {
         let got: Vec<String> = plugin_skills(&root, &checkout)
             .unwrap()
             .into_iter()
-            .map(|s| s.name)
+            .map(|s| s.name.to_string())
             .collect();
         // Only the in-checkout `real` skill is enumerated; `evil` is skipped.
         assert_eq!(got, vec!["real".to_string()]);
@@ -313,7 +318,7 @@ mod tests {
         let got: Vec<String> = plugin_skills(&root, &checkout)
             .unwrap()
             .into_iter()
-            .map(|s| s.name)
+            .map(|s| s.name.to_string())
             .collect();
         // Only `real` is enumerated; `evil` is skipped (its SKILL.md escapes).
         assert_eq!(got, vec!["real".to_string()]);

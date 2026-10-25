@@ -1,5 +1,6 @@
 use super::common::print_json;
 use super::session::{Access, ScopeSession};
+use crate::ids::DepName;
 use crate::links::Links;
 use crate::lockfile::{LockedSkill, Lockfile};
 use crate::manifest::{Manifest, Version};
@@ -32,7 +33,7 @@ struct SkillRow<'a> {
     commit: Option<&'a str>,
     installed: bool,
     transitive: bool,
-    requested_by: &'a [String],
+    requested_by: &'a [DepName],
     /// The local directory a `spm link` override materializes this skill
     /// from instead of its locked commit; `null` when not linked.
     linked: Option<&'a str>,
@@ -50,7 +51,7 @@ struct PluginRow<'a> {
     resolved_tag: Option<&'a str>,
     commit: Option<&'a str>,
     installed: bool,
-    bundled_skills: &'a [String],
+    bundled_skills: &'a [DepName],
     /// The local directory a `spm link` override materializes this plugin
     /// from instead of its locked commit; `null` when not linked.
     linked: Option<&'a str>,
@@ -113,7 +114,7 @@ fn collect<'a>(
             name,
             git: &l.git,
             path: l.path.as_deref(),
-            selector: Version::from_label(&l.reference),
+            selector: Some(l.reference.version().clone()),
             resolved_tag: l.resolved_tag.as_deref(),
             commit: Some(&l.commit),
             installed: true,
@@ -141,10 +142,6 @@ fn collect<'a>(
     Ok(report)
 }
 
-fn short(commit: &str) -> &str {
-    &commit[..commit.len().min(8)]
-}
-
 /// `; linked → <dir>` for an entry with an active `spm link` override.
 fn link_note(linked: Option<&str>) -> String {
     linked
@@ -160,7 +157,7 @@ fn render_text(report: &ListReport) {
     for row in report.skills.iter().filter(|r| !r.transitive) {
         let pinned = row
             .lock
-            .map(|l| format!("{} @ {}", l.display_reference(), short(&l.commit)))
+            .map(|l| format!("{} @ {}", l.display_reference(), l.commit.short()))
             .unwrap_or_else(|| "not installed".into());
         println!(
             "{:<24} {}  ({pinned}{})",
@@ -182,7 +179,7 @@ fn render_text(report: &ListReport) {
                 row.name,
                 row.git,
                 l.display_reference(),
-                short(&l.commit),
+                l.commit.short(),
                 row.requested_by.join(", ")
             );
         }
@@ -192,12 +189,12 @@ fn render_text(report: &ListReport) {
             .lock
             .map(|l| {
                 if l.bundled_skills.is_empty() {
-                    format!("{} @ {}", l.display_reference(), short(&l.commit))
+                    format!("{} @ {}", l.display_reference(), l.commit.short())
                 } else {
                     format!(
                         "{} @ {}, skills: {}",
                         l.display_reference(),
-                        short(&l.commit),
+                        l.commit.short(),
                         l.bundled_skills.join(", ")
                     )
                 }

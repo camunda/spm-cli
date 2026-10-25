@@ -1,5 +1,6 @@
 use super::dirskills::{copy_skills_into, remove_managed};
 use super::{Claim, MaterializedSkill, Vendor};
+use crate::ids::DepName;
 use crate::scope::Scope;
 use crate::{gitignore, paths};
 use anyhow::{Context, Result};
@@ -47,7 +48,7 @@ impl Vendor for Copilot {
         scope: &Scope,
         _project_id: &str,
         skills: &[MaterializedSkill],
-        previously_managed: &[String],
+        previously_managed: &[DepName],
         claim: Claim,
     ) -> Result<()> {
         let dir = skills_dir(scope)?;
@@ -63,7 +64,7 @@ impl Vendor for Copilot {
                     return Ok(());
                 }
                 copy_skills_into(&dir, skills, claim)?;
-                let names: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
+                let names: Vec<DepName> = skills.iter().map(|s| s.name.clone()).collect();
                 for entry in self.gitignore_entries(&names) {
                     gitignore::ensure(root, GITIGNORE_COMMENT, &entry)?;
                 }
@@ -73,9 +74,8 @@ impl Vendor for Copilot {
                 // The dir is shared with the user's own skills: remove only the
                 // entries spm owns (previously-managed ∪ about-to-write), then
                 // copy the current set. Never wipe the whole directory.
-                let mut owned: BTreeSet<&str> =
-                    previously_managed.iter().map(String::as_str).collect();
-                owned.extend(skills.iter().map(|s| s.name.as_str()));
+                let mut owned: BTreeSet<&DepName> = previously_managed.iter().collect();
+                owned.extend(skills.iter().map(|s| &s.name));
                 remove_managed(&dir, owned.iter().copied(), claim)?;
                 if !skills.is_empty() {
                     copy_skills_into(&dir, skills, claim)?;
@@ -85,7 +85,7 @@ impl Vendor for Copilot {
         }
     }
 
-    fn gitignore_entries(&self, skills: &[String]) -> Vec<String> {
+    fn gitignore_entries(&self, skills: &[DepName]) -> Vec<String> {
         // Nothing is materialized (nor ignored) for an empty skill set.
         if skills.is_empty() {
             Vec::new()
@@ -94,7 +94,7 @@ impl Vendor for Copilot {
         }
     }
 
-    fn clean_paths(&self, scope: &Scope, managed: &[String]) -> Result<Vec<PathBuf>> {
+    fn clean_paths(&self, scope: &Scope, managed: &[DepName]) -> Result<Vec<PathBuf>> {
         match scope {
             // The project dir is wholly spm-owned. `.gitignore` is intentionally
             // left untouched: the entry spm added is harmless once the
@@ -110,12 +110,12 @@ impl Vendor for Copilot {
         skills_dir(scope)
     }
 
-    fn skill_paths(&self, scope: &Scope, managed: &[String]) -> Result<Vec<PathBuf>> {
+    fn skill_paths(&self, scope: &Scope, managed: &[DepName]) -> Result<Vec<PathBuf>> {
         let dir = skills_dir(scope)?;
         Ok(managed.iter().map(|n| dir.join(n)).collect())
     }
 
-    fn status(&self, scope: &Scope, expected: &[String]) -> Result<super::VendorStatus> {
+    fn status(&self, scope: &Scope, expected: &[DepName]) -> Result<super::VendorStatus> {
         // Stale detection only makes sense for the spm-owned project dir; the
         // shared global dir holds the user's own skills too.
         let detect_stale = !scope.is_global();
@@ -138,6 +138,7 @@ fn join_all(base: &Path, segs: &[&str]) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ids::dep;
 
     fn scratch(name: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -153,7 +154,7 @@ mod tests {
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(src.join("SKILL.md"), format!("---\nname: {name}\n---\n")).unwrap();
         MaterializedSkill {
-            name: name.to_string(),
+            name: DepName::try_from(name).unwrap(),
             path: src,
             root: root.to_path_buf(),
         }
@@ -180,7 +181,7 @@ mod tests {
 
         let greet = make_skill(&tmp, "greet");
         // previously_managed still lists `old-skill`; current set is just `greet`.
-        copy_and_purge(&dir, &[greet], &["old-skill".to_string()]);
+        copy_and_purge(&dir, &[greet], &[dep("old-skill")]);
 
         assert!(dir.join("greet").join("SKILL.md").exists(), "greet copied");
         assert!(!dir.join("old-skill").exists(), "dropped skill purged");
@@ -203,7 +204,7 @@ mod tests {
             std::fs::write(dir.join(n).join("SKILL.md"), "x\n").unwrap();
         }
 
-        remove_managed(&dir, ["greet"].into_iter(), &mut |_| Ok(())).unwrap();
+        remove_managed(&dir, [&dep("greet")].into_iter(), &mut |_| Ok(())).unwrap();
 
         assert!(!dir.join("greet").exists(), "managed skill removed");
         assert!(dir.join("user-skill").exists(), "user skill preserved");
@@ -228,9 +229,9 @@ mod tests {
 
     /// Mirror of the global materialize logic used by the test above, exercising
     /// `remove_managed` + `copy_skills_into` against an explicit dir (no HOME).
-    fn copy_and_purge(dir: &Path, skills: &[MaterializedSkill], previously_managed: &[String]) {
-        let mut owned: BTreeSet<&str> = previously_managed.iter().map(String::as_str).collect();
-        owned.extend(skills.iter().map(|s| s.name.as_str()));
+    fn copy_and_purge(dir: &Path, skills: &[MaterializedSkill], previously_managed: &[DepName]) {
+        let mut owned: BTreeSet<&DepName> = previously_managed.iter().collect();
+        owned.extend(skills.iter().map(|s| &s.name));
         remove_managed(dir, owned.iter().copied(), &mut |_| Ok(())).unwrap();
         copy_skills_into(dir, skills, &mut |_| Ok(())).unwrap();
     }
