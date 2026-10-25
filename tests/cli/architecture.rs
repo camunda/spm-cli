@@ -729,8 +729,8 @@ fn diagram_span(doc: &str) -> std::ops::Range<usize> {
     open + 1..close
 }
 
-/// Parse the module-layering diagram in `doc`. Only a `flowchart`/`graph`
-/// header, `%%` comments, `from --> to` edges and bare node names are
+/// Parse the module-layering diagram in `doc`. Only a bare `flowchart`/`graph`
+/// header (keyword and direction alone), `%%` comments, `from --> to` edges and bare node names are
 /// accepted, so the diagram cannot hold anything this check would miss.
 fn parse_diagram(doc: &str) -> Diagram {
     let lines: Vec<&str> = doc.lines().collect();
@@ -739,13 +739,16 @@ fn parse_diagram(doc: &str) -> Diagram {
         edges: BTreeSet::new(),
     };
     let is_name = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_');
+    // Only a bare header is skipped: `flowchart TD; a --> b` would hide an edge.
+    let is_header = |s: &str| {
+        matches!(
+            s.split_whitespace().collect::<Vec<_>>().as_slice(),
+            ["flowchart" | "graph", "TD" | "TB" | "BT" | "LR" | "RL"]
+        )
+    };
     for line in &lines[diagram_span(doc)] {
         let line = line.trim();
-        if line.is_empty()
-            || line.starts_with("%%")
-            || line.starts_with("flowchart ")
-            || line.starts_with("graph ")
-        {
+        if line.is_empty() || line.starts_with("%%") || is_header(line) {
             continue;
         }
         match line.split_once("-->").map(|(f, t)| (f.trim(), t.trim())) {
@@ -892,6 +895,12 @@ after
 #[should_panic(expected = "unsupported line")]
 fn diagram_parser_rejects_lines_it_cannot_check() {
     parse_diagram("<!-- module-graph: x -->\n```mermaid\n  cli -.-> paths\n```\n");
+}
+
+#[test]
+#[should_panic(expected = "unsupported line")]
+fn diagram_parser_rejects_statements_after_the_header() {
+    parse_diagram("<!-- module-graph: x -->\n```mermaid\nflowchart TD; cli --> paths\n```\n");
 }
 
 #[test]
