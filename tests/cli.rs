@@ -10261,6 +10261,81 @@ fn locked_install_materializes_links_and_keeps_the_lock() {
     assert_eq!(snapshot(&sb, "ai.lock").unwrap(), lock);
 }
 
+/// A plugin without `.claude-plugin/plugin.json` still installs (its bundled
+/// skills, if any), with a warning naming where it came from: its locked
+/// source and path, or the linked directory.
+#[test]
+fn a_plugin_without_a_manifest_warns_naming_its_source() {
+    let sb = Sandbox::new();
+    sb.add_plugin();
+    sb.ok(&["init", "--target", "claude"]);
+    let url = sb.skill_url();
+    let out = sb.spm(&[
+        "add",
+        &url,
+        "--plugin",
+        "--branch",
+        "main",
+        "--path",
+        "pkg/skills",
+        "--name",
+        "ds",
+    ]);
+    assert!(out.status.success());
+    let tail = "has no `.claude-plugin/plugin.json` — is it really a plugin? (only its \
+                bundled skills, if any, will be materialized)";
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains(&format!(
+            "warning: plugin `ds` ({url} @ branch:main under `pkg/skills`) {tail}"
+        )),
+        "{err}"
+    );
+
+    let nop = sb.root.join("nop");
+    std::fs::create_dir_all(nop.join("skills/x")).unwrap();
+    std::fs::write(nop.join("skills/x/SKILL.md"), "---\nname: x\n---\nX.\n").unwrap();
+    let out = sb.spm(&["link", "ds", "../nop"]);
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains(&format!("warning: plugin `ds` (linked → ../nop) {tail}")),
+        "{err}"
+    );
+}
+
+/// Re-resolving a linked plugin records the bundled skills of its locked
+/// checkout in `ai.lock`, never the linked working copy's.
+#[test]
+fn updating_a_linked_plugin_locks_its_checkouts_bundled_skills() {
+    let sb = Sandbox::new();
+    sb.add_plugin();
+    sb.ok(&["init", "--target", "codex"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["codex"],"plugins":{{"ds":{{"git":"{}","branch":"main","path":"pkg"}}}}}}"#,
+            sb.skill_url()
+        ),
+    );
+    sb.ok(&["install"]);
+    let dev = sb.root.join("dev-plugin");
+    local_skill_checkout(&sb, "dev-repo", "unused");
+    std::fs::rename(sb.root.join("dev-repo/pkg"), &dev).unwrap();
+    let extra = dev.join("skills/extra");
+    std::fs::create_dir_all(&extra).unwrap();
+    std::fs::write(extra.join("SKILL.md"), "---\nname: extra\n---\nExtra.\n").unwrap();
+    sb.ok(&["link", "ds", "../dev-plugin"]);
+
+    sb.ok(&["update", "ds"]);
+    let lock: serde_json::Value = serde_json::from_str(&sb.read("ai.lock")).unwrap();
+    assert_eq!(
+        lock["plugins"]["ds"]["bundled_skills"],
+        serde_json::json!(["composer"])
+    );
+    assert!(sb.project.join(".agents/skills/extra/SKILL.md").exists());
+}
+
 /// A linked plugin materializes its local working tree (agents and bundled
 /// skills) while `ai.lock` keeps the locked commit's bundled-skill list; a
 /// skill only the local tree bundles is removed from a shared skills dir once
