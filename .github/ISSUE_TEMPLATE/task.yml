@@ -37,7 +37,7 @@ body:
       placeholder: |
         - src/cli.rs
         - src/lockfile.rs
-        - tests/cli.rs (new coverage)
+        - tests/cli/ (new coverage)
     validations:
       required: false
 

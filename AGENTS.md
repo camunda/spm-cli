@@ -18,8 +18,8 @@ and `RELEASE.md` for distribution.
 - **Build/dependency**: `cargo`, with `make` providing convenience shortcuts.
 - **Key dependencies**: `clap` (CLI), `serde`/`serde_json` (config), `anyhow`
   (errors), `directories` (store paths), `jsonschema` (validating `ai.json`).
-- **Testing**: `cargo test` — end-to-end tests in `tests/cli.rs` drive the real
-  binary against throwaway git repos.
+- **Testing**: `cargo test` — end-to-end tests in `tests/cli/` (one test binary,
+  a module per domain) drive the real binary against throwaway git repos.
 - **Distribution**: npm (`@camunda8/spm`), crates.io (`spm-cli`), and GitHub
   Release binaries — all driven from a single git tag (see `RELEASE.md`).
 
@@ -52,7 +52,7 @@ generated source to regenerate.
 | `src/vendor/claude.rs` | Claude adapter: writes a marketplace pointer into `.claude/settings.local.json`. |
 | `src/vendor/shareddir.rs` | `SharedDirVendor` presets for every "skills one dir deep" tool (Copilot, Gemini, Codex, Cursor, Cline, Windsurf, Amp); an `Ownership` mode says whether the project dir is wholly spm's (Copilot) or shared with the user's own skills. |
 | `skills/spm/SKILL.md` | User-facing agent skill that teaches an agent to operate `spm`, installable with `spm add ... --path skills/spm`. **Update it in the same PR whenever a command, flag, message or behavior it documents changes** (check it against `spm --help`). |
-| `tests/cli.rs` | End-to-end tests against the real binary with an isolated `SPM_HOME` per test. |
+| `tests/cli/` | End-to-end tests against the real binary with an isolated `SPM_HOME` per test: a single `cli` test binary (`main.rs`) with one module per domain. `common.rs` holds the shared harness (`Sandbox`, git fixtures, helpers used by more than one module); a helper used by one module stays in it. |
 | `schema/ai.schema.json` | Source of truth for the `ai.json` shape (draft-07); embedded by `src/schema.rs`. |
 | `docs/` | VitePress documentation site (published to GitHub Pages). User-facing docs live here — keep it in sync with `README.md` when behavior changes (`reference/` for CLI/`ai.json`/`ai.lock`/schema, `guide/` for concepts/targets). |
 | `npm/` | npm distribution: `build.mjs` generates the launcher + 5 platform packages from the crate version. `targets.mjs` (release targets + asset names) and `crate.mjs` (crate version) are the single sources shared with the GitHub Actions. |

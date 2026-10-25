@@ -81,6 +81,6 @@ body:
       placeholder: |
         - [ ] `spm install` succeeds for the private git dependency
         - [ ] A clear, actionable error is shown when auth genuinely fails
-        - [ ] Regression test added in tests/cli.rs
+        - [ ] Regression test added in tests/cli/
     validations:
       required: true
