@@ -22,6 +22,10 @@ struct Guard {
     /// Where new call sites should go instead.
     gateway: &'static str,
     patterns: &'static [&'static str],
+    /// `(module, names)`: a `module::{...}` import group naming any of
+    /// `names` (also `name as alias`), which then reaches the primitive as a
+    /// bare call no path pattern can see.
+    grouped: &'static [(&'static str, &'static [&'static str])],
     allowed: &'static [(&'static str, &'static str)],
 }
 
@@ -38,6 +42,7 @@ const GUARDS: &[Guard] = &[
             "process::{",
             "CommandExt",
         ],
+        grouped: &[],
         allowed: &[(
             "src/git/command.rs",
             "the git gateway: hardened env, failure capture, option-injection guard",
@@ -46,11 +51,27 @@ const GUARDS: &[Guard] = &[
     Guard {
         name: "file writes",
         gateway: "`jsonfile::save`/`save_atomic`/`Staged` (src/jsonfile.rs)",
-        patterns: &["fs::write", "File::create", "File::options", "OpenOptions"],
+        // `fs::*` would bring `write`/`copy`/`rename` in unqualified.
+        patterns: &[
+            "fs::write",
+            "fs::copy",
+            "fs::rename",
+            "fs::*",
+            "File::create",
+            "File::create_new",
+            "File::options",
+            "OpenOptions",
+        ],
+        grouped: &[("fs", &["write", "copy", "rename"])],
         allowed: &[
             (
                 "src/jsonfile.rs",
-                "the JSON gateway: in-place `save` and the atomic `Staged` replace",
+                "the JSON gateway: in-place `save` and the atomic `Staged` replace \
+                 (`fs::rename` publishes the staged file)",
+            ),
+            (
+                "src/fsutil.rs",
+                "`copy_tree` copies skill content (`fs::copy`) into a target",
             ),
             (
                 "src/store.rs",
@@ -83,7 +104,9 @@ const GUARDS: &[Guard] = &[
             "lock_shared",
             "unlock",
             "TryLockError",
+            "File::lock(",
         ],
+        grouped: &[],
         allowed: &[(
             "src/cli/session.rs",
             "the private `StateLock` behind every command's state lock",
@@ -95,6 +118,7 @@ const GUARDS: &[Guard] = &[
         name: "blocking `.lock()` calls",
         gateway: "`ScopeSession` (src/cli/session.rs) for file locks",
         patterns: &[".lock("],
+        grouped: &[],
         allowed: &[
             (
                 "src/cli/session.rs",
@@ -112,6 +136,7 @@ const GUARDS: &[Guard] = &[
         name: "directory listing",
         gateway: "`fsutil::walk_tree` (src/fsutil.rs) for recursive traversal",
         patterns: &["read_dir"],
+        grouped: &[],
         allowed: &[
             (
                 "src/fsutil.rs",
@@ -156,16 +181,28 @@ const GUARDS: &[Guard] = &[
 /// (`OpenOptions` does not match `OpenOptionsExt`).
 fn occurrences(src: &str, pattern: &str) -> Vec<usize> {
     let code = shipped_code(src);
+    spans(&code, pattern)
+        .into_iter()
+        .map(|(i, _)| line_at(&code, i))
+        .collect()
+}
+
+fn is_ident(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// `(start, end)` char spans of `pattern` in `code`, matched as
+/// [`occurrences`] describes.
+fn spans(code: &[char], pattern: &str) -> Vec<(usize, usize)> {
     let p: Vec<char> = pattern.chars().collect();
-    let ident = |c: char| c.is_alphanumeric() || c == '_';
-    let mut lines = Vec::new();
+    let mut found = Vec::new();
     for i in 0..code.len() {
-        if ident(p[0]) && i > 0 && ident(code[i - 1]) {
+        if is_ident(p[0]) && i > 0 && is_ident(code[i - 1]) {
             continue;
         }
         let mut j = i;
         let matched = p.iter().enumerate().all(|(k, &want)| {
-            if k > 0 && !(ident(p[k - 1]) && ident(want)) {
+            if k > 0 && !(is_ident(p[k - 1]) && is_ident(want)) {
                 while code.get(j).is_some_and(|c| c.is_whitespace()) {
                     j += 1;
                 }
@@ -174,11 +211,38 @@ fn occurrences(src: &str, pattern: &str) -> Vec<usize> {
             j += 1;
             hit
         });
-        if matched && !(ident(p[p.len() - 1]) && code.get(j).is_some_and(|&c| ident(c))) {
-            lines.push(line_at(&code, i));
+        if matched && !(is_ident(p[p.len() - 1]) && code.get(j).is_some_and(|&c| is_ident(c))) {
+            found.push((i, j));
         }
     }
-    lines
+    found
+}
+
+/// `(line, name)` for each of `names` imported out of a `module::{...}` group
+/// in `src`'s shipped code (nested groups included), whole identifiers only:
+/// `fs::{read, write as put}` names `write`, `fs::{self, File}` names none.
+fn grouped_imports(src: &str, module: &str, names: &[&str]) -> Vec<(usize, String)> {
+    let code = shipped_code(src);
+    let mut out = Vec::new();
+    for (start, open) in spans(&code, &format!("{module}::{{")) {
+        let mut depth = 1;
+        let mut end = open;
+        while end < code.len() && depth > 0 {
+            match code[end] {
+                '{' => depth += 1,
+                '}' => depth -= 1,
+                _ => {}
+            }
+            end += 1;
+        }
+        let body: String = code[open..end].iter().collect();
+        for name in names {
+            if body.split(|c: char| !is_ident(c)).any(|t| t == *name) {
+                out.push((line_at(&code, start), (*name).to_string()));
+            }
+        }
+    }
+    out
 }
 
 /// Every violation of `guard` over `files` (relative path, source): a use
@@ -187,10 +251,19 @@ fn occurrences(src: &str, pattern: &str) -> Vec<usize> {
 fn violations(guard: &Guard, files: &[(String, String)]) -> Vec<String> {
     let mut out = Vec::new();
     for (path, src) in files {
-        let mut hits: Vec<(usize, &str)> = guard
+        let mut hits: Vec<(usize, String)> = guard
             .patterns
             .iter()
-            .flat_map(|&pat| occurrences(src, pat).into_iter().map(move |l| (l, pat)))
+            .flat_map(|&pat| {
+                occurrences(src, pat)
+                    .into_iter()
+                    .map(move |l| (l, pat.to_string()))
+            })
+            .chain(guard.grouped.iter().flat_map(|&(module, names)| {
+                grouped_imports(src, module, names)
+                    .into_iter()
+                    .map(move |(l, name)| (l, format!("{module}::{{{name}}}")))
+            }))
             .collect();
         hits.sort();
         let allowed = guard.allowed.iter().any(|(f, _)| f == path);
@@ -297,6 +370,7 @@ fn violations_flags_new_sites_and_stale_entries() {
         name: "spawn",
         gateway: "the gateway",
         patterns: &["Command::new"],
+        grouped: &[],
         allowed: &[
             ("src/gate.rs", "the gateway"),
             ("src/stale.rs", "used to spawn"),
@@ -320,5 +394,61 @@ fn violations_flags_new_sites_and_stale_entries() {
             "spawn: src/new.rs:2 uses `Command::new`; go through the gateway (or allow-list the file with a reason)",
             "spawn: src/gone.rs is allow-listed but does not exist; remove the stale entry",
         ]
+    );
+}
+
+/// The real guard named `name`, so self-tests exercise the shipped tables.
+fn guard(name: &str) -> &'static Guard {
+    GUARDS.iter().find(|g| g.name == name).unwrap()
+}
+
+#[test]
+fn write_guard_sees_grouped_imports_and_create_new() {
+    let files = [
+        (
+            "src/grouped.rs",
+            "use std::fs::{read_to_string, write};\nfn f() { write(p, t); }",
+        ),
+        ("src/renamed.rs", "use std::{fs::{File, write as put}};"),
+        ("src/new.rs", "fn f() { File::create_new(p); }"),
+        (
+            "src/moves.rs",
+            "fn f() { fs::copy(a, b); fs::rename(a, b); }",
+        ),
+        ("src/glob.rs", "use std::fs::*;"),
+        (
+            "src/fine.rs",
+            "use std::fs::{self, File};\nfn f() { fs::read(p); }",
+        ),
+    ]
+    .map(|(p, s)| (p.to_string(), s.to_string()));
+    let flagged: Vec<String> = violations(guard("file writes"), &files)
+        .into_iter()
+        .filter(|v| v.contains(" uses "))
+        .collect();
+    assert_eq!(
+        flagged,
+        vec![
+            "file writes: src/grouped.rs:1 uses `fs::{write}`; go through `jsonfile::save`/`save_atomic`/`Staged` (src/jsonfile.rs) (or allow-list the file with a reason)",
+            "file writes: src/renamed.rs:1 uses `fs::{write}`; go through `jsonfile::save`/`save_atomic`/`Staged` (src/jsonfile.rs) (or allow-list the file with a reason)",
+            "file writes: src/new.rs:1 uses `File::create_new`; go through `jsonfile::save`/`save_atomic`/`Staged` (src/jsonfile.rs) (or allow-list the file with a reason)",
+            "file writes: src/moves.rs:1 uses `fs::copy`; go through `jsonfile::save`/`save_atomic`/`Staged` (src/jsonfile.rs) (or allow-list the file with a reason)",
+            "file writes: src/moves.rs:1 uses `fs::rename`; go through `jsonfile::save`/`save_atomic`/`Staged` (src/jsonfile.rs) (or allow-list the file with a reason)",
+            "file writes: src/glob.rs:1 uses `fs::*`; go through `jsonfile::save`/`save_atomic`/`Staged` (src/jsonfile.rs) (or allow-list the file with a reason)",
+        ]
+    );
+}
+
+#[test]
+fn lock_guard_sees_the_function_call_form() {
+    let files = [("src/f.rs", "fn f(h: &File) { File::lock(h); }")]
+        .map(|(p, s)| (p.to_string(), s.to_string()));
+    let flagged: Vec<String> = violations(guard("OS file locks"), &files)
+        .into_iter()
+        .filter(|v| v.contains(" uses "))
+        .collect();
+    assert_eq!(
+        flagged,
+        vec!["OS file locks: src/f.rs:1 uses `File::lock(`; go through `ScopeSession` (src/cli/session.rs) (or allow-list the file with a reason)"]
     );
 }
