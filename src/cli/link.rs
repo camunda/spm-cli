@@ -14,11 +14,7 @@ pub(super) fn link(scope: &Scope, cwd: &Path, name: &str, dir: &str) -> Result<(
     // when the sync runs (e.g. not be removed by a `spm remove` in between).
     let session = ScopeSession::open(scope, Access::Links)?;
     let manifest = session.manifest()?;
-    let kind = if manifest.skills.contains_key(name) {
-        "skill"
-    } else if manifest.plugins.contains_key(name) {
-        "plugin"
-    } else {
+    let Some(kind) = manifest.kind_of(name) else {
         bail!(
             "no skill or plugin named `{name}` in {} — `spm link` overrides an \
              already-declared dependency; add it first with `spm add`",

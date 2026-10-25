@@ -1,8 +1,8 @@
 use super::session::{Access, ScopeSession};
 use crate::ids::DepName;
 use crate::links::{Linked, Links};
-use crate::lockfile::{LockedSkill, Lockfile};
-use crate::manifest::{Manifest, SkillSpec};
+use crate::lockfile::{LockedSkill, Lockfile, Satisfied};
+use crate::manifest::{DependencyKind, Manifest, SkillSpec};
 use crate::owned::{Owned, Ownership};
 use crate::scope::Scope;
 use crate::vendor::{MaterializedPlugin, MaterializedSkill, Vendor};
@@ -365,14 +365,12 @@ fn plan(
 
     // Column width for aligned per-entry output (skills + plugins).
     let width = manifest
-        .skills
-        .keys()
-        .chain(manifest.plugins.keys())
-        .map(|n| n.len())
+        .dependencies()
+        .map(|(_, n, _)| n.len())
         .max()
         .unwrap_or(0);
 
-    if manifest.skills.is_empty() && manifest.plugins.is_empty() {
+    if !manifest.declares_any() {
         say!(quiet, "no skills or plugins declared");
     } else {
         say!(
@@ -387,126 +385,87 @@ fn plan(
     // Direct entries (re)resolved by this run rather than reused from ai.lock:
     // the only ones a lock-only sync fetches.
     let mut fresh: BTreeSet<DepName> = BTreeSet::new();
-    for (name, spec) in &manifest.skills {
-        spec.version()?; // validates selectors
-        let refresh = force_refresh && only.is_none_or(|o| o == name.as_str());
-
-        // Reuse the pinned commit if the request is unchanged and we're not refreshing.
-        let prev_entry = prev.skills.remove(name);
-        let prev_evidence = prev_entry.as_ref().map(|p| {
-            (
-                p.git.clone(),
-                p.path.clone(),
-                p.commit.clone(),
-                p.also_satisfies.clone(),
-            )
-        });
-        let reuse = match reusable_pin(prev_entry, spec, refresh)? {
-            Ok(l) => Some(l),
-            Err(why) if locked => {
-                mismatches.push(format!("skill `{name}`: {why}"));
-                skipped_roots.insert(name.to_string());
-                continue;
-            }
-            Err(_) => None,
-        };
-
-        let (mut locked, how) = match reuse {
-            Some(l) => (l, "locked"),
-            None => (
-                resolver::resolve(spec).with_context(|| format!("resolving skill `{name}`"))?,
-                "resolved",
-            ),
-        };
-        // A direct dependency never carries transitive provenance. Clear any
-        // `requested_by` a reused entry may have inherited — e.g. a lock whose
-        // entry was previously a synthesized transitive skill before being
-        // promoted to a direct dependency — so `spm status`/`list` (which key
-        // "transitive" purely on a non-empty `requested_by`) never misreport a
-        // direct skill as transitive. Freshly resolved entries are already empty.
-        locked.requested_by.clear();
-        // Re-resolved (e.g. `spm update <name>`) to the very same git + path +
-        // commit: the selectors previously verified to resolve to that commit
-        // still do, so keep them as evidence. Otherwise a nested edge onto this
-        // root by another, since-moved selector would be re-resolved — cascading
-        // a named update into the transitive frontier — and report a spurious
-        // conflict. A bare `spm update` refreshes the walk and ignores evidence.
-        if let Some((git, path, commit, evidence)) = prev_evidence {
-            if git == locked.git && path == locked.path && commit == locked.commit {
-                locked.also_satisfies = evidence;
-            }
-        }
-        if how == "resolved" {
-            fresh.insert(name.clone());
-        }
-        let short = locked.commit.short();
-        let reference = locked.display_reference();
-        say!(quiet, "  {name:<width$}  {reference} @ {short}  ({how})");
-        lock.skills.insert(name.clone(), locked);
-    }
-
     let mut reused_linked_plugins: BTreeSet<DepName> = BTreeSet::new();
-    // Resolve full plugins the same way. A plugin's version reuse also depends
-    // on the pinned commit being unchanged; its bundled-skill list is (re)filled
-    // from the store checkout below, so we never carry a stale one forward.
-    for (name, spec) in &manifest.plugins {
-        spec.version()?;
+    // One pass over every direct dependency, skills before plugins: pin reuse,
+    // `--locked` mismatches and the status line are shared (`resolve_entry`);
+    // only the kind-specific bookkeeping below differs.
+    for (kind, name, spec) in manifest.dependencies() {
         let refresh = force_refresh && only.is_none_or(|o| o == name.as_str());
-        let reuse = match reusable_pin(prev.plugins.remove(name), spec, refresh)? {
-            Ok(l) => Some(l),
-            Err(why) if locked => {
-                mismatches.push(format!("plugin `{name}`: {why}"));
+        let prev_entry = prev.deps_mut(kind).remove(name);
+        let entry = match resolve_entry(kind, name, spec, prev_entry, refresh, locked)? {
+            Ok(entry) => entry,
+            Err(mismatch) => {
+                mismatches.push(mismatch);
+                // A skill failing the pin check is not walked, so its
+                // transitive subtree is never visited.
+                if kind == DependencyKind::Skill {
+                    skipped_roots.insert(name.to_string());
+                }
                 continue;
             }
-            Err(_) => None,
         };
-        let (mut locked, how) = match reuse {
-            Some(l) => (l, "locked"),
-            None => (
-                resolver::resolve(spec).with_context(|| format!("resolving plugin `{name}`"))?,
-                "resolved",
-            ),
-        };
-        if how == "resolved" {
+        let mut locked = entry.locked;
+        let how = if entry.fresh {
             fresh.insert(name.clone());
-        }
-        // A reused pin is the same commit, so its bundled skills are too. They
-        // are carried forward rather than re-enumerated from a checkout when
-        // that checkout is not used: by a lock-only sync (which does not fetch
-        // the plugin again) or for a linked plugin (keeping `ai.lock`
-        // unaffected by the link).
-        if how == "resolved" || !(lock_only || check || linked.contains_key(name)) {
-            locked.bundled_skills.clear();
-        } else if linked.contains_key(name) {
-            reused_linked_plugins.insert(name.clone());
-        }
-        locked.also_satisfies.clear();
+            "resolved"
+        } else {
+            "locked"
+        };
+        let status = match kind {
+            DependencyKind::Skill => {
+                // A direct dependency never carries transitive provenance.
+                // Clear any `requested_by` a reused entry may have inherited —
+                // e.g. a lock whose entry was previously a synthesized
+                // transitive skill before being promoted to a direct dependency
+                // — so `spm status`/`list` (which key "transitive" purely on a
+                // non-empty `requested_by`) never misreport a direct skill as
+                // transitive. Freshly resolved entries are already empty.
+                locked.requested_by.clear();
+                // Re-resolved (e.g. `spm update <name>`) to the very same git +
+                // path + commit: the selectors previously verified to resolve to
+                // that commit still do, so keep them as evidence. Otherwise a
+                // nested edge onto this root by another, since-moved selector
+                // would be re-resolved — cascading a named update into the
+                // transitive frontier — and report a spurious conflict. A bare
+                // `spm update` refreshes the walk and ignores evidence.
+                if let Some(evidence) = entry.prev_evidence {
+                    locked.also_satisfies = evidence;
+                }
+                how.to_string()
+            }
+            DependencyKind::Plugin => {
+                // A plugin's bundled-skill list is (re)filled from the store
+                // checkout below, so a stale one is never carried forward. A
+                // reused pin is the same commit, so its bundled skills are too.
+                // They are carried forward rather than re-enumerated from a
+                // checkout when that checkout is not used: by a lock-only sync
+                // (which does not fetch the plugin again) or for a linked plugin
+                // (keeping `ai.lock` unaffected by the link).
+                if entry.fresh || !(lock_only || check || linked.contains_key(name)) {
+                    locked.bundled_skills.clear();
+                } else if linked.contains_key(name) {
+                    reused_linked_plugins.insert(name.clone());
+                }
+                locked.also_satisfies.clear();
+                format!("{kind}, {how}")
+            }
+        };
         let short = locked.commit.short();
         let reference = locked.display_reference();
-        say!(
-            quiet,
-            "  {name:<width$}  {reference} @ {short}  (plugin, {how})"
-        );
-        lock.plugins.insert(name.clone(), locked);
+        say!(quiet, "  {name:<width$}  {reference} @ {short}  ({status})");
+        lock.deps_mut(kind).insert(name.clone(), locked);
     }
 
     // Direct entries left in the previous lock are no longer declared. Skills
     // with a non-empty `requested_by` are transitive; they are judged after the
     // walk below.
     if locked {
-        for name in prev
-            .skills
-            .iter()
-            .filter(|(_, l)| l.requested_by.is_empty())
-            .map(|(n, _)| n)
+        for (kind, name, _) in prev
+            .dependencies()
+            .filter(|(kind, _, l)| *kind == DependencyKind::Plugin || l.requested_by.is_empty())
         {
             mismatches.push(format!(
-                "skill `{name}`: in ai.lock but not declared in ai.json"
-            ));
-        }
-        for name in prev.plugins.keys() {
-            mismatches.push(format!(
-                "plugin `{name}`: in ai.lock but not declared in ai.json"
+                "{kind} `{name}`: in ai.lock but not declared in ai.json"
             ));
         }
     }
@@ -700,7 +659,7 @@ fn plan(
     // lock maps — a transitive skill colliding with a root plugin would write
     // the same name into both maps and make `list`/`update <name>` ambiguous.
     for (tname, tlocked) in expansion.transitive {
-        if lock.skills.contains_key(&tname) || lock.plugins.contains_key(&tname) {
+        if lock.contains_dependency(&tname) {
             bail!(
                 "transitive skill name collision: `{tname}` clashes with a directly-declared \
                  skill or plugin — rename the direct dependency or pin the dependency that \
@@ -836,7 +795,7 @@ fn plan(
     Ok(Plan {
         dir,
         targets: manifest.targets.clone(),
-        declares_any: !manifest.skills.is_empty() || !manifest.plugins.is_empty(),
+        declares_any: manifest.declares_any(),
         vendors,
         lock,
         materialized,
@@ -1008,10 +967,7 @@ pub(super) fn denied_sources<'a>(
     links: impl IntoIterator<Item = (&'a str, &'a str)>,
 ) -> Vec<String> {
     manifest
-        .skills
-        .iter()
-        .map(|(n, s)| ("skill", n, s))
-        .chain(manifest.plugins.iter().map(|(n, s)| ("plugin", n, s)))
+        .dependencies()
         .filter_map(|(kind, name, spec)| {
             policy
                 .check(&spec.git)
@@ -1041,7 +997,7 @@ impl Plan {
                 "wrote ai.lock only; run `{}` to install into the targets",
                 install_command(scope)
             );
-            return Ok(lock.skills.len() + lock.plugins.len());
+            return Ok(lock.dependencies().count());
         }
         if self.declares_any {
             println!("materializing: {}", self.targets.join(", "));
@@ -1088,7 +1044,7 @@ impl Plan {
         if let Some(links) = &self.links {
             links.save(scope)?;
         }
-        Ok(lock.skills.len() + lock.plugins.len())
+        Ok(lock.dependencies().count())
     }
 }
 
@@ -1104,7 +1060,7 @@ fn resolve_links(
 ) -> Result<BTreeMap<DepName, Linked>> {
     let mut out = BTreeMap::new();
     for name in links.links.keys() {
-        if !manifest.skills.contains_key(name) && !manifest.plugins.contains_key(name) {
+        if !manifest.contains_dependency(name) {
             eprintln!(
                 "warning: ignoring link `{name}`: it is not declared in ai.json — run `{}` to \
                  drop it",
@@ -1650,6 +1606,58 @@ pub(super) fn unlink_command(scope: &Scope, name: &str) -> String {
     format!("spm unlink{g} {}", crate::shell::operands([name]))
 }
 
+/// A direct dependency pinned by [`resolve_entry`].
+struct Entry {
+    locked: LockedSkill,
+    /// Resolved by this run rather than reused from `ai.lock`.
+    fresh: bool,
+    /// The previous pin's `also_satisfies`, when it pinned the very same git +
+    /// path + commit (so the selectors it verified still resolve there).
+    prev_evidence: Option<Vec<Satisfied>>,
+}
+
+/// Pin the direct dependency `name` of `kind`: reuse `prev` (its entry in the
+/// previous `ai.lock`) when it pins exactly `spec` and `refresh` is off, else
+/// resolve `spec`. Under `locked` nothing is resolved: a pin that can't be
+/// reused yields `Ok(Err(mismatch))`, the line `--locked` reports. The single
+/// pin rule for skills and plugins alike.
+fn resolve_entry(
+    kind: DependencyKind,
+    name: &DepName,
+    spec: &SkillSpec,
+    prev: Option<LockedSkill>,
+    refresh: bool,
+    locked: bool,
+) -> Result<std::result::Result<Entry, String>> {
+    spec.version()?; // validates selectors
+    let evidence = prev.as_ref().map(|p| {
+        (
+            p.git.clone(),
+            p.path.clone(),
+            p.commit.clone(),
+            p.also_satisfies.clone(),
+        )
+    });
+    let (pin, fresh) = match reusable_pin(prev, spec, refresh)? {
+        Ok(l) => (l, false),
+        Err(why) if locked => return Ok(Err(format!("{kind} `{name}`: {why}"))),
+        Err(_) => (
+            resolver::resolve(spec).with_context(|| format!("resolving {kind} `{name}`"))?,
+            true,
+        ),
+    };
+    let prev_evidence = evidence
+        .filter(|(git, path, commit, _)| {
+            *git == pin.git && *path == pin.path && *commit == pin.commit
+        })
+        .map(|(_, _, _, evidence)| evidence);
+    Ok(Ok(Entry {
+        locked: pin,
+        fresh,
+        prev_evidence,
+    }))
+}
+
 /// The pin in `prev` if it can be reused for `spec` without re-resolving, else
 /// why not (missing, refreshing, or the request changed).
 fn reusable_pin(
@@ -1836,5 +1844,103 @@ mod tests {
         assert!(err(Access::Links, LockMode::Links).contains("ai.lock not found"));
         assert!(err(Access::Write, LockMode::Check).contains("ai.lock not found"));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn spec(selector: (&str, &str)) -> SkillSpec {
+        let mut s = SkillSpec {
+            git: "https://example.test/repo.git".into(),
+            tag: None,
+            branch: None,
+            commit: None,
+            range: None,
+            path: None,
+        };
+        let v = Some(selector.1.to_string());
+        match selector.0 {
+            "tag" => s.tag = v,
+            "branch" => s.branch = v,
+            _ => {}
+        }
+        s
+    }
+
+    fn pin(spec: &SkillSpec) -> LockedSkill {
+        let commit = crate::ids::CommitSha::try_from("a".repeat(40)).unwrap();
+        LockedSkill {
+            git: spec.git.clone(),
+            reference: crate::ids::LockReference::from(spec.version().unwrap()),
+            store: crate::ids::StoreKey::derive(&spec.git, &commit),
+            commit,
+            resolved_tag: None,
+            path: spec.path.clone(),
+            bundled_skills: vec![dep("bundled")],
+            requested_by: vec![dep("parent")],
+            also_satisfies: vec![Satisfied {
+                reference: crate::ids::LockReference::try_from("tag:v0").unwrap(),
+                resolved_tag: None,
+            }],
+        }
+    }
+
+    /// Under `--locked`, a pin that can't be reused becomes the mismatch line,
+    /// worded the same for both kinds; nothing is resolved.
+    #[test]
+    fn resolve_entry_reports_locked_mismatches_per_kind() {
+        let main = spec(("branch", "main"));
+        let mismatch =
+            |kind, prev, refresh| match resolve_entry(kind, &dep("x"), &main, prev, refresh, true)
+                .unwrap()
+            {
+                Ok(_) => panic!("expected a mismatch"),
+                Err(m) => m,
+            };
+        for kind in DependencyKind::ALL {
+            assert_eq!(
+                mismatch(kind, None, false),
+                format!("{kind} `x`: missing from ai.lock")
+            );
+            assert_eq!(
+                mismatch(kind, Some(pin(&spec(("tag", "v1")))), false),
+                format!(
+                    "{kind} `x`: changed since ai.lock was written (`tag:v1` -> `branch:main`)"
+                )
+            );
+            assert_eq!(
+                mismatch(kind, Some(pin(&main)), true),
+                format!("{kind} `x`: refreshing")
+            );
+        }
+    }
+
+    /// An unchanged pin is reused untouched (kind-specific cleanup is the
+    /// caller's) and hands back its `also_satisfies` evidence.
+    #[test]
+    fn resolve_entry_reuses_an_unchanged_pin_with_its_evidence() {
+        let main = spec(("branch", "main"));
+        for kind in DependencyKind::ALL {
+            for locked in [false, true] {
+                let prev = pin(&main);
+                let entry =
+                    resolve_entry(kind, &dep("x"), &main, Some(prev.clone()), false, locked)
+                        .unwrap()
+                        .unwrap();
+                assert!(!entry.fresh);
+                assert_eq!(entry.locked.commit, prev.commit);
+                assert_eq!(entry.locked.bundled_skills, prev.bundled_skills);
+                assert_eq!(entry.locked.requested_by, prev.requested_by);
+                assert_eq!(entry.prev_evidence, Some(prev.also_satisfies));
+            }
+        }
+    }
+
+    /// Selectors are validated before any pin is considered.
+    #[test]
+    fn resolve_entry_rejects_an_invalid_selector() {
+        let none = spec(("none", ""));
+        let err = match resolve_entry(DependencyKind::Plugin, &dep("x"), &none, None, false, true) {
+            Ok(_) => panic!("expected an error"),
+            Err(e) => e,
+        };
+        assert!(format!("{err}").contains("set one of tag/branch/commit/version"));
     }
 }

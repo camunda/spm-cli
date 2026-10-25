@@ -1,5 +1,5 @@
 use crate::ids::{CommitSha, DepName, LockReference, StoreKey};
-use crate::manifest::SkillSpec;
+use crate::manifest::{DependencyKind, SkillSpec};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -204,9 +204,47 @@ impl Lockfile {
         if !self.id.is_empty() {
             validate_project_id(&self.id)?;
         }
-        validate_locked_map(&self.skills, "skill")?;
-        validate_locked_map(&self.plugins, "plugin")?;
+        for kind in DependencyKind::ALL {
+            validate_locked_map(self.deps(kind), kind)?;
+        }
         Ok(())
+    }
+
+    /// The map holding pins of `kind`.
+    pub fn deps(&self, kind: DependencyKind) -> &BTreeMap<DepName, LockedSkill> {
+        match kind {
+            DependencyKind::Skill => &self.skills,
+            DependencyKind::Plugin => &self.plugins,
+        }
+    }
+
+    /// The map holding pins of `kind`, for editing.
+    pub fn deps_mut(&mut self, kind: DependencyKind) -> &mut BTreeMap<DepName, LockedSkill> {
+        match kind {
+            DependencyKind::Skill => &mut self.skills,
+            DependencyKind::Plugin => &mut self.plugins,
+        }
+    }
+
+    /// Every pin with its kind: skills (direct and transitive), then plugins,
+    /// each in name order.
+    pub fn dependencies(&self) -> impl Iterator<Item = (DependencyKind, &DepName, &LockedSkill)> {
+        DependencyKind::ALL
+            .into_iter()
+            .flat_map(move |kind| self.deps(kind).iter().map(move |(n, l)| (kind, n, l)))
+    }
+
+    /// The pin for `name`, whichever kind it is (a skill wins should a
+    /// hand-edited lock repeat a name across kinds).
+    pub fn get_dependency(&self, name: &str) -> Option<&LockedSkill> {
+        DependencyKind::ALL
+            .into_iter()
+            .find_map(|kind| self.deps(kind).get(name))
+    }
+
+    /// Whether `name` is pinned as a skill or a plugin.
+    pub fn contains_dependency(&self, name: &str) -> bool {
+        self.get_dependency(name).is_some()
     }
 
     pub fn save(&self, dir: &Path) -> Result<()> {
@@ -222,7 +260,7 @@ impl Lockfile {
 /// cross-field rules. The store key must be exactly what we would derive from
 /// the entry's git+commit — a mismatch means the committed (untrusted)
 /// `ai.lock` was hand-edited to point elsewhere.
-fn validate_locked_map(map: &BTreeMap<DepName, LockedSkill>, kind: &str) -> Result<()> {
+fn validate_locked_map(map: &BTreeMap<DepName, LockedSkill>, kind: DependencyKind) -> Result<()> {
     for (name, l) in map {
         let expected = StoreKey::derive(&l.git, &l.commit);
         if l.store != expected {
@@ -320,6 +358,59 @@ mod tests {
             requested_by: Vec::new(),
             also_satisfies: Vec::new(),
         }
+    }
+
+    /// Name lookups span both maps; iteration yields skills before plugins.
+    #[test]
+    fn dependencies_span_both_kinds_skills_first() {
+        let lock = Lockfile {
+            skills: BTreeMap::from([
+                (dep("zeta"), entry("https://h/s.git", 'a', "branch:main")),
+                (dep("alpha"), entry("https://h/s.git", 'b', "branch:main")),
+            ]),
+            plugins: BTreeMap::from([(dep("kit"), entry("https://h/p.git", 'c', "tag:v1"))]),
+            ..Default::default()
+        };
+        let all: Vec<_> = lock
+            .dependencies()
+            .map(|(k, n, l)| (k, n.to_string(), l.git.clone()))
+            .collect();
+        assert_eq!(
+            all,
+            [
+                (
+                    DependencyKind::Skill,
+                    "alpha".into(),
+                    "https://h/s.git".into()
+                ),
+                (
+                    DependencyKind::Skill,
+                    "zeta".into(),
+                    "https://h/s.git".into()
+                ),
+                (
+                    DependencyKind::Plugin,
+                    "kit".into(),
+                    "https://h/p.git".into()
+                ),
+            ]
+        );
+        assert_eq!(lock.get_dependency("kit").unwrap().git, "https://h/p.git");
+        assert!(lock.contains_dependency("alpha") && lock.contains_dependency("kit"));
+        assert!(!lock.contains_dependency("missing"));
+    }
+
+    /// Validation errors name the map the bad entry lives in.
+    #[test]
+    fn validate_names_the_kind_of_a_bad_entry() {
+        let mut l = entry("https://example.com/repo.git", 'b', "branch:main");
+        l.store = StoreKey::try_from("not-derived").unwrap();
+        let lock = Lockfile {
+            plugins: BTreeMap::from([(dep("kit"), l)]),
+            ..Default::default()
+        };
+        let err = format!("{}", lock.validate().unwrap_err());
+        assert!(err.starts_with("plugin `kit`: store key"), "{err}");
     }
 
     /// A lockfile whose `store` key doesn't match what `StoreKey::derive`

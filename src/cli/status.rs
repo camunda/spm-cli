@@ -150,7 +150,7 @@ pub(super) fn collect(session: &ScopeSession) -> Result<StatusReport> {
         .links
         .into_iter()
         .map(|(name, path)| LinkStatus {
-            declared: manifest.skills.contains_key(&name) || manifest.plugins.contains_key(&name),
+            declared: manifest.contains_dependency(&name),
             name,
             path,
         })

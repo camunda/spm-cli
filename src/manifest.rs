@@ -7,6 +7,45 @@ use std::path::{Component, Path, PathBuf};
 
 pub const MANIFEST_FILE: &str = "ai.json";
 
+/// Which map of `ai.json`/`ai.lock` a dependency lives in. Skills and plugins
+/// share one flat name namespace and the same resolve/pin rules; the kind
+/// selects the map and the few kind-specific steps (a plugin's bundled skills,
+/// a skill's transitive provenance).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DependencyKind {
+    Skill,
+    Plugin,
+}
+
+impl DependencyKind {
+    /// Every kind, in the order dependencies are iterated, resolved and
+    /// reported: skills before plugins.
+    pub const ALL: [Self; 2] = [Self::Skill, Self::Plugin];
+
+    /// The kind an `add`/`remove` targets: `--plugin` selects plugins.
+    pub fn from_plugin_flag(plugin: bool) -> Self {
+        if plugin {
+            Self::Plugin
+        } else {
+            Self::Skill
+        }
+    }
+
+    /// The singular noun used in messages (`skill`, `plugin`).
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Skill => "skill",
+            Self::Plugin => "plugin",
+        }
+    }
+}
+
+impl std::fmt::Display for DependencyKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
 /// The user-authored, VCS-committed declaration file (`ai.json`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
@@ -57,7 +96,7 @@ fn deserialize_unique_skills<'de, D>(d: D) -> Result<BTreeMap<DepName, SkillSpec
 where
     D: serde::Deserializer<'de>,
 {
-    deserialize_unique_map(d, "skill")
+    deserialize_unique_map(d, DependencyKind::Skill)
 }
 
 /// Same duplicate-key rejection as [`deserialize_unique_skills`], for the
@@ -66,21 +105,21 @@ fn deserialize_unique_plugins<'de, D>(d: D) -> Result<BTreeMap<DepName, SkillSpe
 where
     D: serde::Deserializer<'de>,
 {
-    deserialize_unique_map(d, "plugin")
+    deserialize_unique_map(d, DependencyKind::Plugin)
 }
 
 /// Stream a `{name: SkillSpec}` map, rejecting duplicate `name` keys. `kind`
-/// ("skill"/"plugin") only shapes the error message. Shared by the `skills` and
-/// `plugins` maps so both get identical last-wins-collapse protection.
+/// only shapes the error message. Shared by the `skills` and `plugins` maps so
+/// both get identical last-wins-collapse protection.
 fn deserialize_unique_map<'de, D>(
     d: D,
-    kind: &'static str,
+    kind: DependencyKind,
 ) -> Result<BTreeMap<DepName, SkillSpec>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     use serde::de::{self, MapAccess, Visitor};
-    struct MapVisitor(&'static str);
+    struct MapVisitor(DependencyKind);
     impl<'de> Visitor<'de> for MapVisitor {
         type Value = BTreeMap<DepName, SkillSpec>;
         fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -317,26 +356,18 @@ impl Manifest {
             crate::policy::validate_patterns(patterns)
                 .with_context(|| format!("`allowedSources` in {}", p.display()))?;
         }
-        for (name, spec) in &manifest.skills {
+        for (kind, name, spec) in manifest.dependencies() {
             spec.version()
-                .with_context(|| format!("skill `{name}` in {}", p.display()))?;
+                .with_context(|| format!("{kind} `{name}` in {}", p.display()))?;
             if let Some(sub) = &spec.path {
                 validate_subpath(sub)
-                    .with_context(|| format!("skill `{name}` in {}", p.display()))?;
-            }
-        }
-        for (name, spec) in &manifest.plugins {
-            spec.version()
-                .with_context(|| format!("plugin `{name}` in {}", p.display()))?;
-            if let Some(sub) = &spec.path {
-                validate_subpath(sub)
-                    .with_context(|| format!("plugin `{name}` in {}", p.display()))?;
+                    .with_context(|| format!("{kind} `{name}` in {}", p.display()))?;
             }
             // `skills` and `plugins` share one flat namespace of dependency
             // names (both end up materialized side by side, and commands like
             // `update <name>`/`remove <name>` look a name up across both), so
             // a name declared in both maps is ambiguous, not just a warning.
-            if manifest.skills.contains_key(name) {
+            if kind == DependencyKind::Plugin && manifest.skills.contains_key(name) {
                 bail!(
                     "name collision in {}: `{name}` is declared as both a skill and a plugin — \
                      dependency names must be unique across `skills` and `plugins`",
@@ -359,6 +390,49 @@ impl Manifest {
 
     pub fn exists(dir: &Path) -> bool {
         Self::path_in(dir).exists()
+    }
+
+    /// The map holding dependencies of `kind`.
+    pub fn deps(&self, kind: DependencyKind) -> &BTreeMap<DepName, SkillSpec> {
+        match kind {
+            DependencyKind::Skill => &self.skills,
+            DependencyKind::Plugin => &self.plugins,
+        }
+    }
+
+    /// The map holding dependencies of `kind`, for editing.
+    pub fn deps_mut(&mut self, kind: DependencyKind) -> &mut BTreeMap<DepName, SkillSpec> {
+        match kind {
+            DependencyKind::Skill => &mut self.skills,
+            DependencyKind::Plugin => &mut self.plugins,
+        }
+    }
+
+    /// Every declared dependency with its kind: skills, then plugins, each in
+    /// name order.
+    pub fn dependencies(&self) -> impl Iterator<Item = (DependencyKind, &DepName, &SkillSpec)> {
+        DependencyKind::ALL
+            .into_iter()
+            .flat_map(move |kind| self.deps(kind).iter().map(move |(n, s)| (kind, n, s)))
+    }
+
+    /// The kind `name` is declared as, if it is declared at all. Names are
+    /// unique across kinds (enforced by [`Manifest::parse`]); should a
+    /// hand-built manifest still repeat one, the skill wins.
+    pub fn kind_of(&self, name: &str) -> Option<DependencyKind> {
+        DependencyKind::ALL
+            .into_iter()
+            .find(|&kind| self.deps(kind).contains_key(name))
+    }
+
+    /// Whether `name` is declared as a skill or a plugin.
+    pub fn contains_dependency(&self, name: &str) -> bool {
+        self.kind_of(name).is_some()
+    }
+
+    /// Whether any skill or plugin is declared.
+    pub fn declares_any(&self) -> bool {
+        self.dependencies().next().is_some()
     }
 }
 
@@ -586,6 +660,43 @@ mod tests {
         ));
     }
 
+    /// The kind-agnostic view: skills then plugins, each in name order, with
+    /// name lookups spanning both maps and edits landing in the kind's map.
+    #[test]
+    fn dependencies_span_both_kinds_skills_first() {
+        let dep = r#"{"git":"u","branch":"main"}"#;
+        let text = format!(
+            r#"{{"targets":["claude"],"skills":{{"b":{dep},"a":{dep}}},"plugins":{{"0p":{dep}}}}}"#
+        );
+        let mut m = Manifest::parse(&text, Path::new("ai.json")).unwrap();
+        let all: Vec<_> = m
+            .dependencies()
+            .map(|(k, n, _)| (k, n.to_string()))
+            .collect();
+        assert_eq!(
+            all,
+            [
+                (DependencyKind::Skill, "a".to_string()),
+                (DependencyKind::Skill, "b".to_string()),
+                (DependencyKind::Plugin, "0p".to_string()),
+            ]
+        );
+        assert!(m.declares_any());
+        assert!(m.contains_dependency("0p") && m.contains_dependency("a"));
+        assert!(!m.contains_dependency("missing"));
+        assert_eq!(m.kind_of("missing"), None);
+
+        let spec = m.deps_mut(DependencyKind::Plugin).remove("0p").unwrap();
+        assert_eq!(m.kind_of("0p"), None);
+        m.deps_mut(DependencyKind::Skill)
+            .insert(crate::ids::dep("0p"), spec);
+        assert_eq!(m.kind_of("0p"), Some(DependencyKind::Skill));
+        assert_eq!(m.deps(DependencyKind::Plugin).len(), 0);
+
+        m.deps_mut(DependencyKind::Skill).clear();
+        assert!(!m.declares_any());
+    }
+
     /// Root manifests reject invalid dependency names in either map, and a
     /// name declared both as a skill and a plugin.
     #[test]
@@ -595,7 +706,8 @@ mod tests {
         let ok =
             format!(r#"{{"targets":["claude"],"skills":{{"a":{dep}}},"plugins":{{"b":{dep}}}}}"#);
         let m = Manifest::parse(&ok, p).unwrap();
-        assert!(m.skills.contains_key("a") && m.plugins.contains_key("b"));
+        assert_eq!(m.kind_of("a"), Some(DependencyKind::Skill));
+        assert_eq!(m.kind_of("b"), Some(DependencyKind::Plugin));
         for (json, needle) in [
             (
                 format!(
