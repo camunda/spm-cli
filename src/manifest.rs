@@ -680,6 +680,41 @@ mod tests {
         assert_eq!(Version::from_label("no-colon"), None);
     }
 
+    /// Root manifests reject invalid dependency names in either map, and a
+    /// name declared both as a skill and a plugin.
+    #[test]
+    fn parse_rejects_bad_names_and_cross_map_collisions() {
+        let p = Path::new("ai.json");
+        let dep = r#"{"git":"u","branch":"main"}"#;
+        let ok =
+            format!(r#"{{"targets":["claude"],"skills":{{"a":{dep}}},"plugins":{{"b":{dep}}}}}"#);
+        let m = Manifest::parse(&ok, p).unwrap();
+        assert!(m.skills.contains_key("a") && m.plugins.contains_key("b"));
+        for (json, needle) in [
+            (
+                format!(
+                    r#"{{"targets":["claude"],"skills":{{"x":{dep}}},"plugins":{{"x":{dep}}}}}"#
+                ),
+                "name collision",
+            ),
+            (
+                format!(r#"{{"targets":["claude"],"skills":{{"a:b":{dep}}}}}"#),
+                "invalid skill name",
+            ),
+            (
+                format!(r#"{{"targets":["claude"],"plugins":{{"..":{dep}}}}}"#),
+                "invalid skill name",
+            ),
+            (
+                format!(r#"{{"targets":["claude"],"plugins":{{"aux":{dep}}}}}"#),
+                "reserved device name",
+            ),
+        ] {
+            let err = Manifest::parse(&json, p).unwrap_err();
+            assert!(format!("{err:#}").contains(needle), "{json}: {err:#}");
+        }
+    }
+
     #[test]
     fn validate_subpath_rejects_nul_byte() {
         let err = validate_subpath("foo\0bar").unwrap_err();

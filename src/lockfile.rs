@@ -708,6 +708,68 @@ mod tests {
         }
     }
 
+    /// Load `text` as an on-disk `ai.lock`, exactly as commands do.
+    fn load_text(text: &str) -> Result<Lockfile> {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("spm-lockfile-text-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(LOCK_FILE), text).unwrap();
+        let out = Lockfile::load_or_default(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+        out
+    }
+
+    /// One `skills` entry as JSON, with `field` overridden to `value`
+    /// (`key` overrides the map key).
+    fn entry_json(key: &str, field: &str, value: serde_json::Value) -> String {
+        let git = "https://example.com/repo.git";
+        let sha = "a".repeat(40);
+        let mut entry = serde_json::json!({
+            "git": git,
+            "reference": "branch:main",
+            "commit": sha,
+            "store": store_key(git, &sha),
+        });
+        if !field.is_empty() {
+            entry[field] = value;
+        }
+        serde_json::json!({ "skills": { key: entry } }).to_string()
+    }
+
+    /// Every untrusted value in a hand-edited `ai.lock` that reaches a path or
+    /// a selector is rejected on load, whatever layer catches it.
+    #[test]
+    fn load_rejects_tampered_values() {
+        use serde_json::json;
+        load_text(&entry_json("greet", "", json!(null))).expect("baseline entry loads");
+        for (key, field, value, needle) in [
+            ("../escape", "", json!(null), "invalid skill name"),
+            ("con", "", json!(null), "reserved device name"),
+            ("ok", "commit", json!("A".repeat(40)), "invalid commit"),
+            ("ok", "commit", json!("abc123"), "invalid commit"),
+            ("ok", "store", json!("../x"), "invalid store key"),
+            ("ok", "store", json!("a/b@c"), "invalid store key"),
+            ("ok", "store", json!("other-0@x"), "does not match"),
+            (
+                "ok",
+                "bundled_skills",
+                json!(["../evil"]),
+                "invalid skill name",
+            ),
+            ("ok", "requested_by", json!(["a/b"]), "invalid skill name"),
+            ("ok", "also_satisfies", json!(["rev:abc"]), "rev:abc"),
+            ("ok", "also_satisfies", json!(["no-colon"]), "no-colon"),
+        ] {
+            let err = load_text(&entry_json(key, field, value)).unwrap_err();
+            let err = format!("{err:#}");
+            assert!(err.contains(needle), "{key}/{field}: {err}");
+        }
+    }
+
     #[test]
     fn display_reference_appends_the_resolved_tag() {
         let lock = with_reference("version:^1.2", Some("v1.4.1"));
