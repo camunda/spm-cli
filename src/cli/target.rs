@@ -142,7 +142,9 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
         let mut names = owned.for_target(t);
         names.extend(&inferred);
         let mut paths = v.skill_paths(scope, &names.skill_names())?;
-        paths.extend(v.plugin_paths(scope, &names.plugin_names())?);
+        if let Some(p) = v.plugins() {
+            paths.extend(p.plugin_paths(scope, &names.plugin_names())?);
+        }
         let (mut traversed, mut content) = (Vec::new(), Vec::new());
         let mut visited = std::collections::HashSet::new();
         for p in paths {
@@ -172,7 +174,9 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
     )?;
     for ((t, v), names) in removed.iter().zip(&removed_vendors).zip(&removed_owned) {
         let mut candidates = v.clean_paths(scope, &names.skill_names())?;
-        candidates.extend(v.plugin_clean_paths(scope, &names.plugin_names())?);
+        if let Some(p) = v.plugins() {
+            candidates.extend(p.plugin_clean_paths(scope, &names.plugin_names())?);
+        }
         let mut spans = Vec::new();
         for p in &candidates {
             spans.push(identity(&deletion_target(p)?)?);
@@ -195,7 +199,11 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
                 .chain(names.plugin_names().into_iter().map(|n| (n, true)))
             {
                 let (paths, ours) = if is_plugin {
-                    (xv.plugin_paths(scope, std::slice::from_ref(&name))?, None)
+                    let paths = match xv.plugins() {
+                        Some(p) => p.plugin_paths(scope, std::slice::from_ref(&name))?,
+                        None => Vec::new(),
+                    };
+                    (paths, None)
                 } else {
                     let entry = deletion_target(&v.skills_dir(scope)?.join(&name))?;
                     let ours = if entry.symlink_metadata().is_ok() {
@@ -237,8 +245,8 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
         // Released before anything is deleted (see `clean`).
         owned.clone().without(t).save(scope)?;
         if let Err(e) = vendor::remove_paths(&deletable)
-            .and_then(|()| v.deregister(scope))
-            .and_then(|()| v.deregister_plugins(scope))
+            .and_then(|()| v.registration().map_or(Ok(()), |r| r.deregister(scope)))
+            .and_then(|()| v.plugins().map_or(Ok(()), |p| p.deregister_plugins(scope)))
         {
             return Err(owned.fail(scope, &manifest.targets, e));
         }

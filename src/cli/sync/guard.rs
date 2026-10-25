@@ -277,13 +277,17 @@ fn touched(
         let (skills, plugins) = (owned.skill_names(), owned.plugin_names());
         let mut paths = v.clean_paths(scope, &skills)?;
         paths.extend(v.skill_paths(scope, &skills)?);
-        paths.extend(v.plugin_clean_paths(scope, &plugins)?);
-        paths.extend(v.plugin_paths(scope, &plugins)?);
+        if let Some(p) = v.plugins() {
+            paths.extend(p.plugin_clean_paths(scope, &plugins)?);
+            paths.extend(p.plugin_paths(scope, &plugins)?);
+        }
         for p in paths {
             let id = identity(&deletion_target(&p)?)?;
             outputs.push((v.name(), p, id, false));
         }
-        patched.extend(v.patched_files(scope)?.into_iter().map(|p| (v.name(), p)));
+        if let Some(r) = v.registration() {
+            patched.extend(r.patched_files(scope)?.into_iter().map(|p| (v.name(), p)));
+        }
     }
     for (owner, p) in &patched {
         let id = identity(&resolve(p, &mut Vec::new())?)?;

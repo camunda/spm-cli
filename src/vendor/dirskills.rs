@@ -1,6 +1,7 @@
 //! Shared filesystem primitives for the "copy skill folders into a directory
-//! the tool discovers" family of vendor adapters (Copilot, Gemini, and any
-//! future SKILL.md tool that auto-discovers `<dir>/<name>/SKILL.md`).
+//! the tool discovers" family of vendor adapters ([`super::shareddir`]'s
+//! presets, and any future SKILL.md tool that auto-discovers
+//! `<dir>/<name>/SKILL.md`).
 //!
 //! Both the project- and user-global skill dirs of these tools are laid out the
 //! same way — one directory per skill, holding a `SKILL.md` — so the copy and
@@ -25,19 +26,19 @@ pub fn copy_skills_into(dir: &Path, skills: &[MaterializedSkill], claim: Claim) 
     for s in skills {
         claim(&s.name)?;
         let dest = dir.join(&s.name);
-        if dest.exists() {
-            std::fs::remove_dir_all(&dest)
-                .with_context(|| format!("clearing {}", dest.display()))?;
-        }
+        fsutil::remove_path_if_present(&dest)
+            .with_context(|| format!("clearing {}", dest.display()))?;
         fsutil::copy_tree(&s.path, &dest, &s.root)
             .with_context(|| format!("copying skill `{}` into {}", s.name, dir.display()))?;
     }
     Ok(())
 }
 
-/// Remove `dir/<name>/` for each managed `name`, ignoring absent entries and
-/// leaving every other entry in `dir` (e.g. the user's own skills) untouched.
-/// Each present entry is `claim`ed right before it is removed.
+/// Remove `dir/<name>` for each managed `name` (a symlink there is unlinked,
+/// never followed), ignoring absent entries and leaving every other entry in
+/// `dir` (e.g. the user's own skills) untouched.
+/// Each [managed entry](fsutil::is_managed_entry) is `claim`ed right before it
+/// is removed; anything else at a managed name is neither claimed nor removed.
 pub fn remove_managed<'a>(
     dir: &Path,
     names: impl Iterator<Item = &'a DepName>,
@@ -45,9 +46,9 @@ pub fn remove_managed<'a>(
 ) -> Result<()> {
     for name in names {
         let target = dir.join(name);
-        if target.is_dir() {
+        if fsutil::is_managed_entry(&target) {
             claim(name)?;
-            std::fs::remove_dir_all(&target)
+            fsutil::remove_managed_path(&target)
                 .with_context(|| format!("removing {}", target.display()))?;
         }
     }
@@ -93,6 +94,64 @@ mod tests {
         copy_skills_into(&dir, &[s], &mut |_| Ok(())).unwrap();
         let got = std::fs::read_to_string(dir.join("greet").join("SKILL.md")).unwrap();
         assert_eq!(got, "v2\n");
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    /// A managed entry that is a symlink is removed (or replaced) as a link:
+    /// its target outside the shared dir is never touched.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_managed_entries_are_unlinked_not_followed() {
+        let tmp = scratch("symlinked");
+        let dir = tmp.join("skills");
+        let target = tmp.join("elsewhere");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("SKILL.md"), "keep\n").unwrap();
+        std::os::unix::fs::symlink(&target, dir.join("old")).unwrap();
+        std::os::unix::fs::symlink(&target, dir.join("greet")).unwrap();
+
+        remove_managed(&dir, [&dep("old")].into_iter(), &mut |_| Ok(())).unwrap();
+        copy_skills_into(&dir, &[make_skill(&tmp, "greet")], &mut |_| Ok(())).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(dir.join("old")).is_err(),
+            "link removed"
+        );
+        let greet = std::fs::symlink_metadata(dir.join("greet")).unwrap();
+        assert!(greet.is_dir(), "link replaced by a real copy");
+        assert_eq!(
+            std::fs::read_to_string(target.join("SKILL.md")).unwrap(),
+            "keep\n"
+        );
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    /// A special file (here a FIFO) at a managed name is not something spm
+    /// wrote: cleanup neither claims nor removes it, and does not fail on it.
+    #[cfg(unix)]
+    #[test]
+    fn special_files_at_managed_names_are_neither_claimed_nor_removed() {
+        let tmp = scratch("special");
+        let dir = tmp.join("skills");
+        std::fs::create_dir_all(&dir).unwrap();
+        let fifo = dir.join("greet");
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success());
+
+        let mut claimed = Vec::new();
+        remove_managed(&dir, [&dep("greet")].into_iter(), &mut |n| {
+            claimed.push(n.to_string());
+            Ok(())
+        })
+        .unwrap();
+        assert!(claimed.is_empty(), "not claimed: {claimed:?}");
+        assert!(std::fs::symlink_metadata(&fifo).is_ok(), "left in place");
+        crate::vendor::remove_paths(std::slice::from_ref(&fifo)).unwrap();
+        assert!(std::fs::symlink_metadata(&fifo).is_ok(), "left in place");
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 

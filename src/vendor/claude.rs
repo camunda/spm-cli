@@ -1,4 +1,4 @@
-use super::{Claim, MaterializedPlugin, MaterializedSkill, Vendor};
+use super::{Claim, MaterializedPlugin, MaterializedSkill, PluginHost, Registration, Vendor};
 use crate::ids::DepName;
 use crate::scope::Scope;
 use crate::{fsutil, gitignore, jsonutil, paths};
@@ -69,9 +69,7 @@ impl Vendor for Claude {
         let market = marketplace(scope);
         let market_dir = managed_dir(scope)?;
         // Rebuild from scratch so removed skills disappear (dir is spm-owned).
-        if market_dir.exists() {
-            std::fs::remove_dir_all(&market_dir)?;
-        }
+        fsutil::remove_path_if_present(&market_dir)?;
         let plugin_dir = market_dir.join("plugin");
         let skills_dir = plugin_dir.join("skills");
         std::fs::create_dir_all(&skills_dir)?;
@@ -122,21 +120,6 @@ impl Vendor for Claude {
         Ok(vec![managed_dir(scope)?, settings_path(scope)?])
     }
 
-    fn patched_files(&self, scope: &Scope) -> Result<Vec<PathBuf>> {
-        Ok(vec![settings_path(scope)?])
-    }
-
-    fn deregister(&self, scope: &Scope) -> Result<()> {
-        let path = settings_path(scope)?;
-        if path.exists() {
-            let mut root = jsonutil::read_object(&path)?;
-            jsonutil::remove_nested(&mut root, "extraKnownMarketplaces", marketplace(scope));
-            jsonutil::remove_nested(&mut root, "enabledPlugins", &plugin_key(scope));
-            jsonutil::write(&path, &root)?;
-        }
-        Ok(())
-    }
-
     fn skills_dir(&self, scope: &Scope) -> Result<PathBuf> {
         Ok(managed_dir(scope)?.join("plugin").join("skills"))
     }
@@ -167,6 +150,33 @@ impl Vendor for Claude {
         Ok(st)
     }
 
+    fn registration(&self) -> Option<&dyn Registration> {
+        Some(self)
+    }
+
+    fn plugins(&self) -> Option<&dyn PluginHost> {
+        Some(self)
+    }
+}
+
+impl Registration for Claude {
+    fn patched_files(&self, scope: &Scope) -> Result<Vec<PathBuf>> {
+        Ok(vec![settings_path(scope)?])
+    }
+
+    fn deregister(&self, scope: &Scope) -> Result<()> {
+        let path = settings_path(scope)?;
+        if path.exists() {
+            let mut root = jsonutil::read_object(&path)?;
+            jsonutil::remove_nested(&mut root, "extraKnownMarketplaces", marketplace(scope));
+            jsonutil::remove_nested(&mut root, "enabledPlugins", &plugin_key(scope));
+            jsonutil::write(&path, &root)?;
+        }
+        Ok(())
+    }
+}
+
+impl PluginHost for Claude {
     fn materialize_plugins(
         &self,
         scope: &Scope,
@@ -178,9 +188,7 @@ impl Vendor for Claude {
         let market_dir = plugins_managed_dir(scope)?;
         // The plugins marketplace dir is entirely spm-owned: rebuild from scratch
         // so removed plugins disappear.
-        if market_dir.exists() {
-            std::fs::remove_dir_all(&market_dir)?;
-        }
+        fsutil::remove_path_if_present(&market_dir)?;
 
         // Deregister first, then re-add: this drops stale marketplace/enabled
         // entries in one pass and cleanly handles the "no plugins left" case.
@@ -234,11 +242,7 @@ impl Vendor for Claude {
         Ok(())
     }
 
-    fn status_plugins(
-        &self,
-        scope: &Scope,
-        expected: &[DepName],
-    ) -> Result<Option<super::VendorStatus>> {
+    fn status_plugins(&self, scope: &Scope, expected: &[DepName]) -> Result<super::VendorStatus> {
         let market_dir = plugins_managed_dir(scope)?;
         // Each plugin is copied verbatim to `<market_dir>/<name>/`. The dir is
         // spm-owned, so any other subdir is stale — except `.claude-plugin/`
@@ -262,7 +266,7 @@ impl Vendor for Claude {
                 Some(_) => {}
             }
         }
-        Ok(Some(st))
+        Ok(st)
     }
 
     fn plugin_clean_paths(&self, scope: &Scope, _managed: &[DepName]) -> Result<Vec<PathBuf>> {
