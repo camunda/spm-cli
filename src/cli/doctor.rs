@@ -9,6 +9,7 @@
 use super::common::{render_report, scope_header};
 use super::index::DependencyIndex;
 use super::session::{Access, ScopeSession};
+use super::verdict::{Finding, Severity};
 use super::{status, sync};
 use crate::git::{self, Reach};
 use crate::ids::DepName;
@@ -72,6 +73,20 @@ impl Check {
     fn fix(mut self, fix: impl Into<String>) -> Self {
         self.fix = Some(fix.into());
         self
+    }
+    fn from_finding(id: &'static str, f: Finding) -> Self {
+        let status = match f.severity {
+            Severity::Ok => Level::Ok,
+            Severity::Warn => Level::Warn,
+            Severity::Error => Level::Error,
+        };
+        Check {
+            id,
+            status,
+            message: f.message,
+            details: f.details,
+            fix: f.fix,
+        }
     }
 }
 
@@ -207,38 +222,12 @@ fn diagnose(scope: &Scope, root: &Path, online: bool) -> Vec<Check> {
     let remotes = (online && policy_active).then(|| remote_urls(&manifest, lock.as_ref().ok()));
     let links_error = links.as_ref().err().map(|e| anyhow!("{e:#}"));
     let state = session.snapshot_from(manifest.clone(), lock, links);
-
-    let lockfile = Lockfile::path_in(root);
-    let declares_any = manifest.declares_any();
-    if !lockfile.exists() {
-        checks.push(if declares_any {
-            Check::error(
-                "lockfile",
-                "no ai.lock: declared dependencies are not pinned",
-            )
-            .fix(format!(
-                "{} and commit ai.lock",
-                sync::install_command(scope)
-            ))
-        } else {
-            Check::ok("lockfile", "no ai.lock (nothing declared yet)")
-        });
-    } else {
-        // Like `install --locked`, the check reads links before `ai.lock`.
-        let verdict = match links_error {
-            Some(e) => Err(e),
-            None => sync::check_lock(&session, &manifest, state.as_ref()),
-        };
-        match verdict {
-            Ok(verdict) => checks.extend(lock_checks(scope, verdict)),
-            Err(e) => checks.push(
-                Check::error("lockfile", format!("ai.lock can't be checked: {e:#}")).fix(format!(
-                    "{} and commit ai.lock",
-                    sync::install_command(scope)
-                )),
-            ),
-        }
-    }
+    checks.extend(
+        sync::check_lock(&session, &manifest, links_error.as_ref(), state.as_ref())
+            .findings(scope)
+            .into_iter()
+            .map(|f| Check::from_finding("lockfile", f)),
+    );
 
     match state.and_then(|state| status::collect(&session, &state)) {
         Ok(report) => {
@@ -524,31 +513,6 @@ fn check_links(
             }
         })
         .collect()
-}
-
-fn lock_checks(scope: &Scope, verdict: sync::LockCheck) -> Vec<Check> {
-    let install = sync::install_command(scope);
-    let mut checks = vec![if verdict.mismatches.is_empty() {
-        Check::ok("lockfile", "ai.lock matches ai.json")
-    } else {
-        Check::error(
-            "lockfile",
-            format!("ai.lock is out of sync with ai.json (`{install} --locked` would fail)"),
-        )
-        .details(verdict.mismatches)
-        .fix(format!("{install} and commit ai.lock"))
-    }];
-    if !verdict.unverified.is_empty() {
-        checks.push(
-            Check::warn(
-                "lockfile",
-                "not in the store, so what they add to ai.lock was not verified offline",
-            )
-            .details(verdict.unverified)
-            .fix(format!("{install} (fetches them)")),
-        );
-    }
-    checks
 }
 
 fn materialization_checks(scope: &Scope, report: &status::StatusReport) -> Vec<Check> {

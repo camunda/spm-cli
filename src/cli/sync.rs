@@ -1,4 +1,5 @@
 use super::session::{Access, ScopeSession, ScopeSnapshot};
+use super::verdict::{Enforcer, LockFindings, LockVerdict};
 use crate::ids::DepName;
 use crate::links::{Linked, Links};
 use crate::lockfile::{LockedSkill, Lockfile, Satisfied};
@@ -113,25 +114,11 @@ enum LockMode {
 }
 
 impl LockMode {
-    /// Prefix for an error raised because `ai.lock` is missing or out of sync.
-    fn label(self) -> &'static str {
+    /// Who rejects a missing or out-of-sync `ai.lock` in this mode.
+    fn enforcer(self) -> Enforcer {
         match self {
-            LockMode::Links => "`spm link`/`spm unlink` never write ai.lock",
-            _ => "--locked",
-        }
-    }
-
-    /// How to fix such an error, spelled for the scope in use.
-    fn fix_hint(self, scope: &Scope) -> String {
-        match self {
-            LockMode::Links => format!(
-                "run `{}` first to bring ai.lock in sync, then retry",
-                install_command(scope)
-            ),
-            _ => format!(
-                "run `{}` (without --locked) and commit ai.lock",
-                install_command(scope)
-            ),
+            LockMode::Links => Enforcer::Links,
+            _ => Enforcer::Locked,
         }
     }
 }
@@ -205,7 +192,7 @@ struct Plan {
     _snapshots: Option<Snapshots>,
     apply: Apply,
     /// [`LockMode::Check`] only: the verdict on `ai.lock`.
-    verdict: LockCheck,
+    verdict: LockFindings,
 }
 
 /// Private copies of the linked directories, made with the same safe-copy
@@ -342,12 +329,11 @@ fn plan(
         .map(|t| crate::vendor::for_target(t))
         .collect::<Result<Vec<_>>>()?;
     if locked && !Lockfile::path_in(&dir).exists() {
-        bail!(
-            "{}: {} not found\n{}",
-            mode.label(),
-            Lockfile::path_in(&dir).display(),
-            mode.fix_hint(scope)
-        );
+        LockVerdict::Missing {
+            path: Lockfile::path_in(&dir),
+            declared: manifest.declares_any(),
+        }
+        .enforce(mode.enforcer(), scope)?;
     }
     let (mut prev, previously_owned) = match loaded {
         Some(Ok(state)) => (state.lock.clone(), state.ownership.clone()),
@@ -362,19 +348,18 @@ fn plan(
             (prev, owned)
         }
     };
-    // `--locked` only: every way `ai.lock` disagrees with `ai.json`.
-    let mut mismatches: Vec<String> = Vec::new();
+    // `--locked` only: every way `ai.lock` disagrees with `ai.json` — and,
+    // for `LockMode::Check` only, the entries whose store checkout is missing,
+    // so what they contribute to `ai.lock` could not be verified offline.
+    let mut findings = LockFindings::default();
     // `--locked` only: direct skills that failed the pin check and so are not
     // walked (their transitive subtree is never visited).
     let mut skipped_roots: BTreeSet<String> = BTreeSet::new();
-    // `LockMode::Check` only: entries whose store checkout is missing, so what
-    // they contribute to `ai.lock` could not be verified offline.
-    let mut unverified: Vec<String> = Vec::new();
 
     // Stable, path-independent project id: reuse the locked one, else mint & persist.
     let id = if prev.id.is_empty() {
         if locked {
-            mismatches.push("ai.lock has no project `id`".to_string());
+            findings.missing_id = true;
         }
         crate::lockfile::generate_id(&dir)
     } else {
@@ -417,7 +402,7 @@ fn plan(
         let entry = match resolve_entry(kind, name, spec, prev_entry, refresh, locked)? {
             Ok(entry) => entry,
             Err(mismatch) => {
-                mismatches.push(mismatch);
+                findings.drift.push(mismatch);
                 // A skill failing the pin check is not walked, so its
                 // transitive subtree is never visited.
                 if kind == DependencyKind::Skill {
@@ -486,7 +471,7 @@ fn plan(
             .dependencies()
             .filter(|(kind, _, l)| *kind == DependencyKind::Plugin || l.requested_by.is_empty())
         {
-            mismatches.push(format!(
+            findings.stale.push(format!(
                 "{kind} `{name}`: in ai.lock but not declared in ai.json"
             ));
         }
@@ -525,7 +510,7 @@ fn plan(
             match store::cached(locked).with_context(|| format!("inspecting plugin `{name}`"))? {
                 Some(ensured) => Some(ensured),
                 None => {
-                    unverified.push(name.to_string());
+                    findings.unverified.push(name.to_string());
                     continue;
                 }
             }
@@ -657,7 +642,7 @@ fn plan(
             .iter()
             .map(|(n, _)| n.as_str())
             .collect();
-        mismatches.extend(stale_transitive_pins(
+        findings.stale.extend(stale_transitive_pins(
             &prev.skills,
             &reached,
             manifest.resolve_transitive,
@@ -667,12 +652,14 @@ fn plan(
                 .chain(expansion.uncertain_misses)
                 .chain(expansion.unverified.iter().cloned()),
         ));
-        mismatches.extend(expansion.lock_misses.into_iter().map(|(_, m)| m));
+        findings
+            .unresolved
+            .extend(expansion.lock_misses.into_iter().map(|(_, m)| m));
     }
     // Only skill subtrees are walked: a plugin missing from the store keeps
     // its locked entry, so it never makes the built lock partial.
     let unwalked_skills = expansion.unverified.clone();
-    unverified.extend(expansion.unverified);
+    findings.unverified.extend(expansion.unverified);
     // Fold the transitively-resolved skills into `ai.lock`. A synthesized name
     // colliding with a directly-declared dependency is a hard error (the
     // synthesized names are hash-suffixed to make this astronomically unlikely).
@@ -765,46 +752,38 @@ fn plan(
             },
         )?;
     }
-    let mut verdict = LockCheck::default();
     if locked {
         // Backstop for the whole defect class: whatever the specific checks above
         // missed (a hand-edited `bundled_skills`/`requested_by`/store key, ...),
         // `--locked` must never install a set that differs from the committed
         // lock. Compared as JSON values, so line endings/formatting don't matter.
-        if mismatches.is_empty() {
+        if findings.in_sync() {
             let on_disk: serde_json::Value =
                 serde_json::from_str(&std::fs::read_to_string(Lockfile::path_in(&dir))?)?;
             // An unverified transitive subtree was not walked, so the lock
             // built here lacks it: only the entries it did build are compared.
             if manifest.resolve_transitive && !unwalked_skills.is_empty() {
-                mismatches.extend(verified_lock_drift(&on_disk, &lock, &unwalked_skills)?);
+                findings
+                    .rewritten
+                    .extend(verified_lock_drift(&on_disk, &lock, &unwalked_skills)?);
             } else if on_disk != serde_json::to_value(&lock)? {
-                mismatches.push(
+                findings.rewritten.push(
                     "ai.lock differs from what spm would write (e.g. a plugin's bundled skills \
                      or a transitive skill's requesters changed)"
                         .to_string(),
                 );
             }
         }
-        if check {
-            verdict = LockCheck {
-                mismatches,
-                unverified,
-            };
-        } else if !mismatches.is_empty() {
-            bail!(
-                "{}: ai.lock is out of sync with ai.json ({} problem(s)):\n{}\n{}",
-                mode.label(),
-                mismatches.len(),
-                mismatches
-                    .iter()
-                    .map(|m| format!("  - {m}"))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                mode.fix_hint(scope)
-            );
-        }
     }
+    // A check returns its verdict; enforcing modes fail on it.
+    let verdict = if check {
+        findings
+    } else {
+        if locked {
+            LockVerdict::Checked(findings).enforce(mode.enforcer(), scope)?;
+        }
+        LockFindings::default()
+    };
     linked_plugin_skills.sort();
     linked_plugin_skills.dedup();
     links.managed = linked_plugin_skills;
@@ -831,32 +810,32 @@ fn plan(
     })
 }
 
-/// What [`check_lock`] found.
-#[derive(Default)]
-pub(super) struct LockCheck {
-    /// Every way `ai.lock` disagrees with `ai.json` — exactly what
-    /// `spm install --locked` would reject.
-    pub(super) mismatches: Vec<String>,
-    /// Dependencies whose store checkout is missing, so what they contribute
-    /// to `ai.lock` (a plugin's bundled skills, nested dependencies) could not
-    /// be verified offline. `spm install` would fetch them.
-    pub(super) unverified: Vec<String>,
-}
-
 /// Judge `ai.lock` against `manifest` by the exact `spm install --locked`
 /// rules, without fetching, scanning, printing or writing anything (`spm
-/// doctor`). `ai.lock` must exist. `manifest` and `state` (or the error
-/// loading it) must have been read from `session`, which the caller keeps
-/// holding for its further reads; an unreadable links file is the caller's to
-/// report first.
+/// doctor`). `manifest` and `state` (or the error loading it) must have been
+/// read from `session`, which the caller keeps holding for its further reads;
+/// `links_error` is why its links file couldn't be read, if it couldn't. Like
+/// `install --locked`, a missing `ai.lock` is judged before anything else, and
+/// links are read before `ai.lock`.
 pub(super) fn check_lock(
     session: &ScopeSession,
     manifest: &Manifest,
+    links_error: Option<&anyhow::Error>,
     state: Result<&ScopeSnapshot, &anyhow::Error>,
-) -> Result<LockCheck> {
+) -> LockVerdict {
+    let path = Lockfile::path_in(session.dir());
+    if !path.exists() {
+        return LockVerdict::Missing {
+            path,
+            declared: manifest.declares_any(),
+        };
+    }
+    if let Some(e) = links_error {
+        return LockVerdict::Unchecked(anyhow!("{e:#}"));
+    }
     // A check never resolves links, so none are needed until `state` is.
     let links = state.map_or_else(|_| Links::default(), |s| s.links.clone());
-    let plan = plan(
+    match plan(
         session,
         manifest,
         links,
@@ -864,8 +843,10 @@ pub(super) fn check_lock(
         false,
         None,
         LockMode::Check,
-    )?;
-    Ok(plan.verdict)
+    ) {
+        Ok(plan) => LockVerdict::Checked(plan.verdict),
+        Err(e) => LockVerdict::Unchecked(e),
+    }
 }
 
 /// The whole-lock backstop of `--locked` for a walk that left `unverified`
