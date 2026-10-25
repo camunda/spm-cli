@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use crate::source::{attribute, rust_files, shipped_code};
+use crate::source::{attribute, line_at, rust_files, shipped_code};
 
 /// Whether a compacted attribute body silences a lint.
 fn suppresses(body: &str) -> bool {
@@ -25,7 +25,7 @@ fn suppressions(src: &str) -> Vec<usize> {
         match attribute(&code, i) {
             Some((body, end)) => {
                 if suppresses(&body) {
-                    lines.push(code[..i].iter().filter(|&&c| c == '\n').count() + 1);
+                    lines.push(line_at(&code, i));
                 }
                 i = end;
             }

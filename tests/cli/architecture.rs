@@ -15,7 +15,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use crate::source::{attribute, rust_files, shipped_code};
+use crate::source::{attribute, line_at, rust_files, shipped_code};
 
 /// The allowed top-level dependency edges: the single source of truth for the
 /// layering of `src/`. A module absent here depends on no other module.
@@ -240,7 +240,7 @@ fn crate_refs(src: &str, file_depth: usize) -> Vec<(String, usize)> {
             None => i += 1,
         }
     }
-    let line = |i: usize| code[..i].iter().filter(|&&c| c == '\n').count() + 1;
+    let line = |i: usize| line_at(&code, i);
     let mut braces: Vec<bool> = Vec::new();
     let mut refs = Vec::new();
     let mut i = 0;

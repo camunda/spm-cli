@@ -19,7 +19,7 @@ use crate::manifest::Manifest;
 use crate::owned::Ownership;
 use crate::scope::Scope;
 use crate::vendor::{MaterializedPlugin, MaterializedSkill, Vendor};
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Result};
 use std::path::PathBuf;
 
 /// `println!` unless `$quiet` (a read-only [`LockMode::Check`] prints nothing).
@@ -170,17 +170,18 @@ pub(super) fn save_and_sync(
     let text = manifest.to_text()?;
     // Validate exactly as the next `Manifest::load` will (schema, name
     // collisions across skills/plugins, ...), so an invalid edit is never saved.
-    let manifest = Manifest::parse(&text, &path)?;
+    let validated = Manifest::parse(&text, &path)?;
     let plan = plan(
         &session,
-        &manifest,
+        &validated,
         session.links()?,
         None,
         false,
         None,
         LockMode::Write(apply),
     )?;
-    std::fs::write(&path, &text).with_context(|| format!("writing {}", path.display()))?;
+    // Writes exactly `text`: `save` renders through the same `to_text`.
+    manifest.save(session.dir())?;
     plan.apply(scope).map_err(|err| {
         anyhow!(
             "{err:#}\nhint: {} keeps this change because some targets may already have been \

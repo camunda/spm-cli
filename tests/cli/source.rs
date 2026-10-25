@@ -222,6 +222,12 @@ pub fn shipped_code(src: &str) -> Vec<char> {
     code
 }
 
+/// The 1-based line of offset `i` in `code` (a [`shipped_code`] view keeps
+/// every newline, so this is the line in the original source).
+pub fn line_at(code: &[char], i: usize) -> usize {
+    code[..i].iter().filter(|&&c| c == '\n').count() + 1
+}
+
 /// Every `.rs` file under `dir`, recursively.
 pub fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).unwrap() {

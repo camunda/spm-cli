@@ -14,6 +14,7 @@ mod common;
 mod concurrency;
 mod docs_drift;
 mod doctor;
+mod gateways;
 // Every global-scope test needs HOME to be honored, which only holds on Unix.
 #[cfg(unix)]
 mod global;
