@@ -9,6 +9,7 @@
 //! Over Duplication" rule in `AGENTS.md`).
 
 use crate::fsutil;
+use crate::ids::DepName;
 use anyhow::{Context, Result};
 use std::path::Path;
 
@@ -39,7 +40,7 @@ pub fn copy_skills_into(dir: &Path, skills: &[MaterializedSkill], claim: Claim) 
 /// Each present entry is `claim`ed right before it is removed.
 pub fn remove_managed<'a>(
     dir: &Path,
-    names: impl Iterator<Item = &'a str>,
+    names: impl Iterator<Item = &'a DepName>,
     claim: Claim,
 ) -> Result<()> {
     for name in names {
@@ -56,6 +57,7 @@ pub fn remove_managed<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ids::dep;
     use std::path::PathBuf;
 
     fn scratch(name: &str) -> PathBuf {
@@ -74,7 +76,7 @@ mod tests {
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(src.join("SKILL.md"), format!("---\nname: {name}\n---\n")).unwrap();
         MaterializedSkill {
-            name: name.to_string(),
+            name: DepName::try_from(name).unwrap(),
             path: src,
             root: root.to_path_buf(),
         }
@@ -104,7 +106,7 @@ mod tests {
             std::fs::create_dir_all(dir.join(n)).unwrap();
             std::fs::write(dir.join(n).join("SKILL.md"), "x\n").unwrap();
         }
-        remove_managed(&dir, ["greet"].into_iter(), &mut |_| Ok(())).unwrap();
+        remove_managed(&dir, [&dep("greet")].into_iter(), &mut |_| Ok(())).unwrap();
         assert!(!dir.join("greet").exists(), "managed skill removed");
         assert!(dir.join("user-skill").exists(), "unnamed skill preserved");
         std::fs::remove_dir_all(&tmp).unwrap();

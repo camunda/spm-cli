@@ -1,5 +1,6 @@
 use super::common::print_json;
 use super::session::{Access, ScopeSession, ScopeSnapshot};
+use crate::ids::DepName;
 use crate::scope::Scope;
 use crate::vendor::{self, VendorStatus};
 use anyhow::{bail, Result};
@@ -22,9 +23,9 @@ pub(super) struct StatusReport {
     /// plugin-bundled skill.
     pub(super) expected: Vec<ExpectedSkill>,
     /// Plugins declared in `ai.json`.
-    pub(super) plugins: Vec<String>,
+    pub(super) plugins: Vec<DepName>,
     /// Declared plugins with no `ai.lock` pin (never resolved here).
-    pub(super) unlocked_plugins: Vec<String>,
+    pub(super) unlocked_plugins: Vec<DepName>,
     pub(super) collisions: Vec<Collision>,
     /// Active `spm link` overrides (materialized from a local directory
     /// instead of the locked commit).
@@ -38,16 +39,16 @@ pub(super) struct StatusReport {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ExpectedSkill {
-    pub(super) name: String,
+    pub(super) name: DepName,
     /// Direct requester(s) of a transitively-resolved skill; empty otherwise.
-    pub(super) requested_by: Vec<String>,
+    pub(super) requested_by: Vec<DepName>,
 }
 
 /// One `spm link` override.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct LinkStatus {
-    pub(super) name: String,
+    pub(super) name: DepName,
     /// The linked directory, as recorded by `spm link`.
     pub(super) path: String,
     /// Whether `name` is still declared in `ai.json` (an undeclared link is
@@ -59,7 +60,7 @@ pub(super) struct LinkStatus {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct Collision {
-    pub(super) name: String,
+    pub(super) name: DepName,
     pub(super) other_scope: &'static str,
 }
 
@@ -173,8 +174,8 @@ pub(super) fn collect(session: &ScopeSession) -> Result<StatusReport> {
     // was declared but never resolved/installed; comparing against the on-disk
     // marketplace (via each vendor's `status_plugins`) catches a deleted
     // `.spm/claude-plugins` dir or a fresh worktree that was never installed.
-    let declared_plugins: Vec<String> = manifest.plugins.keys().cloned().collect();
-    let unlocked_plugins: Vec<String> = declared_plugins
+    let declared_plugins: Vec<DepName> = manifest.plugins.keys().cloned().collect();
+    let unlocked_plugins: Vec<DepName> = declared_plugins
         .iter()
         .filter(|n| !lock.plugins.contains_key(*n))
         .cloned()
@@ -193,10 +194,10 @@ pub(super) fn collect(session: &ScopeSession) -> Result<StatusReport> {
         let dir = vendor.skills_dir(scope)?;
         for name in ownership.for_target(target).skill_names() {
             if !expected.contains(&name)
-                && !status.stale.contains(&name)
+                && !status.stale.iter().any(|s| *s == name)
                 && dir.join(&name).is_dir()
             {
-                status.stale.push(name);
+                status.stale.push(name.to_string());
             }
         }
         status.stale.sort();
@@ -307,7 +308,7 @@ fn render_text(report: &StatusReport) {
         .expected
         .iter()
         .map(|e| e.name.len())
-        .chain(report.plugins.iter().map(String::len))
+        .chain(report.plugins.iter().map(|n| n.len()))
         .max()
         .unwrap_or(0);
 
@@ -355,7 +356,7 @@ fn render_text(report: &StatusReport) {
                 st.location.display()
             );
             for name in &report.plugins {
-                let missing = st.missing.contains(name);
+                let missing = st.missing.iter().any(|m| m == name);
                 let linked = report
                     .link(name)
                     .map(|l| format!("  (linked → {})", l.path))
@@ -379,7 +380,7 @@ fn render_text(report: &StatusReport) {
 /// Skill names in `expected` that are *also* locked in the opposite scope. Used
 /// by `status` to warn about global/project name collisions. Returns an empty
 /// list when the opposite scope has no lockfile.
-fn shadowed_names(scope: &Scope, expected: &[String]) -> Result<Vec<String>> {
+fn shadowed_names(scope: &Scope, expected: &[DepName]) -> Result<Vec<DepName>> {
     let other_scope = match scope {
         Scope::Project { .. } => Scope::Global,
         Scope::Global => Scope::Project {
@@ -394,7 +395,7 @@ fn shadowed_names(scope: &Scope, expected: &[String]) -> Result<Vec<String>> {
     // checked here too — computed exactly as for this scope, so a linked
     // plugin's working-tree bundle replaces its locked one.
     let other_lock = other.lockfile()?;
-    let other_names: std::collections::HashSet<String> = other
+    let other_names: std::collections::HashSet<DepName> = other
         .links()?
         .effective_skill_names(&other_lock)
         .into_iter()

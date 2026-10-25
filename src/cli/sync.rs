@@ -1,4 +1,5 @@
 use super::session::{Access, ScopeSession};
+use crate::ids::DepName;
 use crate::links::{Linked, Links};
 use crate::lockfile::{LockedSkill, Lockfile};
 use crate::manifest::{Manifest, SkillSpec};
@@ -206,7 +207,7 @@ struct Snapshots {
 
 impl Snapshots {
     /// Snapshot every link in `linked`, pointing its `content` at the copy.
-    fn take(linked: &mut BTreeMap<String, Linked>) -> Result<Option<Self>> {
+    fn take(linked: &mut BTreeMap<DepName, Linked>) -> Result<Option<Self>> {
         if linked.is_empty() {
             return Ok(None);
         }
@@ -367,7 +368,7 @@ fn plan(
         .skills
         .keys()
         .chain(manifest.plugins.keys())
-        .map(String::len)
+        .map(|n| n.len())
         .max()
         .unwrap_or(0);
 
@@ -385,10 +386,10 @@ fn plan(
 
     // Direct entries (re)resolved by this run rather than reused from ai.lock:
     // the only ones a lock-only sync fetches.
-    let mut fresh: BTreeSet<String> = BTreeSet::new();
+    let mut fresh: BTreeSet<DepName> = BTreeSet::new();
     for (name, spec) in &manifest.skills {
         spec.version()?; // validates selectors
-        let refresh = force_refresh && only.is_none_or(|o| o == name);
+        let refresh = force_refresh && only.is_none_or(|o| o == name.as_str());
 
         // Reuse the pinned commit if the request is unchanged and we're not refreshing.
         let prev_entry = prev.skills.remove(name);
@@ -404,7 +405,7 @@ fn plan(
             Ok(l) => Some(l),
             Err(why) if locked => {
                 mismatches.push(format!("skill `{name}`: {why}"));
-                skipped_roots.insert(name.clone());
+                skipped_roots.insert(name.to_string());
                 continue;
             }
             Err(_) => None,
@@ -438,19 +439,19 @@ fn plan(
         if how == "resolved" {
             fresh.insert(name.clone());
         }
-        let short = &locked.commit[..locked.commit.len().min(8)];
+        let short = locked.commit.short();
         let reference = locked.display_reference();
         say!(quiet, "  {name:<width$}  {reference} @ {short}  ({how})");
         lock.skills.insert(name.clone(), locked);
     }
 
-    let mut reused_linked_plugins: BTreeSet<String> = BTreeSet::new();
+    let mut reused_linked_plugins: BTreeSet<DepName> = BTreeSet::new();
     // Resolve full plugins the same way. A plugin's version reuse also depends
     // on the pinned commit being unchanged; its bundled-skill list is (re)filled
     // from the store checkout below, so we never carry a stale one forward.
     for (name, spec) in &manifest.plugins {
         spec.version()?;
-        let refresh = force_refresh && only.is_none_or(|o| o == name);
+        let refresh = force_refresh && only.is_none_or(|o| o == name.as_str());
         let reuse = match reusable_pin(prev.plugins.remove(name), spec, refresh)? {
             Ok(l) => Some(l),
             Err(why) if locked => {
@@ -480,7 +481,7 @@ fn plan(
             reused_linked_plugins.insert(name.clone());
         }
         locked.also_satisfies.clear();
-        let short = &locked.commit[..locked.commit.len().min(8)];
+        let short = locked.commit.short();
         let reference = locked.display_reference();
         say!(
             quiet,
@@ -523,7 +524,7 @@ fn plan(
     if !manifest.plugins.is_empty() {
         say!(quiet, "fetching plugins into store");
     }
-    let mut linked_plugin_skills: Vec<String> = Vec::new();
+    let mut linked_plugin_skills: Vec<DepName> = Vec::new();
     for (name, locked) in &mut lock.plugins {
         if lock_only && !fresh.contains(name) {
             say!(
@@ -543,7 +544,7 @@ fn plan(
             match store::cached(locked).with_context(|| format!("inspecting plugin `{name}`"))? {
                 Some(ensured) => Some(ensured),
                 None => {
-                    unverified.push(name.clone());
+                    unverified.push(name.to_string());
                     continue;
                 }
             }
@@ -626,7 +627,7 @@ fn plan(
     // Lock-only without transitive resolution: a reused skill is a leaf whose
     // pin is carried over as is, so only the (re)resolved ones are walked. With
     // it on, every skill is walked: its nested `ai.json` shapes the lock.
-    let walked: BTreeMap<String, LockedSkill> = if lock_only && !manifest.resolve_transitive {
+    let walked: BTreeMap<DepName, LockedSkill> = if lock_only && !manifest.resolve_transitive {
         for name in lock.skills.keys().filter(|n| !fresh.contains(*n)) {
             say!(
                 quiet,
@@ -743,7 +744,7 @@ fn plan(
     reject_case_folding_collisions("skill", materialized.iter().map(|m| m.name.as_str()))?;
     // From the lock, not the fetched `plugins`: a lock-only sync fetches only
     // the plugins it (re)resolves, yet must not write a lock an install rejects.
-    reject_case_folding_collisions("plugin", lock.plugins.keys().map(String::as_str))?;
+    reject_case_folding_collisions("plugin", lock.plugins.keys().map(DepName::as_str))?;
     reject_locked_skill_collisions(&lock)?;
     // Each target writes what it held before plus the new set — its own names
     // only, so another target's leftovers don't count as its output. A
@@ -956,7 +957,7 @@ fn verified_lock_drift(
                 .is_ok_and(|l| strict(&l.requested_by) && strict(&l.also_satisfies))
     };
     for (name, entry) in &lock.skills {
-        let Some(disk) = on_disk["skills"].get(name) else {
+        let Some(disk) = on_disk["skills"].get(name.as_str()) else {
             continue;
         };
         let mut disk = disk.clone();
@@ -1100,7 +1101,7 @@ fn resolve_links(
     scope: &Scope,
     manifest: &Manifest,
     links: &Links,
-) -> Result<BTreeMap<String, Linked>> {
+) -> Result<BTreeMap<DepName, Linked>> {
     let mut out = BTreeMap::new();
     for name in links.links.keys() {
         if !manifest.skills.contains_key(name) && !manifest.plugins.contains_key(name) {
@@ -1120,7 +1121,7 @@ fn resolve_links(
 
 /// A working copy the overlap guard protects.
 struct Guarded {
-    name: String,
+    name: DepName,
     /// Canonical dir.
     dir: PathBuf,
     /// The path as recorded (its route counts too), anchored at its scope's base.
@@ -1149,7 +1150,7 @@ pub(super) fn guard_working_copies(
     scope: &Scope,
     manifest_dir: &std::path::Path,
     vendors: &[Box<dyn Vendor>],
-    active: &BTreeMap<String, Linked>,
+    active: &BTreeMap<DepName, Linked>,
     outputs: &[Owned],
     snapshot: Option<&std::path::Path>,
     writes: Writes,
@@ -1675,12 +1676,12 @@ fn reusable_pin(
 /// root's own mismatch is already reported). With `resolveTransitive` off
 /// nothing is walked, so every transitive pin is stale.
 fn stale_transitive_pins(
-    prev: &BTreeMap<String, LockedSkill>,
+    prev: &BTreeMap<DepName, LockedSkill>,
     reached: &BTreeSet<&str>,
     resolve_transitive: bool,
     unwalked: impl IntoIterator<Item = String>,
 ) -> Vec<String> {
-    let unreached: Vec<(&String, &LockedSkill)> = prev
+    let unreached: Vec<(&DepName, &LockedSkill)> = prev
         .iter()
         .filter(|(n, l)| !l.requested_by.is_empty() && !reached.contains(n.as_str()))
         .collect();
@@ -1693,8 +1694,8 @@ fn stale_transitive_pins(
     loop {
         let before = unwalked.len();
         for (n, l) in &unreached {
-            if l.requested_by.iter().any(|r| unwalked.contains(r)) {
-                unwalked.insert((*n).clone());
+            if l.requested_by.iter().any(|r| unwalked.contains(r.as_str())) {
+                unwalked.insert(n.to_string());
             }
         }
         if unwalked.len() == before {
@@ -1703,7 +1704,7 @@ fn stale_transitive_pins(
     }
     unreached
         .into_iter()
-        .filter(|(n, _)| !unwalked.contains(*n))
+        .filter(|(n, _)| !unwalked.contains(n.as_str()))
         .map(|(n, _)| format!("transitive skill `{n}`: in ai.lock but no longer required"))
         .collect()
 }
@@ -1745,6 +1746,7 @@ fn reject_case_folding_collisions<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ids::dep;
 
     /// A fresh source dir under the system temp dir holding `files`.
     fn source(label: &str, files: &[(&str, &str)]) -> PathBuf {
@@ -1774,10 +1776,7 @@ mod tests {
     fn snapshots_are_private_distinct_and_temporary() {
         let skill = source("skill", &[("SKILL.md", "skill")]);
         let plugin = source("plugin", &[(".claude-plugin/plugin.json", "{}")]);
-        let mut map = BTreeMap::from([
-            ("Foo".to_string(), linked(&skill)),
-            ("foo".to_string(), linked(&plugin)),
-        ]);
+        let mut map = BTreeMap::from([(dep("Foo"), linked(&skill)), (dep("foo"), linked(&plugin))]);
         let snapshots = Snapshots::take(&mut map).unwrap().unwrap();
         let (s, p) = (&map["Foo"].content, &map["foo"].content);
         assert_eq!(

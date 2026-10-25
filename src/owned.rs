@@ -18,8 +18,8 @@
 //! links file, see [`crate::links`]), globally in `$SPM_HOME/owned-global.json`. Installs made before it existed have no
 //! record; then the lock stands in for it, as it always did.
 
+use crate::ids::DepName;
 use crate::lockfile::Lockfile;
-use crate::manifest::validate_skill_name;
 use crate::pathid::{dir_id, DirId};
 use crate::paths;
 use crate::scope::Scope;
@@ -39,9 +39,9 @@ const GLOBAL_FILE: &str = "owned-global.json";
 #[serde(deny_unknown_fields)]
 pub struct Owned {
     #[serde(default)]
-    pub skills: BTreeSet<String>,
+    pub skills: BTreeSet<DepName>,
     #[serde(default)]
-    pub plugins: BTreeSet<String>,
+    pub plugins: BTreeSet<DepName>,
 }
 
 impl Owned {
@@ -69,11 +69,11 @@ impl Owned {
         self.plugins.extend(other.plugins.iter().cloned());
     }
 
-    pub fn skill_names(&self) -> Vec<String> {
+    pub fn skill_names(&self) -> Vec<DepName> {
         self.skills.iter().cloned().collect()
     }
 
-    pub fn plugin_names(&self) -> Vec<String> {
+    pub fn plugin_names(&self) -> Vec<DepName> {
         self.plugins.iter().cloned().collect()
     }
 }
@@ -144,7 +144,7 @@ impl Ownership {
     pub fn load(
         scope: &Scope,
         lock: &Lockfile,
-        linked: &[String],
+        linked: &[DepName],
         targets: &[String],
     ) -> Result<Self> {
         let p = Self::path(scope)?;
@@ -160,15 +160,10 @@ impl Ownership {
         }
         let text =
             std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))?;
+        // The names are joined onto target dirs that get deleted; as
+        // `DepName`s, a tampered record's are rejected while parsing.
         let record: Record =
             serde_json::from_str(&text).with_context(|| format!("parsing {}", p.display()))?;
-        // The names are joined onto target dirs that get deleted, so a
-        // tampered record must not be able to point outside them.
-        for owned in record.targets.values() {
-            for name in owned.skills.iter().chain(&owned.plugins) {
-                validate_skill_name(name).with_context(|| format!("in {}", p.display()))?;
-            }
-        }
         // Skill names are bound to the dir spm wrote them into: once a
         // target's skills dir is gone or is a different directory (moved
         // aside, or a symlink re-pointed at the user's own skills), the names
@@ -330,10 +325,10 @@ impl Ownership {
             // marketplace), before claiming even names it already owned, so a
             // claim saves whenever the name or the binding is new.
             let mut bound = skills_dir_identity(scope, target)?;
-            let mut claim = |name: &str| -> Result<()> {
+            let mut claim = |name: &DepName| -> Result<()> {
                 let owned = record.get_mut(target).expect("target recorded above");
                 // Claimed only to be removed: nothing to record.
-                let added = desired.skills.contains(name) && owned.skills.insert(name.to_string());
+                let added = desired.skills.contains(name) && owned.skills.insert(name.clone());
                 let dir = skills_dir_identity(scope, target)?;
                 if added || dir != bound {
                     Self::Recorded(record.clone()).save(scope)?;
@@ -494,6 +489,7 @@ fn replace_atomically(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ids::{dep, CommitSha, StoreKey};
 
     fn scratch(name: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -521,21 +517,25 @@ mod tests {
         std::fs::create_dir_all(vendor.skills_dir(scope).unwrap()).unwrap();
     }
 
-    fn set(names: &[&str]) -> BTreeSet<String> {
-        names.iter().map(|s| s.to_string()).collect()
+    fn set(names: &[&str]) -> BTreeSet<DepName> {
+        names.iter().map(|s| dep(s)).collect()
     }
 
     fn lock_with(skills: &[&str]) -> Lockfile {
         let mut lock = Lockfile::default();
         for name in skills {
             let commit = "a".repeat(40);
+            let store = StoreKey::derive(
+                "https://example.com/r.git",
+                &CommitSha::try_from(commit.as_str()).unwrap(),
+            );
             lock.skills.insert(
-                name.to_string(),
+                dep(name),
                 serde_json::from_value(serde_json::json!({
                     "git": "https://example.com/r.git",
                     "reference": "branch:main",
                     "commit": commit,
-                    "store": crate::lockfile::store_key("https://example.com/r.git", &commit),
+                    "store": store,
                 }))
                 .unwrap(),
             );
@@ -647,7 +647,7 @@ mod tests {
         make_skills_dir(&scope, "cursor");
         // With no record, every target is assumed to hold the lock's names
         // plus what linked plugins last materialized.
-        let linked = Ownership::load(&scope, &lock_with(&["a"]), &["x".to_string()], &[]).unwrap();
+        let linked = Ownership::load(&scope, &lock_with(&["a"]), &[dep("x")], &[]).unwrap();
         assert_eq!(linked.for_target("codex").skills, set(&["a", "x"]));
         let legacy = Ownership::load(&scope, &lock_with(&["a"]), &[], &[]).unwrap();
         assert_eq!(legacy.for_target("codex").skills, set(&["a"]));
@@ -683,7 +683,7 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(seen, [(0, vec!["a".to_string()])]);
+        assert_eq!(seen, [(0, vec![dep("a")])]);
         let installed = Ownership::load(&scope, &lock_with(&[]), &[], &[]).unwrap();
         assert_eq!(installed.for_target("codex").skills, set(&["b"]));
         assert_eq!(installed.for_target("cursor"), Owned::default());
@@ -783,9 +783,9 @@ mod tests {
                 &["codex".to_string()],
                 &Owned::from_lock(&lock),
                 |_, _, claim| {
-                    claim("old")?;
+                    claim(&dep("old"))?;
                     std::fs::remove_dir_all(dir.join("old"))?;
-                    claim("fresh")?;
+                    claim(&dep("fresh"))?;
                     std::fs::create_dir_all(dir.join("fresh"))?;
                     // The record can't be written from here on.
                     std::fs::set_permissions(&record_dir, std::fs::Permissions::from_mode(0o555))?;

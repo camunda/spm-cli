@@ -10,7 +10,7 @@
 //! of the checkout means a repository can never supply (or commit) one: only
 //! running `spm link` on this machine activates a local source.
 
-use crate::manifest::validate_skill_name;
+use crate::ids::DepName;
 use crate::paths;
 use crate::scope::Scope;
 use anyhow::{bail, Context, Result};
@@ -29,13 +29,13 @@ pub struct Links {
     /// Dependency name → local directory, exactly as recorded by `spm link`: a
     /// path relative to the project root (project scope) or an absolute path.
     #[serde(default)]
-    pub links: BTreeMap<String, String>,
+    pub links: BTreeMap<DepName, String>,
     /// Skill names the last sync materialized from *linked plugins*. A linked
     /// plugin's working tree may bundle skills its locked commit does not, and
     /// those are not recorded in `ai.lock`; remembering them lets the next sync
     /// remove them from shared skill dirs once they are gone (or unlinked).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub managed: Vec<String>,
+    pub managed: Vec<DepName>,
     /// The canonical project root a project-scope file belongs to: only
     /// written to disk (set by [`Links::save`]), so commands in *other* scopes
     /// can resolve its relative paths and protect its working copies.
@@ -149,14 +149,9 @@ impl Links {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
             Err(e) => return Err(e).with_context(|| format!("reading {}", p.display())),
         };
-        let links: Self =
-            serde_json::from_str(&text).with_context(|| format!("parsing {}", p.display()))?;
-        // Names are joined onto vendor skill dirs (and removed from shared ones),
-        // so a hand-edited file must not smuggle a path in.
-        for name in links.links.keys().chain(&links.managed) {
-            validate_skill_name(name).with_context(|| format!("in {}", p.display()))?;
-        }
-        Ok(links)
+        // Names are joined onto vendor skill dirs (and removed from shared
+        // ones); as `DepName`s, a hand-edited file's are rejected while parsing.
+        serde_json::from_str(&text).with_context(|| format!("parsing {}", p.display()))
     }
 
     /// Persist the links file, deleting it once it holds nothing.
@@ -223,8 +218,8 @@ impl Links {
     /// links: locked skills, each plugin's locked bundled skills — except for
     /// an actively linked plugin, whose working tree's bundled skills
     /// (recorded in [`Links::managed`]) are materialized *instead*.
-    pub fn effective_skill_names(&self, lock: &crate::lockfile::Lockfile) -> Vec<String> {
-        let mut names: Vec<String> = lock.skills.keys().cloned().collect();
+    pub fn effective_skill_names(&self, lock: &crate::lockfile::Lockfile) -> Vec<DepName> {
+        let mut names: Vec<DepName> = lock.skills.keys().cloned().collect();
         for (name, l) in &lock.plugins {
             if !self.links.contains_key(name) {
                 names.extend(l.bundled_skills.iter().cloned());
@@ -338,6 +333,7 @@ pub fn record_path(scope: &Scope, cwd: &Path, dir: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ids::dep;
 
     fn tmp(tag: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -369,7 +365,7 @@ mod tests {
         let root = tmp("empty");
         let file = root.join(PROJECT_DIR).join(FILE);
         let mut links = Links::default();
-        links.links.insert("a".into(), "dir".into());
+        links.links.insert(dep("a"), "dir".into());
         links.save_to(&file).unwrap();
         assert!(file.is_file());
         assert_eq!(Links::load_from(&file).unwrap(), links);
@@ -402,7 +398,7 @@ mod tests {
                 project: Some(home.to_string_lossy().into_owned()),
                 ..Links::default()
             };
-            l.links.insert(link.into(), "dir".into());
+            l.links.insert(dep(link), "dir".into());
             l
         };
         let read = || {
@@ -434,7 +430,7 @@ mod tests {
         std::fs::write(&real, "{}").unwrap();
         std::os::unix::fs::symlink(&real, &file).unwrap();
         let mut links = Links::default();
-        links.links.insert("a".into(), "dir".into());
+        links.links.insert(dep("a"), "dir".into());
         links.save_to(&file).unwrap();
         assert!(std::fs::symlink_metadata(&file).unwrap().is_symlink());
         assert_eq!(Links::load_from(&real).unwrap(), links);

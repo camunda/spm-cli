@@ -33,7 +33,9 @@ pub(super) fn link(scope: &Scope, cwd: &Path, name: &str, dir: &str) -> Result<(
     }
     let mut links = session.links()?;
     let recorded = record_path(scope, cwd, dir)?;
-    links.links.insert(name.to_string(), recorded.clone());
+    links
+        .links
+        .insert(crate::ids::DepName::try_from(name)?, recorded.clone());
     sync_with_links(session, links)?;
     println!(
         "linked {kind} {name} → {recorded} (ai.json and ai.lock unchanged; re-run `{}` after \
@@ -50,7 +52,10 @@ pub(super) fn unlink(scope: &Scope, name: Option<&str>, all: bool) -> Result<()>
     let session = ScopeSession::open(scope, Access::Links)?;
     let mut links = session.links()?;
     let removed: Vec<String> = if all {
-        std::mem::take(&mut links.links).into_keys().collect()
+        std::mem::take(&mut links.links)
+            .into_keys()
+            .map(String::from)
+            .collect()
     } else {
         let name = name.context("name a link to remove, or pass --all")?;
         if links.links.remove(name).is_none() {

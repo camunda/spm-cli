@@ -10,6 +10,7 @@ use super::common::print_json;
 use super::session::{Access, ScopeSession};
 use super::{status, sync};
 use crate::git::{self, Reach};
+use crate::ids::DepName;
 use crate::links::Links;
 use crate::lockfile::Lockfile;
 use crate::manifest::Manifest;
@@ -635,7 +636,7 @@ fn check_gitignore(
     // later rule, or committed (ignore rules don't apply to tracked files).
     let (mut exposed, mut tracked) = (Vec::new(), Vec::new());
     let mut relevant = false;
-    let names: Vec<String> = report.expected.iter().map(|e| e.name.clone()).collect();
+    let names: Vec<DepName> = report.expected.iter().map(|e| e.name.clone()).collect();
     let declares_any = !names.is_empty() || !report.plugins.is_empty();
     for target in &manifest.targets {
         let Ok(v) = vendor::for_target(target) else {
@@ -661,7 +662,13 @@ fn check_gitignore(
             continue;
         }
         relevant = true;
-        let owned: Vec<String> = names.iter().cloned().chain(stale).collect();
+        // A leftover that is not a valid dependency name was never written by
+        // spm, so it has no spm-managed entry or output to check.
+        let owned: Vec<DepName> = names
+            .iter()
+            .cloned()
+            .chain(stale.into_iter().filter_map(|s| DepName::try_from(s).ok()))
+            .collect();
         let entries_present = match gitignore::missing(root, &v.gitignore_entries(&owned)) {
             Ok(m) => {
                 let present = m.is_empty();

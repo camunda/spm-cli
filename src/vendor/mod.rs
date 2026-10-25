@@ -3,6 +3,7 @@ mod copilot;
 mod dirskills;
 mod shareddir;
 
+use crate::ids::DepName;
 use crate::scope::Scope;
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
@@ -11,7 +12,7 @@ use std::path::{Path, PathBuf};
 /// A resolved skill ready to be wired into a vendor: a name plus the absolute
 /// path to its content in the global store.
 pub struct MaterializedSkill {
-    pub name: String,
+    pub name: DepName,
     pub path: PathBuf,
     /// Canonical repo checkout root that bounds symlink following when this
     /// skill is copied into a vendor dir (see [`crate::store::Ensured::root`]).
@@ -23,7 +24,7 @@ pub struct MaterializedSkill {
 /// plugin root in the global store (the dir holding `.claude-plugin/plugin.json`,
 /// `agents/`, `skills/`, scripts, hooks, …).
 pub struct MaterializedPlugin {
-    pub name: String,
+    pub name: DepName,
     pub path: PathBuf,
     /// Canonical repo checkout root that bounds symlink following when this
     /// plugin is copied into a vendor dir (see [`crate::store::Ensured::root`]).
@@ -41,9 +42,9 @@ pub struct VendorStatus {
     #[serde(serialize_with = "crate::jsonutil::serialize_path")]
     pub location: PathBuf,
     /// Declared skills that are present on disk in this checkout.
-    pub present: Vec<String>,
+    pub present: Vec<DepName>,
     /// Declared skills that are missing here (e.g. an uninstalled worktree).
-    pub missing: Vec<String>,
+    pub missing: Vec<DepName>,
     /// Materialized skills that are no longer declared in `ai.lock` (stale).
     pub stale: Vec<String>,
     /// Extra human-readable notes (e.g. a registration pointer problem).
@@ -59,7 +60,7 @@ pub struct VendorStatus {
 /// spm-owned, so stale detection is meaningful there; user-global dirs (e.g.
 /// `~/.copilot/skills`) are *shared* with the user's own hand-authored skills,
 /// so global-scope callers pass `false` to avoid mislabeling those as stale.
-pub fn classify(skills_dir: &Path, expected: &[String], detect_stale: bool) -> VendorStatus {
+pub fn classify(skills_dir: &Path, expected: &[DepName], detect_stale: bool) -> VendorStatus {
     let (mut present, mut missing) = (Vec::new(), Vec::new());
     for name in expected {
         if skills_dir.join(name).is_dir() {
@@ -99,7 +100,7 @@ pub fn classify(skills_dir: &Path, expected: &[String], detect_stale: bool) -> V
 /// location shared across every project.
 /// Records that spm is about to modify the named skill entry (see
 /// [`Vendor::materialize`]).
-pub type Claim<'a> = &'a mut dyn FnMut(&str) -> Result<()>;
+pub type Claim<'a> = &'a mut dyn FnMut(&DepName) -> Result<()>;
 
 pub trait Vendor {
     #[allow(dead_code)] // part of the adapter contract; not all call sites use it yet
@@ -125,21 +126,21 @@ pub trait Vendor {
         scope: &Scope,
         project_id: &str,
         skills: &[MaterializedSkill],
-        previously_managed: &[String],
+        previously_managed: &[DepName],
         claim: Claim,
     ) -> Result<()>;
 
     /// Remove everything this vendor generated for this `scope`: deletes each of
     /// [`clean_paths`](Vendor::clean_paths), then [`deregister`](Vendor::deregister)s.
     /// `managed` lists the skill names spm currently owns (from the lockfile).
-    fn clean(&self, scope: &Scope, managed: &[String]) -> Result<()> {
+    fn clean(&self, scope: &Scope, managed: &[DepName]) -> Result<()> {
         remove_paths(&self.clean_paths(scope, managed)?)?;
         self.deregister(scope)
     }
 
     /// The paths [`clean`](Vendor::clean) deletes for `scope`. Vendors sharing a
     /// dir with the user's own skills list only the `managed` entries in it.
-    fn clean_paths(&self, scope: &Scope, managed: &[String]) -> Result<Vec<PathBuf>>;
+    fn clean_paths(&self, scope: &Scope, managed: &[DepName]) -> Result<Vec<PathBuf>>;
 
     /// The paths this vendor loads the `managed` skills (and any metadata they
     /// need, e.g. a marketplace manifest) from in `scope`. Another target's
@@ -147,7 +148,7 @@ pub trait Vendor {
     /// anything inside them, or anything they reach through a symlink while this
     /// vendor is still configured — e.g. `codex` and `amp` share the project's
     /// `.agents/skills/<name>/`.
-    fn skill_paths(&self, scope: &Scope, managed: &[String]) -> Result<Vec<PathBuf>>;
+    fn skill_paths(&self, scope: &Scope, managed: &[DepName]) -> Result<Vec<PathBuf>>;
 
     /// The directory this vendor writes each skill into in `scope`, as
     /// `<dir>/<name>/` (also where [`status`](Vendor::status) looks).
@@ -171,11 +172,11 @@ pub trait Vendor {
     /// The `.gitignore` entries a project-scope [`materialize`](Vendor::materialize)
     /// of `skills` ensures (each with this vendor's comment), so spm's output
     /// stays out of version control. The single source for both.
-    fn gitignore_entries(&self, skills: &[String]) -> Vec<String>;
+    fn gitignore_entries(&self, skills: &[DepName]) -> Vec<String>;
 
     /// Report what this vendor has materialized in the given `scope`, compared
     /// against the declared `expected` skill names (from `ai.lock`).
-    fn status(&self, scope: &Scope, expected: &[String]) -> Result<VendorStatus>;
+    fn status(&self, scope: &Scope, expected: &[DepName]) -> Result<VendorStatus>;
 
     /// Register full plugins (agents, MCP servers, hooks, scripts) for this
     /// vendor. Only targets that can load more than a `SKILL.md` override this;
@@ -192,7 +193,7 @@ pub trait Vendor {
         _scope: &Scope,
         _project_id: &str,
         _plugins: &[MaterializedPlugin],
-        _previously_managed: &[String],
+        _previously_managed: &[DepName],
     ) -> Result<()> {
         Ok(())
     }
@@ -204,7 +205,11 @@ pub trait Vendor {
     /// [`status`](Vendor::status)); richer targets (e.g. Claude) return `Some`
     /// so `spm status` can catch a deleted marketplace dir or a fresh worktree
     /// whose plugin registration was never installed here.
-    fn status_plugins(&self, _scope: &Scope, _expected: &[String]) -> Result<Option<VendorStatus>> {
+    fn status_plugins(
+        &self,
+        _scope: &Scope,
+        _expected: &[DepName],
+    ) -> Result<Option<VendorStatus>> {
         Ok(None)
     }
 
@@ -212,21 +217,21 @@ pub trait Vendor {
     /// `scope`: deletes each of [`plugin_clean_paths`](Vendor::plugin_clean_paths),
     /// then [`deregister_plugins`](Vendor::deregister_plugins). Counterpart to
     /// [`materialize_plugins`](Vendor::materialize_plugins).
-    fn clean_plugins(&self, scope: &Scope, managed: &[String]) -> Result<()> {
+    fn clean_plugins(&self, scope: &Scope, managed: &[DepName]) -> Result<()> {
         remove_paths(&self.plugin_clean_paths(scope, managed)?)?;
         self.deregister_plugins(scope)
     }
 
     /// The paths [`clean_plugins`](Vendor::clean_plugins) deletes. Default: none,
     /// for targets that never register full plugins.
-    fn plugin_clean_paths(&self, _scope: &Scope, _managed: &[String]) -> Result<Vec<PathBuf>> {
+    fn plugin_clean_paths(&self, _scope: &Scope, _managed: &[DepName]) -> Result<Vec<PathBuf>> {
         Ok(Vec::new())
     }
 
     /// The paths this vendor loads the `managed` full plugins (and their
     /// metadata) from, protected like [`skill_paths`](Vendor::skill_paths).
     /// Default: none.
-    fn plugin_paths(&self, _scope: &Scope, _managed: &[String]) -> Result<Vec<PathBuf>> {
+    fn plugin_paths(&self, _scope: &Scope, _managed: &[DepName]) -> Result<Vec<PathBuf>> {
         Ok(Vec::new())
     }
 

@@ -1,4 +1,5 @@
 use super::{Claim, MaterializedPlugin, MaterializedSkill, Vendor};
+use crate::ids::DepName;
 use crate::scope::Scope;
 use crate::{fsutil, gitignore, jsonutil, paths};
 use anyhow::{Context, Result};
@@ -62,7 +63,7 @@ impl Vendor for Claude {
         scope: &Scope,
         _project_id: &str,
         skills: &[MaterializedSkill],
-        _previously_managed: &[String],
+        _previously_managed: &[DepName],
         claim: Claim,
     ) -> Result<()> {
         let market = marketplace(scope);
@@ -104,18 +105,18 @@ impl Vendor for Claude {
         Ok(())
     }
 
-    fn gitignore_entries(&self, _skills: &[String]) -> Vec<String> {
+    fn gitignore_entries(&self, _skills: &[DepName]) -> Vec<String> {
         // One entry covers the skills and the full-plugin marketplace dirs.
         vec![GITIGNORE_ENTRY.to_string()]
     }
 
-    fn clean_paths(&self, scope: &Scope, _managed: &[String]) -> Result<Vec<PathBuf>> {
+    fn clean_paths(&self, scope: &Scope, _managed: &[DepName]) -> Result<Vec<PathBuf>> {
         // `.gitignore` is intentionally left untouched (project scope only): the
         // entry spm added is harmless once the materialized dir is gone.
         Ok(vec![managed_dir(scope)?])
     }
 
-    fn skill_paths(&self, scope: &Scope, _managed: &[String]) -> Result<Vec<PathBuf>> {
+    fn skill_paths(&self, scope: &Scope, _managed: &[DepName]) -> Result<Vec<PathBuf>> {
         // Claude loads the whole marketplace — its `.claude-plugin/` metadata as
         // well as the skills — registered through its settings file.
         Ok(vec![managed_dir(scope)?, settings_path(scope)?])
@@ -140,7 +141,7 @@ impl Vendor for Claude {
         Ok(managed_dir(scope)?.join("plugin").join("skills"))
     }
 
-    fn status(&self, scope: &Scope, expected: &[String]) -> Result<super::VendorStatus> {
+    fn status(&self, scope: &Scope, expected: &[DepName]) -> Result<super::VendorStatus> {
         let market_dir = managed_dir(scope)?;
         let skills_dir = self.skills_dir(scope)?;
         // The marketplace dir is spm-owned in both scopes, so stale detection is
@@ -171,7 +172,7 @@ impl Vendor for Claude {
         scope: &Scope,
         _project_id: &str,
         plugins: &[MaterializedPlugin],
-        _previously_managed: &[String],
+        _previously_managed: &[DepName],
     ) -> Result<()> {
         let market = plugins_marketplace(scope);
         let market_dir = plugins_managed_dir(scope)?;
@@ -236,7 +237,7 @@ impl Vendor for Claude {
     fn status_plugins(
         &self,
         scope: &Scope,
-        expected: &[String],
+        expected: &[DepName],
     ) -> Result<Option<super::VendorStatus>> {
         let market_dir = plugins_managed_dir(scope)?;
         // Each plugin is copied verbatim to `<market_dir>/<name>/`. The dir is
@@ -264,11 +265,11 @@ impl Vendor for Claude {
         Ok(Some(st))
     }
 
-    fn plugin_clean_paths(&self, scope: &Scope, _managed: &[String]) -> Result<Vec<PathBuf>> {
+    fn plugin_clean_paths(&self, scope: &Scope, _managed: &[DepName]) -> Result<Vec<PathBuf>> {
         Ok(vec![plugins_managed_dir(scope)?])
     }
 
-    fn plugin_paths(&self, scope: &Scope, _managed: &[String]) -> Result<Vec<PathBuf>> {
+    fn plugin_paths(&self, scope: &Scope, _managed: &[DepName]) -> Result<Vec<PathBuf>> {
         Ok(vec![plugins_managed_dir(scope)?, settings_path(scope)?])
     }
 
@@ -401,6 +402,7 @@ fn settings_path(scope: &Scope) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ids::dep;
 
     fn scratch(name: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -415,7 +417,7 @@ mod tests {
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(src.join("SKILL.md"), format!("---\nname: {name}\n---\n")).unwrap();
         MaterializedSkill {
-            name: name.to_string(),
+            name: DepName::try_from(name).unwrap(),
             path: src,
             root: root.to_path_buf(),
         }
@@ -470,7 +472,7 @@ mod tests {
         Claude
             .materialize(&scope, "spm-1234", &[s], &[], &mut |_| Ok(()))
             .unwrap();
-        Claude.clean(&scope, &["greet".into()]).unwrap();
+        Claude.clean(&scope, &[dep("greet")]).unwrap();
 
         assert!(!tmp.join(".spm/claude").exists(), "marketplace dir removed");
         let settings: Value = serde_json::from_str(

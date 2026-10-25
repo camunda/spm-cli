@@ -142,7 +142,7 @@ pub(crate) fn human_size(bytes: u64) -> String {
 pub(crate) fn default_name(git: &str) -> String {
     // Split on `\` too: a `file://` URL to a Windows path (or a `--path` on
     // Windows) uses backslash separators, and the basename must not keep them
-    // or it fails `validate_skill_name`.
+    // or it is not a valid `DepName`.
     git.trim_end_matches(['/', '\\'])
         .rsplit(['/', '\\', ':'])
         .next()
@@ -214,7 +214,7 @@ mod tests {
         for p in [".", "foo/.", ""] {
             let derived = default_name(p);
             assert!(
-                crate::manifest::validate_skill_name(&derived).is_err(),
+                crate::ids::DepName::try_from(derived.as_str()).is_err(),
                 "expected `{derived}` (from `{p}`) to be an invalid skill name"
             );
         }

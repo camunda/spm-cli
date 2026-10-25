@@ -1,3 +1,4 @@
+use crate::ids::CommitSha;
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -603,11 +604,11 @@ fn parse_default_branch(out: &str) -> Option<String> {
 }
 
 /// True if `dir` is a git checkout already sitting at `sha`.
-pub fn is_at_commit(dir: &Path, sha: &str) -> bool {
+pub fn is_at_commit(dir: &Path, sha: &CommitSha) -> bool {
     if !dir.join(".git").exists() {
         return false;
     }
-    matches!(git(&["rev-parse", "HEAD"], Some(dir)), Ok(head) if head == sha)
+    matches!(git(&["rev-parse", "HEAD"], Some(dir)), Ok(head) if *sha == head)
 }
 
 /// Fetch just `sha` from `url` into a fresh checkout at `dest`.
@@ -615,12 +616,12 @@ pub fn is_at_commit(dir: &Path, sha: &str) -> bool {
 /// Tries a shallow single-commit fetch first (cheapest); if the server refuses
 /// fetch-by-SHA (not all enable `uploadpack.allowAnySHA1InWant`), falls back to
 /// a full fetch. `dest` is created if missing.
-pub fn fetch_commit(url: &str, sha: &str, dest: &Path) -> Result<()> {
+pub fn fetch_commit(url: &str, sha: &CommitSha, dest: &Path) -> Result<()> {
     reject_option_like("repository URL", url)?;
     with_transport(transport(), url, |u| fetch_commit_once(u, sha, dest))
 }
 
-fn fetch_commit_once(url: &str, sha: &str, dest: &Path) -> Result<()> {
+fn fetch_commit_once(url: &str, sha: &CommitSha, dest: &Path) -> Result<()> {
     std::fs::create_dir_all(dest)?;
     git(&["init", "-q"], Some(dest))?;
     // The remote already exists if a prior attempt (interrupted, or over another
@@ -629,13 +630,25 @@ fn fetch_commit_once(url: &str, sha: &str, dest: &Path) -> Result<()> {
         git(&["remote", "set-url", "origin", url], Some(dest))?;
     }
 
-    if git_remote(url, &["fetch", "--depth", "1", "origin", sha], Some(dest)).is_err() {
+    if git_remote(
+        url,
+        &["fetch", "--depth", "1", "origin", sha.as_str()],
+        Some(dest),
+    )
+    .is_err()
+    {
         git_remote(url, &["fetch", "origin"], Some(dest))
             .with_context(|| format!("fetching {url}"))?;
     }
     let lockdown = filter_lockdown(dest)?;
     let pre: Vec<&str> = lockdown.iter().map(String::as_str).collect();
-    run_git(&pre, &["checkout", "--detach", sha], Some(dest), false).with_context(|| {
+    run_git(
+        &pre,
+        &["checkout", "--detach", sha.as_str()],
+        Some(dest),
+        false,
+    )
+    .with_context(|| {
         let mut msg = format!("checking out {sha} in {}", dest.display());
         if !lockdown.is_empty() {
             msg.push_str(
@@ -1215,14 +1228,12 @@ mod tests {
     fn is_at_commit_false_cases() {
         let dir = scratch("is-at-commit");
         std::fs::create_dir_all(&dir).unwrap();
-        assert!(!is_at_commit(&dir, "deadbeef"), "no .git at all");
+        let zero = CommitSha::try_from("0".repeat(40)).unwrap();
+        assert!(!is_at_commit(&dir, &zero), "no .git at all");
 
-        let sha = make_repo(&dir);
+        let sha = CommitSha::try_from(make_repo(&dir)).unwrap();
         assert!(is_at_commit(&dir, &sha), "checkout is at HEAD");
-        assert!(
-            !is_at_commit(&dir, "0000000000000000000000000000000000000000"),
-            "different sha must not match"
-        );
+        assert!(!is_at_commit(&dir, &zero), "different sha must not match");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1237,7 +1248,7 @@ mod tests {
         let url = format!("file://{}", src.display());
         let dest = scratch("fetch-fallback-dest");
 
-        let fake_sha = "a".repeat(40);
+        let fake_sha = CommitSha::try_from("a".repeat(40)).unwrap();
         let err = fetch_commit(&url, &fake_sha, &dest).unwrap_err();
         assert!(
             format!("{err:#}").contains("checking out"),
@@ -1280,7 +1291,8 @@ mod tests {
         assert!(format!("{err}").contains("option-like"), "{err}");
 
         let dest = scratch("evil-fetch-dest");
-        let err = fetch_commit(evil, &"a".repeat(40), &dest).unwrap_err();
+        let err =
+            fetch_commit(evil, &CommitSha::try_from("a".repeat(40)).unwrap(), &dest).unwrap_err();
         assert!(format!("{err}").contains("option-like"), "{err}");
         // The guard runs before any `create_dir_all`, so nothing was written.
         assert!(
