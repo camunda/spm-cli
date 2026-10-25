@@ -205,7 +205,7 @@ fn diagnose(scope: &Scope, root: &Path, online: bool) -> Vec<Check> {
     checks.extend(check_links(scope, &manifest, links));
 
     let lockfile = Lockfile::path_in(root);
-    let declares_any = !manifest.skills.is_empty() || !manifest.plugins.is_empty();
+    let declares_any = manifest.declares_any();
     if !lockfile.exists() {
         checks.push(if declares_any {
             Check::error(
@@ -437,21 +437,19 @@ fn check_policy(root: &Path, manifest: &Manifest, links: &Links) -> Check {
     let declared = links
         .links
         .iter()
-        .filter(|(n, _)| manifest.skills.contains_key(*n) || manifest.plugins.contains_key(*n))
+        .filter(|(n, _)| manifest.contains_dependency(n))
         .map(|(n, p)| (n.as_str(), p.as_str()));
     let mut denied = sync::denied_sources(manifest, &policy, declared);
     // `install --locked` fetches locked transitive pins once their root is,
     // so they are gated too, even when doctor can't walk that root. An
     // unreadable lock is reported by the lockfile check.
     if let Ok(lock) = Lockfile::load_or_default(root) {
-        for (kind, entries) in [("skill", &lock.skills), ("plugin", &lock.plugins)] {
-            for (name, l) in entries {
-                if manifest.skills.contains_key(name) || manifest.plugins.contains_key(name) {
-                    continue;
-                }
-                if let Err(e) = policy.check(&l.git) {
-                    denied.push(format!("locked {kind} `{name}`: {e:#}"));
-                }
+        for (kind, name, l) in lock.dependencies() {
+            if manifest.contains_dependency(name) {
+                continue;
+            }
+            if let Err(e) = policy.check(&l.git) {
+                denied.push(format!("locked {kind} `{name}`: {e:#}"));
             }
         }
     }
@@ -479,8 +477,7 @@ fn check_links(scope: &Scope, manifest: &Manifest, links: Result<Links>) -> Vec<
         .keys()
         .map(|name| {
             let unlink = sync::unlink_command(scope, name);
-            let declared =
-                manifest.skills.contains_key(name) || manifest.plugins.contains_key(name);
+            let declared = manifest.contains_dependency(name);
             // Like every sync, before resolving: an ignored link's directory
             // doesn't matter.
             if !declared {
@@ -806,10 +803,8 @@ fn check_ssh_agent(manifest: &Manifest) -> Option<Check> {
         return None;
     }
     let ssh: Vec<String> = manifest
-        .skills
-        .values()
-        .chain(manifest.plugins.values())
-        .map(|s| s.git.clone())
+        .dependencies()
+        .map(|(_, _, s)| s.git.clone())
         .filter(|u| git::contacts_over_ssh(u))
         .collect::<BTreeSet<_>>()
         .into_iter()
@@ -825,18 +820,11 @@ fn check_ssh_agent(manifest: &Manifest) -> Option<Check> {
 /// Every remote declared in `ai.json` or pinned in `ai.lock`.
 fn remote_urls(root: &Path, manifest: &Manifest) -> BTreeSet<String> {
     let mut urls: BTreeSet<String> = manifest
-        .skills
-        .values()
-        .chain(manifest.plugins.values())
-        .map(|s| s.git.clone())
+        .dependencies()
+        .map(|(_, _, s)| s.git.clone())
         .collect();
     if let Ok(lock) = Lockfile::load_or_default(root) {
-        urls.extend(
-            lock.skills
-                .values()
-                .chain(lock.plugins.values())
-                .map(|l| l.git.clone()),
-        );
+        urls.extend(lock.dependencies().map(|(_, _, l)| l.git.clone()));
     }
     urls
 }

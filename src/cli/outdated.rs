@@ -3,7 +3,7 @@ use super::session::{Access, ScopeSession};
 use crate::git;
 use crate::ids::{DepName, LockReference};
 use crate::lockfile::{LockedSkill, Lockfile};
-use crate::manifest::{semver_of_tag, Manifest, Version};
+use crate::manifest::{semver_of_tag, DependencyKind, Manifest, Version};
 use crate::scope::Scope;
 use anyhow::{bail, Result};
 use serde::Serialize;
@@ -162,9 +162,9 @@ impl Upgrade {
             if !seen.insert(req) {
                 continue;
             }
-            let locked = lock.skills.get(req).or_else(|| lock.plugins.get(req));
+            let locked = lock.get_dependency(req);
             let selector = locked.map(|q| q.reference.version());
-            let local = manifest.skills.contains_key(req) || manifest.plugins.contains_key(req);
+            let local = manifest.contains_dependency(req);
             match (locked, selector) {
                 (_, Some(Version::Branch(_))) => up.via_branch = true,
                 (_, Some(Version::Range(r))) => up.in_range.push((req.to_string(), r.clone())),
@@ -233,7 +233,7 @@ pub(super) fn outdated(
     crate::policy::activate(&manifest, session.dir())?;
     let lock = session.lockfile()?;
     if let Some(name) = name {
-        if !lock.skills.contains_key(name) && !lock.plugins.contains_key(name) {
+        if !lock.contains_dependency(name) {
             bail!("`{name}` is not in ai.lock — run `spm install` first, or check the name");
         }
     }
@@ -247,21 +247,21 @@ pub(super) fn outdated(
     };
     let mut remotes = Remotes::default();
     let mut skills = Vec::new();
-    for (n, l) in lock.skills.iter().filter(|(n, _)| wanted(n)) {
-        let spec = manifest.skills.get(n);
-        let transitive = !l.requested_by.is_empty() && spec.is_none();
-        let mut row = check(n, l, false, transitive, &mut remotes);
+    let mut plugins = Vec::new();
+    for (kind, n, l) in lock.dependencies().filter(|(_, n, _)| wanted(n)) {
+        let spec = manifest.deps(kind).get(n);
+        let plugin = kind == DependencyKind::Plugin;
+        // Only skills are pulled in transitively.
+        let transitive = !plugin && !l.requested_by.is_empty() && spec.is_none();
+        let mut row = check(n, l, plugin, transitive, &mut remotes);
         if transitive {
             row.upgrade = Upgrade::plan(&l.requested_by, &lock, &manifest);
         }
         row.drift = drift(l, spec)?;
-        skills.push(row);
-    }
-    let mut plugins = Vec::new();
-    for (n, l) in lock.plugins.iter().filter(|(n, _)| wanted(n)) {
-        let mut row = check(n, l, true, false, &mut remotes);
-        row.drift = drift(l, manifest.plugins.get(n))?;
-        plugins.push(row);
+        match kind {
+            DependencyKind::Skill => skills.push(row),
+            DependencyKind::Plugin => plugins.push(row),
+        }
     }
     let report = OutdatedReport {
         scope: scope.label(),
@@ -271,7 +271,7 @@ pub(super) fn outdated(
     if json {
         print_json(&report)?;
     } else {
-        render_text(&report, manifest.skills.len() + manifest.plugins.len());
+        render_text(&report, manifest.dependencies().count());
     }
     report.outcome(exit_code)
 }

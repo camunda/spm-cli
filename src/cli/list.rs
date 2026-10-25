@@ -85,7 +85,7 @@ fn collect<'a>(
         skills: Vec::new(),
         plugins: Vec::new(),
     };
-    if manifest.skills.is_empty() && manifest.plugins.is_empty() {
+    if !manifest.declares_any() {
         return Ok(report);
     }
     for (name, spec) in &manifest.skills {

@@ -4,7 +4,7 @@ use super::session::{Access, ScopeSession};
 use super::shorthand;
 use super::sync::{save_and_sync, Apply};
 use crate::ids::DepName;
-use crate::manifest::{Manifest, SkillSpec};
+use crate::manifest::{DependencyKind, Manifest, SkillSpec};
 use crate::scope::Scope;
 use crate::{resolver, store};
 use anyhow::{bail, Context, Result};
@@ -76,20 +76,9 @@ pub(super) fn add(scope: &Scope, req: AddRequest) -> Result<()> {
         // this before `manifest.save`, otherwise we'd persist an ai.json that
         // `sync`'s re-load immediately rejects, stranding the user with an
         // invalid manifest.
-        let (this_map_has, other_map_has, other_kind) = if plugin {
-            (
-                manifest.plugins.contains_key(&name),
-                manifest.skills.contains_key(&name),
-                "skill",
-            )
-        } else {
-            (
-                manifest.skills.contains_key(&name),
-                manifest.plugins.contains_key(&name),
-                "plugin",
-            )
-        };
-        if other_map_has {
+        let kind = DependencyKind::from_plugin_flag(plugin);
+        let existing = manifest.kind_of(&name);
+        if let Some(other_kind) = existing.filter(|k| *k != kind) {
             bail!(
                 "a {other_kind} named `{name}` already exists in {}; dependency names \
                  must be unique across skills and plugins — pick a different name with \
@@ -102,9 +91,7 @@ pub(super) fn add(scope: &Scope, req: AddRequest) -> Result<()> {
         // re-pin a version). A plugin and a skill share neither map nor the
         // vendor `<name>` namespace question here, so each `--plugin` add is
         // checked against the plugins map and each skill add against skills.
-        let kind = if plugin { "plugin" } else { "skill" };
-        let occupied = this_map_has;
-        if !force && occupied {
+        if !force && existing == Some(kind) {
             bail!(
                 "a {kind} named `{name}` already exists in {}; either give this one \
                  a different name with `--name <other>`, pass --force to overwrite \
@@ -124,11 +111,7 @@ pub(super) fn add(scope: &Scope, req: AddRequest) -> Result<()> {
             path,
         };
         spec.version()?; // validate exactly one selector
-        if plugin {
-            manifest.plugins.insert(name.clone(), spec);
-        } else {
-            manifest.skills.insert(name.clone(), spec);
-        }
+        manifest.deps_mut(kind).insert(name.clone(), spec);
         save_and_sync(session, &manifest, apply)?;
         println!("added {kind} {name}");
     }

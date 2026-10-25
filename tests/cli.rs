@@ -6611,6 +6611,132 @@ fn install_locked_reports_every_direct_mismatch_at_once() {
     sb.ok(&["install", "--locked"]);
 }
 
+/// `--locked` reports a changed and an unpinned plugin with the same wording
+/// as skills, alongside skill mismatches, and writes nothing.
+#[test]
+fn install_locked_reports_plugin_mismatches() {
+    let sb = Sandbox::new();
+    sb.add_plugin();
+    let url = sb.skill_url();
+    let head = skill_head(&sb.skill_repo);
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],
+               "skills":{{"greet":{{"git":"{url}","tag":"v0.1.0"}}}},
+               "plugins":{{"ds":{{"git":"{url}","branch":"main","path":"pkg"}}}}}}"#
+        ),
+    );
+    sb.ok(&["install"]);
+    let lock_before = sb.read("ai.lock");
+
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],
+               "skills":{{"greet":{{"git":"{url}","branch":"main"}}}},
+               "plugins":{{
+                 "ds":{{"git":"{url}","commit":"{head}","path":"pkg"}},
+                 "kit":{{"git":"{url}","branch":"main","path":"pkg"}}}}}}"#
+        ),
+    );
+    let err = fails(&sb, &["install", "--locked"]);
+    for needle in [
+        "out of sync with ai.json (3 problem(s))",
+        "skill `greet`: changed since ai.lock was written (`tag:v0.1.0` -> `branch:main`)",
+        &format!(
+            "plugin `ds`: changed since ai.lock was written (`branch:main` -> `commit:{head}`)"
+        ),
+        "plugin `kit`: missing from ai.lock",
+    ] {
+        assert!(err.contains(needle), "missing `{needle}` in:\n{err}");
+    }
+    let skill = err.find("skill `greet`").unwrap();
+    let plugin = err.find("plugin `ds`").unwrap();
+    assert!(skill < plugin, "skills are reported before plugins:\n{err}");
+    assert_eq!(lock_before, sb.read("ai.lock"));
+}
+
+/// A transitive skill whose synthesized name is taken by a directly-declared
+/// plugin is rejected: skills and plugins share one name namespace in
+/// `ai.lock` too.
+#[test]
+fn transitive_skill_colliding_with_a_direct_plugin_is_rejected() {
+    let sb = Sandbox::new();
+    sb.add_plugin();
+    let url = sb.skill_url();
+    let leaf = make_repo(
+        &sb.root.join("leaf"),
+        &[("SKILL.md", "---\nname: leaf\n---\nLeaf skill.\n")],
+    );
+    let top = make_repo(
+        &sb.root.join("top"),
+        &[
+            ("SKILL.md", "---\nname: top\n---\nTop skill.\n"),
+            (
+                "ai.json",
+                &format!(r#"{{"skills":{{"leaf":{{"git":"{leaf}","branch":"main"}}}}}}"#),
+            ),
+        ],
+    );
+    sb.ok(&["init", "--target", "copilot"]);
+    let top_skill = format!(r#""top":{{"git":"{top}","branch":"main"}}"#);
+    write_manifest(
+        &sb,
+        &format!(r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{{top_skill}}}}}"#),
+    );
+    sb.ok(&["install"]);
+    let lock: serde_json::Value = serde_json::from_str(&sb.read("ai.lock")).unwrap();
+    let synth = lock["skills"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .find(|k| k.starts_with("top__leaf-"))
+        .unwrap()
+        .clone();
+
+    let manifest = format!(
+        r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{{top_skill}}},
+           "plugins":{{"{synth}":{{"git":"{url}","branch":"main","path":"pkg"}}}}}}"#
+    );
+    write_manifest(&sb, &manifest);
+    let err = fails(&sb, &["install"]);
+    assert!(
+        err.contains(&format!(
+            "transitive skill name collision: `{synth}` clashes with a directly-declared \
+             skill or plugin"
+        )),
+        "{err}"
+    );
+}
+
+/// A stale plugin pin left in `ai.lock` is still judged by the source policy:
+/// doctor names it as a locked plugin.
+#[test]
+fn doctor_checks_policy_for_stale_locked_plugins() {
+    let sb = Sandbox::new();
+    sb.add_plugin();
+    let url = sb.skill_url();
+    sb.ok(&["init", "--target", "copilot"]);
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"plugins":{{"ds":{{"git":"{url}","branch":"main","path":"pkg"}}}}}}"#
+        ),
+    );
+    sb.ok(&["install"]);
+    write_manifest(&sb, r#"{"targets":["copilot"]}"#);
+    set_project_policy(&sb, &["example.test/*"]);
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(!ok, "{doc:#}");
+    let c = check(&doc, "policy", "error");
+    assert!(
+        c["details"].to_string().contains("locked plugin `ds`"),
+        "{c}"
+    );
+}
+
 /// A direct skill entry left in `ai.lock` after it was dropped from `ai.json`
 /// is stale and fails `--locked`.
 #[test]
