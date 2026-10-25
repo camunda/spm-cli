@@ -60,6 +60,6 @@ body:
         - [ ] New subdirectory field accepted in ai.json and validated by the schema
         - [ ] Only the named subdirectory is materialized for each target
         - [ ] Empty / missing subdirectory handled with a clear error
-        - [ ] Tests in tests/cli.rs cover the new behavior
+        - [ ] Tests in tests/cli/ cover the new behavior
     validations:
       required: true
