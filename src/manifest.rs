@@ -1,4 +1,5 @@
 use crate::ids::DepName;
+use crate::policy::Policy;
 use crate::scope::Scope;
 use crate::version::{parse_version_req, Version};
 use anyhow::{anyhow, bail, Context, Result};
@@ -266,6 +267,12 @@ pub fn validate_subpath(path: &str) -> Result<()> {
 impl Manifest {
     pub fn path_in(dir: &Path) -> PathBuf {
         dir.join(MANIFEST_FILE)
+    }
+
+    /// The source policy for this manifest (in `dir`): the machine layer plus
+    /// its `allowedSources`.
+    pub fn policy(&self, dir: &Path) -> Result<Policy> {
+        Policy::load(self.allowed_sources.as_deref(), &Self::path_in(dir))
     }
 
     /// Load and validate `dir`'s manifest. `scope` only picks the `spm init`

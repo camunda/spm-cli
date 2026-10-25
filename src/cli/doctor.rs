@@ -206,7 +206,7 @@ fn diagnose(scope: &Scope, root: &Path, online: bool) -> Vec<Check> {
     checks.push(Check::ok("manifest", "ai.json is valid"));
     // Every git access gates on the active policy, as in any other command; a
     // policy that won't load is reported below and leaves remotes unprobed.
-    let policy_active = crate::policy::activate(&manifest, root).is_ok();
+    let policy_active = manifest.policy(root).map(crate::policy::activate).is_ok();
     checks.push(check_targets(scope, &manifest));
     checks.push(check_machine_policy());
 
@@ -424,7 +424,7 @@ fn check_machine_policy() -> Check {
 /// Every declared source, linked dir and locked transitive source against the
 /// effective policy — the same rule `spm install` enforces before fetching.
 fn check_policy(root: &Path, manifest: &Manifest, links: &Links, lock: Option<&Lockfile>) -> Check {
-    let policy = match Policy::load(manifest, &Manifest::path_in(root)) {
+    let policy = match manifest.policy(root) {
         Ok(p) => p,
         Err(e) => {
             return Check::error("policy", format!("source policy is invalid: {e:#}"))
