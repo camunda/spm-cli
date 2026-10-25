@@ -15,6 +15,10 @@
 //! The graph must also stay acyclic (a DAG): any cycle fails, reported as the
 //! group of modules it binds (a strongly connected component). Every module
 //! the tables name must exist, so a rename cannot leave a check vacuous.
+//!
+//! The module-layering diagram in `docs/guide/architecture.md` must show
+//! exactly [`ALLOWED_EDGES`] and every top-level module;
+//! `SPM_BLESS=1 cargo test module_graph_diagram` rewrites it from the table.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -686,4 +690,222 @@ fn crate_refs_flags_imports_that_hide_edges() {
     ] {
         assert!(opaque(src, depth).is_empty(), "{src}");
     }
+}
+
+/// The docs page whose module-layering diagram mirrors [`ALLOWED_EDGES`].
+const DIAGRAM_DOC: &str = "docs/guide/architecture.md";
+
+/// The comment marking the module-layering diagram: the next ```mermaid block
+/// is the diagram.
+const DIAGRAM_MARKER: &str = "<!-- module-graph:";
+
+/// A module-layering diagram: its nodes and its `from --> to` edges.
+#[derive(Debug, PartialEq)]
+struct Diagram {
+    nodes: BTreeSet<String>,
+    edges: BTreeSet<(String, String)>,
+}
+
+/// The line range of the ```mermaid block after [`DIAGRAM_MARKER`] in `doc`:
+/// from its first line after the opening fence to its closing fence.
+fn diagram_span(doc: &str) -> std::ops::Range<usize> {
+    let lines: Vec<&str> = doc.lines().collect();
+    let marker = lines
+        .iter()
+        .position(|l| l.trim_start().starts_with(DIAGRAM_MARKER))
+        .unwrap_or_else(|| panic!("no `{DIAGRAM_MARKER}` comment in {DIAGRAM_DOC}"));
+    let open = marker
+        + 1
+        + lines[marker + 1..]
+            .iter()
+            .position(|l| l.trim() == "```mermaid")
+            .unwrap_or_else(|| panic!("no ```mermaid block after the marker in {DIAGRAM_DOC}"));
+    let close = open
+        + 1
+        + lines[open + 1..]
+            .iter()
+            .position(|l| l.trim() == "```")
+            .unwrap_or_else(|| panic!("unclosed ```mermaid block in {DIAGRAM_DOC}"));
+    open + 1..close
+}
+
+/// Parse the module-layering diagram in `doc`. Only a `flowchart`/`graph`
+/// header, `%%` comments, `from --> to` edges and bare node names are
+/// accepted, so the diagram cannot hold anything this check would miss.
+fn parse_diagram(doc: &str) -> Diagram {
+    let lines: Vec<&str> = doc.lines().collect();
+    let mut diagram = Diagram {
+        nodes: BTreeSet::new(),
+        edges: BTreeSet::new(),
+    };
+    let is_name = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_');
+    for line in &lines[diagram_span(doc)] {
+        let line = line.trim();
+        if line.is_empty()
+            || line.starts_with("%%")
+            || line.starts_with("flowchart ")
+            || line.starts_with("graph ")
+        {
+            continue;
+        }
+        match line.split_once("-->").map(|(f, t)| (f.trim(), t.trim())) {
+            Some((from, to)) if is_name(from) && is_name(to) => {
+                diagram.nodes.extend([from.to_string(), to.to_string()]);
+                diagram.edges.insert((from.to_string(), to.to_string()));
+            }
+            None if is_name(line) => {
+                diagram.nodes.insert(line.to_string());
+            }
+            _ => panic!(
+                "unsupported line in the module diagram of {DIAGRAM_DOC}: `{line}`\n\
+                 Use one `from --> to` edge or bare module name per line."
+            ),
+        }
+    }
+    diagram
+}
+
+/// The canonical module-layering diagram body for `modules` and `graph`: the
+/// modules without any edge first, then every edge, each sorted.
+fn render_diagram(modules: &BTreeSet<String>, graph: &Graph) -> String {
+    let edges = edges(graph);
+    let linked: BTreeSet<&String> = edges.iter().flat_map(|(f, t)| [f, t]).collect();
+    let mut out = String::from("flowchart TD\n");
+    for module in modules.iter().filter(|m| !linked.contains(m)) {
+        out.push_str(&format!("  {module}\n"));
+    }
+    for (from, to) in &edges {
+        out.push_str(&format!("  {from} --> {to}\n"));
+    }
+    out
+}
+
+/// Replace the module-layering diagram body in `doc` with `body`.
+fn bless_diagram(doc: &str, body: &str) -> String {
+    let span = diagram_span(doc);
+    let lines: Vec<&str> = doc.lines().collect();
+    let mut out = String::new();
+    for line in &lines[..span.start] {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str(body);
+    for line in &lines[span.end..] {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// The module-layering diagram in the docs shows exactly [`ALLOWED_EDGES`]
+/// and every top-level module, so the picture can never drift from the
+/// enforced graph. `SPM_BLESS=1` rewrites it from the table.
+#[test]
+fn module_graph_diagram_matches_the_allowed_edges() {
+    let SourceGraph { modules, .. } = source_graph();
+    let allowed = allowed_graph();
+    let expected = render_diagram(&modules, &allowed);
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DIAGRAM_DOC);
+    let doc = std::fs::read_to_string(&path).unwrap();
+    if std::env::var_os("SPM_BLESS").is_some_and(|v| v == "1") {
+        std::fs::write(&path, bless_diagram(&doc, &expected)).unwrap();
+    }
+    let doc = std::fs::read_to_string(&path).unwrap();
+    let diagram = parse_diagram(&doc);
+    let want = Diagram {
+        nodes: modules,
+        edges: edges(&allowed),
+    };
+    let diff = |what: &str, a: Vec<String>| (!a.is_empty()).then(|| format!("{what}: {a:?}"));
+    let problems: Vec<String> = [
+        diff(
+            "edges missing from the diagram",
+            want.edges
+                .difference(&diagram.edges)
+                .map(|(f, t)| format!("{f} --> {t}"))
+                .collect(),
+        ),
+        diff(
+            "edges not in ALLOWED_EDGES",
+            diagram
+                .edges
+                .difference(&want.edges)
+                .map(|(f, t)| format!("{f} --> {t}"))
+                .collect(),
+        ),
+        diff(
+            "modules missing from the diagram",
+            want.nodes.difference(&diagram.nodes).cloned().collect(),
+        ),
+        diff(
+            "nodes that are not modules",
+            diagram.nodes.difference(&want.nodes).cloned().collect(),
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    assert!(
+        problems.is_empty(),
+        "the module diagram in {DIAGRAM_DOC} differs from ALLOWED_EDGES ({TABLE}):\n  {}\n\
+         Regenerate it with `SPM_BLESS=1 cargo test module_graph_diagram`, or replace \
+         the ```mermaid block after `{DIAGRAM_MARKER}` with:\n\n{expected}",
+        problems.join("\n  ")
+    );
+}
+
+#[test]
+fn diagram_parser_reads_nodes_and_edges() {
+    let doc = "\
+# Title
+
+```mermaid
+flowchart TD
+  ignored --> block
+```
+
+<!-- module-graph: generated -->
+```mermaid
+flowchart TD
+  %% a comment
+  main
+
+  cli --> paths
+  paths-->remote
+```
+after
+";
+    let set =
+        |names: &[&str]| -> BTreeSet<String> { names.iter().map(|n| n.to_string()).collect() };
+    assert_eq!(
+        parse_diagram(doc),
+        Diagram {
+            nodes: set(&["main", "cli", "paths", "remote"]),
+            edges: [("cli", "paths"), ("paths", "remote")]
+                .map(|(f, t)| (f.to_string(), t.to_string()))
+                .into(),
+        }
+    );
+}
+
+#[test]
+#[should_panic(expected = "unsupported line")]
+fn diagram_parser_rejects_lines_it_cannot_check() {
+    parse_diagram("<!-- module-graph: x -->\n```mermaid\n  cli -.-> paths\n```\n");
+}
+
+#[test]
+fn rendered_diagram_round_trips_through_the_parser() {
+    let modules: BTreeSet<String> = ["main", "cli", "paths", "remote"].map(String::from).into();
+    let graph = graph_of(&[("cli", "paths"), ("paths", "remote")]);
+    let doc = "intro\n<!-- module-graph: x -->\n```mermaid\nstale --> old\n```\noutro\n";
+    let blessed = bless_diagram(doc, &render_diagram(&modules, &graph));
+    assert_eq!(
+        blessed,
+        "intro\n<!-- module-graph: x -->\n```mermaid\nflowchart TD\n  main\n  \
+         cli --> paths\n  paths --> remote\n```\noutro\n"
+    );
+    let parsed = parse_diagram(&blessed);
+    assert_eq!(parsed.nodes, modules);
+    assert_eq!(parsed.edges, edges(&graph));
 }

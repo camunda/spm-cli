@@ -573,6 +573,10 @@ To see what each harness actually loaded: `claude plugin list` /
 `make check` runs the full CI gate locally (`fmt-check` + `clippy` + `test` +
 `test-action`).
 
+The [Architecture guide](docs/guide/architecture.md) maps the source: the
+module layering (pinned by `tests/cli/architecture.rs`), the command flow
+through the sync pipeline, and the install data flow.
+
 To cut a release, bump the crate version (the single source of truth for
 crates.io, npm, and the GitHub Release) with `make bump` — `PART=patch|minor|major`
 (default `patch`) or `VERSION=X.Y.Z`. Since `main` is protected, `make bump-pr`
