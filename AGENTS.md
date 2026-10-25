@@ -41,6 +41,7 @@ generated source to regenerate.
 | `src/paths.rs` | Resolves the store (fetch-cache) root; honors the `SPM_HOME` override. Vendor output is project-local, not under this root. |
 | `src/fsutil.rs` | Safe recursive copy (skips `.git`, does not follow symlinks to avoid exfiltration). |
 | `src/scan.rs` | Deterministic content scanner: rule table (pattern → category → severity) flagging prompt injection, secret exfiltration, encoded/obfuscated payloads and auto-run triggers. Runs as a pre-materialize gate in `sync` and backs `spm scan`. |
+| `src/shell.rs` | Quotes names/paths interpolated into suggested commands (fix hints) so they paste as single shell arguments. |
 | `src/jsonutil.rs` | Merge-patches user-owned JSON config without clobbering user keys. |
 | `src/vendor/mod.rs` | The `Vendor` trait + `for_target` dispatch — the extension point for new targets. |
 | `src/vendor/claude.rs` | Claude adapter: writes a marketplace pointer into `.claude/settings.local.json`. |

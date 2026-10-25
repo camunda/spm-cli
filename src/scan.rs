@@ -772,7 +772,8 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
 /// blocking to warn-only (for CI on known-good, or to unblock a false positive).
 pub const ALLOW_ENV: &str = "SPM_ALLOW_SUSPICIOUS";
 
-fn allow_suspicious() -> bool {
+/// Whether [`ALLOW_ENV`] downgrades the gate to warn-only in this process.
+pub fn allow_suspicious() -> bool {
     std::env::var_os(ALLOW_ENV).is_some_and(|v| value_enables_override(&v))
 }
 

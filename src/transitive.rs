@@ -40,7 +40,7 @@ use crate::resolver;
 use crate::store;
 use crate::vendor::MaterializedSkill;
 use anyhow::{bail, Context, Result};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
 /// Hard cap on transitive recursion depth, independent of the opt-in flag. A
@@ -94,6 +94,10 @@ pub struct Ctx<'a> {
     /// edge has no matching `ai.lock` pin is recorded in [`Output::lock_misses`]
     /// (and its subtree skipped) instead of being resolved.
     pub locked: bool,
+    /// Read-only check (`spm doctor`, with `locked`): never fetch, scan or
+    /// print. A skill whose checkout is not already in the store is recorded in
+    /// [`Output::unverified`] and its subtree is not walked.
+    pub check: bool,
     /// Column width for the aligned per-skill fetch output.
     pub width: usize,
     /// The effective source policy every nested edge must pass before it is
@@ -120,6 +124,15 @@ pub struct Output {
     /// edge that would have needed a fresh resolution because `ai.lock` has no
     /// matching pin for it. That edge's subtree is not walked.
     pub lock_misses: Vec<(String, String)>,
+    /// [`Ctx::check`] only: skills whose store checkout is missing, so they
+    /// (and their nested dependencies) could not be verified offline.
+    pub unverified: Vec<String>,
+    /// [`Ctx::check`] only: synthesized names of misses that may be artifacts
+    /// of an [`Output::unverified`] subtree. The lock has no entry under the
+    /// miss's own name but pins the same identity under a name this walk never
+    /// reached, so the unwalked subtree could claim it first, under that name.
+    /// These are not in `lock_misses`.
+    pub uncertain_misses: Vec<String>,
 }
 
 /// One resolved identity in the global dedup/conflict map.
@@ -140,10 +153,22 @@ struct Resolved {
 /// growing output. Bundled into one value so the traversal function stays within
 /// a sane argument count (and reads as "walk state + this node") instead of
 /// passing each accumulator by hand.
+/// A requirement the lock has no pin for under its synthesized name.
+struct Miss {
+    key: Key,
+    name: String,
+    /// The selector label the edge requested.
+    requested: String,
+    problem: String,
+}
+
 struct Walk {
     stack: Vec<(Key, String)>,
     resolved: std::collections::HashMap<Key, Resolved>,
     out: Output,
+    /// Every lock miss, sorted into [`Output::lock_misses`] and
+    /// [`Output::uncertain_misses`] after the walk.
+    misses: Vec<Miss>,
     /// Total transitive edges examined across the whole walk, capped by
     /// [`MAX_EDGES`] to bound per-edge work that does not create a new node.
     edges: usize,
@@ -429,7 +454,10 @@ pub fn expand(direct: &BTreeMap<String, LockedSkill>, ctx: &Ctx) -> Result<Outpu
             transitive: Vec::new(),
             direct_also_satisfies: BTreeMap::new(),
             lock_misses: Vec::new(),
+            unverified: Vec::new(),
+            uncertain_misses: Vec::new(),
         },
+        misses: Vec::new(),
         edges: 0,
     };
     for (name, locked) in direct {
@@ -437,6 +465,32 @@ pub fn expand(direct: &BTreeMap<String, LockedSkill>, ctx: &Ctx) -> Result<Outpu
     }
 
     let mut out = w.out;
+    let reached: BTreeSet<&str> = out.transitive.iter().map(|(n, _)| n.as_str()).collect();
+    // A miss is only uncertain when an unverified subtree may own the pin:
+    // the lock pins the same identity under a name the walk didn't reach, and
+    // that pin covers the requested selector (as its own reference or as
+    // `also_satisfies` evidence) exactly as the dedup would require.
+    let unreached: Vec<&LockedSkill> = if out.unverified.is_empty() {
+        Vec::new()
+    } else {
+        ctx.prev
+            .iter()
+            .filter(|(n, l)| !l.requested_by.is_empty() && !reached.contains(n.as_str()))
+            .map(|(_, l)| l)
+            .collect()
+    };
+    for m in w.misses {
+        let covered = unreached.iter().any(|l| {
+            key_of(&l.git, &l.path) == m.key
+                && (l.reference == m.requested
+                    || l.also_satisfies.iter().any(|s| s.reference == m.requested))
+        });
+        if covered && !ctx.prev.contains_key(&m.name) {
+            out.uncertain_misses.push(m.name);
+        } else {
+            out.lock_misses.push((m.name, m.problem));
+        }
+    }
     // Stable committed lockfile: provenance lists must not churn with traversal
     // order.
     for (_, l) in &mut out.transitive {
@@ -492,12 +546,23 @@ fn visit(
     // Fetch into the store and run the pre-materialize security gate BEFORE
     // reading this node's nested manifest — a blocked node aborts before any of
     // its subtree is ever fetched.
-    let ensured = store::ensure(locked).with_context(|| format!("fetching skill `{name}`"))?;
-    println!(
-        "  {name:<width$}  {}",
-        if ensured.fetched { "fetched" } else { "cached" }
-    );
-    if link.is_none() {
+    let ensured = if ctx.check {
+        match store::cached(locked).with_context(|| format!("inspecting skill `{name}`"))? {
+            Some(ensured) => ensured,
+            None => {
+                w.out.unverified.push(name.to_string());
+                return Ok(());
+            }
+        }
+    } else {
+        let ensured = store::ensure(locked).with_context(|| format!("fetching skill `{name}`"))?;
+        println!(
+            "  {name:<width$}  {}",
+            if ensured.fetched { "fetched" } else { "cached" }
+        );
+        ensured
+    };
+    if link.is_none() && !ctx.check {
         crate::skillcheck::warn_if_not_loadable(
             name,
             &locked.git,
@@ -508,9 +573,12 @@ fn visit(
         );
     }
     // A linked root's locked checkout is still the source of its nested
-    // manifest, so it passes the gate too before its subtree is walked.
-    crate::scan::enforce(name, &ensured.path, &ensured.root)
-        .with_context(|| format!("scanning skill `{name}`"))?;
+    // manifest, so it passes the gate too before its subtree is walked. A check
+    // materializes and fetches nothing, so it has nothing to gate.
+    if !ctx.check {
+        crate::scan::enforce(name, &ensured.path, &ensured.root)
+            .with_context(|| format!("scanning skill `{name}`"))?;
+    }
     if link.is_none() {
         w.out.materialized.push(MaterializedSkill {
             name: name.to_string(),
@@ -647,9 +715,12 @@ fn visit(
                         format!("resolving nested skill `{declared}` of `{name}`")
                     })?
                     else {
-                        w.out
-                            .lock_misses
-                            .push((synth.clone(), lock_miss(&synth, declared, name, spec, ctx)?));
+                        w.misses.push(Miss {
+                            key: ckey.clone(),
+                            name: synth.clone(),
+                            requested: requested.clone(),
+                            problem: lock_miss(&synth, declared, name, spec, ctx)?,
+                        });
                         continue;
                     };
                     (child.commit, child.resolved_tag)
@@ -728,9 +799,12 @@ fn visit(
         let Some(mut child) = resolve_child(spec, &synth, ctx)
             .with_context(|| format!("resolving nested skill `{declared}` of `{name}`"))?
         else {
-            w.out
-                .lock_misses
-                .push((synth.clone(), lock_miss(&synth, declared, name, spec, ctx)?));
+            w.misses.push(Miss {
+                key: ckey,
+                name: synth.clone(),
+                requested: spec.version()?.label(),
+                problem: lock_miss(&synth, declared, name, spec, ctx)?,
+            });
             continue;
         };
         child.requested_by = vec![name.to_string()];

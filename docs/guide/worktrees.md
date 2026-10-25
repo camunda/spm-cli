@@ -31,6 +31,11 @@ For Claude, `spm status` also reports a **stale marketplace pointer** explicitly
   ! .claude/settings.local.json marketplace points at /repo/.spm/claude, not this checkout (/repo-feature/.spm/claude)
 ```
 
+For a broader diagnosis — `ai.lock` out of sync with `ai.json`, a link to a
+deleted directory, missing `.gitignore` entries, a skill without loadable
+frontmatter — run [`spm doctor`](/reference/cli-commands#spm-doctor). It is
+read-only and prints a fix for each problem.
+
 ## Auto-install on checkout
 
 To install automatically on every branch checkout and new worktree, add a

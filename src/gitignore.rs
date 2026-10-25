@@ -28,7 +28,7 @@ fn read_existing(path: &Path) -> Result<Option<String>> {
 pub fn ensure(project_root: &Path, comment: &str, entry: &str) -> Result<()> {
     let path = project_root.join(".gitignore");
     let existing = read_existing(&path)?.unwrap_or_default();
-    if existing.lines().any(|l| l.trim() == entry) {
+    if has_entry(&existing, entry) {
         return Ok(());
     }
 
@@ -45,6 +45,22 @@ pub fn ensure(project_root: &Path, comment: &str, entry: &str) -> Result<()> {
     out.push('\n');
 
     std::fs::write(&path, out).with_context(|| format!("updating {}", path.display()))
+}
+
+/// The `entries` [`ensure`] would still add to the project's `.gitignore`, in
+/// order. Read-only.
+pub fn missing<'a>(project_root: &Path, entries: &'a [String]) -> Result<Vec<&'a str>> {
+    let existing = read_existing(&project_root.join(".gitignore"))?.unwrap_or_default();
+    Ok(entries
+        .iter()
+        .map(String::as_str)
+        .filter(|e| !has_entry(&existing, e))
+        .collect())
+}
+
+/// Whether `.gitignore` text already carries `entry` (however indented).
+fn has_entry(text: &str, entry: &str) -> bool {
+    text.lines().any(|l| l.trim() == entry)
 }
 
 #[cfg(test)]

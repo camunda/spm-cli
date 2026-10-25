@@ -34,6 +34,11 @@ worktrees and fresh clones don't share gitignored files, so **each checkout need
 its own `spm install`**. Run `spm status` — it reports what's missing and exits
 non-zero. See [Worktrees & Fresh Clones](/guide/worktrees).
 
+If `spm install` doesn't fix it, run `spm doctor`: a read-only checklist (git,
+`ai.json`/`ai.lock`, source policy, links, `.gitignore`, each skill's `SKILL.md`
+frontmatter, …) that prints a one-line fix for every problem. See
+[`spm doctor`](/reference/cli-commands#spm-doctor).
+
 ## Does spm need the `git` binary?
 
 Yes. spm shells out to the system `git` (no libgit2), so `git` must be on your

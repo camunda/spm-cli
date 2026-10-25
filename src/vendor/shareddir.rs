@@ -122,13 +122,6 @@ pub fn amp() -> SharedDirVendor {
     }
 }
 
-impl SharedDirVendor {
-    /// `.gitignore` entry for a single spm-managed skill subdir (project scope).
-    fn gitignore_entry(&self, skill: &str) -> String {
-        format!("{}/{skill}/", self.project_segs.join("/"))
-    }
-}
-
 impl Vendor for SharedDirVendor {
     fn name(&self) -> &'static str {
         self.name
@@ -154,11 +147,23 @@ impl Vendor for SharedDirVendor {
         // Keep spm's skills out of VCS without ignoring the user's own committed
         // skills in the same shared dir: ignore each managed subdir by name.
         if let Scope::Project { root } = scope {
-            for s in skills {
-                gitignore::ensure(root, self.gitignore_comment, &self.gitignore_entry(&s.name))?;
+            let names: Vec<String> = skills.iter().map(|s| s.name.clone()).collect();
+            for entry in self.gitignore_entries(&names) {
+                gitignore::ensure(root, self.gitignore_comment, &entry)?;
             }
         }
         Ok(())
+    }
+
+    fn gitignore_entries(&self, skills: &[String]) -> Vec<String> {
+        // Each managed subdir by name: the user's own skills share the dir.
+        // A `[` would start a pattern class (`g[1]/` matches `g1/`); the other
+        // glob characters are not valid in names.
+        let dir = self.project_segs.join("/");
+        skills
+            .iter()
+            .map(|s| format!("{dir}/{}/", s.replace('[', "\\[")))
+            .collect()
     }
 
     fn clean_paths(&self, scope: &Scope, managed: &[String]) -> Result<Vec<PathBuf>> {
@@ -221,20 +226,35 @@ mod tests {
     #[test]
     fn presets_report_expected_names_and_dirs() {
         assert_eq!(gemini().name(), "gemini");
-        assert_eq!(gemini().gitignore_entry("greet"), ".gemini/skills/greet/");
+        assert_eq!(
+            gemini().gitignore_entries(&["greet".into()])[0],
+            ".gemini/skills/greet/"
+        );
         assert_eq!(codex().name(), "codex");
-        assert_eq!(codex().gitignore_entry("greet"), ".agents/skills/greet/");
+        assert_eq!(
+            codex().gitignore_entries(&["greet".into()])[0],
+            ".agents/skills/greet/"
+        );
         assert_eq!(cursor().name(), "cursor");
-        assert_eq!(cursor().gitignore_entry("greet"), ".cursor/skills/greet/");
+        assert_eq!(
+            cursor().gitignore_entries(&["greet".into()])[0],
+            ".cursor/skills/greet/"
+        );
         assert_eq!(cline().name(), "cline");
-        assert_eq!(cline().gitignore_entry("greet"), ".cline/skills/greet/");
+        assert_eq!(
+            cline().gitignore_entries(&["greet".into()])[0],
+            ".cline/skills/greet/"
+        );
         assert_eq!(windsurf().name(), "windsurf");
         assert_eq!(
-            windsurf().gitignore_entry("greet"),
+            windsurf().gitignore_entries(&["greet".into()])[0],
             ".windsurf/skills/greet/"
         );
         assert_eq!(amp().name(), "amp");
-        assert_eq!(amp().gitignore_entry("greet"), ".agents/skills/greet/");
+        assert_eq!(
+            amp().gitignore_entries(&["greet".into()])[0],
+            ".agents/skills/greet/"
+        );
     }
 
     /// Guards the *asymmetric* scopes: Windsurf and Amp materialize into

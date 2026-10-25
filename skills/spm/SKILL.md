@@ -48,6 +48,7 @@ gitignored and never committed. Run `spm --help` or
 | Changed a version selector by editing `ai.json` | `spm install` |
 | Check what is declared and pinned | `spm list --json` |
 | Check what is materialized in this checkout | `spm status --json` |
+| Something doesn't work and the cause is unclear | `spm doctor --json` (add `--online` to probe remotes) |
 | Drop a skill | `spm remove <name>` |
 | Try uncommitted edits to a declared skill/plugin in this project | `spm link <name> <dir>`, then `spm install` after each edit |
 | Go back to the locked version after `spm link` | `spm unlink <name>` (or `spm unlink --all`) |
@@ -319,6 +320,31 @@ flatten into a single `<name>` directory. Treat it as a prompt to check, not a
 guarantee — do not rename a valid Claude-only (or different-target) install on
 the strength of this warning alone.
 
+### `spm doctor`
+
+```bash
+spm doctor [--online] [--json] [--protocol ssh|https] [--protocol-fallback] [-g]
+```
+
+Read-only diagnosis: a checklist where each check is `ok`, `warn` or `error`
+with a one-line `fix`. It checks git, the store, `ai.json` and its targets, the
+source policy, links, whether `ai.lock` matches `ai.json` (by exactly the
+`spm install --locked` rules), what is installed in each target (as
+`spm status` reports it), the `.gitignore` entries, each installed skill's
+`SKILL.md` frontmatter (`name` and `description`), `SPM_ALLOW_SUSPICIOUS` and
+SSH remotes with no ssh-agent. It never writes `ai.json`, `ai.lock`, links, the
+store or a target, and contacts remotes only with `--online` (one
+`git ls-remote` per remote, honoring `--protocol`/`--protocol-fallback`; a
+remote that only answers over the other protocol gets a fix naming the flag).
+Offline, a dependency not in the store is reported as an unverified warning,
+never fetched. It exits non-zero only when a check is an error.
+
+When a command fails or an agent can't see a skill and the error text doesn't
+make the cause obvious, **run `spm doctor --json` first** and apply each
+`error` check's `fix` in order (most are `spm install`); re-run it to confirm.
+Do not act on `warn` checks without telling the user — an active `spm link` or
+a stale skill dir is often intentional.
+
 ### `spm outdated`
 
 ```bash
@@ -420,7 +446,7 @@ that resolves inside `<dir>`.
 
 ### Machine-readable output (`--json`)
 
-Prefer `--json` on `list`, `status`, `outdated` and `scan` when you need to read their
+Prefer `--json` on `list`, `status`, `outdated`, `doctor` and `scan` when you need to read their
 results; do not parse the human text, whose layout can change. With `--json`,
 stdout is exactly one JSON document with `"schemaVersion": 1`, and errors stay
 on stderr. Exit codes do not change: `status --json` still fails when
@@ -428,7 +454,9 @@ something is missing (check `"complete"` and each target's `missing`),
 `outdated --json` fails when a remote errored (check each row's `status` and
 `error`; `outdated` is true for `behind`, `newer-tag` and `tag-moved`, including
 drift in a deduplicated entry's `alsoSatisfies` selectors), and
-`scan --json` still fails on a blocking finding (check `summary.blocking`). The
+`scan --json` still fails on a blocking finding (check `summary.blocking`), and
+`doctor --json` fails when a check is an error (check `ok` and each entry of
+`checks`: `id`, `status`, `message`, `details`, `fix`). The
 document is printed before the failure, so read stdout even on a non-zero exit.
 Commits are full SHAs. `list` marks transitive skills with `"transitive": true`
 and `requestedBy`, plugins carry `bundledSkills`, and a `spm link` override
@@ -554,6 +582,7 @@ configured, any source is accepted.
 
 | Symptom | Cause and fix |
 | --- | --- |
+| Anything not covered below, or several symptoms at once | Run `spm doctor --json` and follow the `fix` of each `error` check. |
 | `no ai.json found at ...` | The project is not initialized. The error now also names the fix (`spm init`, or `spm init --global` in global scope). Run it, then retry. |
 | `ref ... not found in <url>` | The tag or branch does not exist at that URL. Check the spelling and that it is pushed (`GIT_TERMINAL_PROMPT=0 git ls-remote <url>`). Tags and branches are looked up separately, so use `--tag` for tags and `--branch` for branches. |
 | `git ... failed:` with `Permission denied`, `Authentication failed` or `could not read Username` | Auth failure. spm runs git non-interactively (`GIT_TERMINAL_PROMPT=0`), so it fails instead of prompting. For a private repo use the SSH form (`git@host:org/repo.git`) with a key loaded in ssh-agent, or the HTTPS form with a git credential helper configured. Verify with `GIT_TERMINAL_PROMPT=0 git ls-remote <url>` in the same shell (the env var keeps the probe from blocking on a username/password prompt, matching spm), then retry. If only one protocol works on this machine, re-run with `--protocol ssh`/`--protocol https` or `--protocol-fallback` (see [`spm add`](#spm-add)). Do not ask the user for tokens. |
