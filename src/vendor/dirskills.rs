@@ -14,7 +14,8 @@ use crate::ids::DepName;
 use anyhow::{Context, Result};
 use std::path::Path;
 
-use super::{Claim, MaterializedSkill};
+use super::Claim;
+use crate::materialized::MaterializedSkill;
 
 /// Copy each skill into `dir/<name>/`, creating `dir` if needed.
 ///

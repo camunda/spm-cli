@@ -23,8 +23,9 @@
 //!   written.
 
 use super::dirskills::{copy_skills_into, remove_managed};
-use super::{Claim, MaterializedSkill, Vendor};
+use super::{Claim, Vendor};
 use crate::ids::DepName;
+use crate::materialized::MaterializedSkill;
 use crate::scope::Scope;
 use crate::{fsutil, gitignore, paths};
 use anyhow::{Context, Result};

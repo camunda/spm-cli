@@ -31,6 +31,7 @@ const ALLOWED_EDGES: &[(&str, &[&str])] = &[
             "links",
             "lockfile",
             "manifest",
+            "materialized",
             "owned",
             "pathid",
             "paths",
@@ -56,13 +57,13 @@ const ALLOWED_EDGES: &[(&str, &[&str])] = &[
             "links",
             "lockfile",
             "manifest",
+            "materialized",
             "policy",
             "remote",
             "resolver",
             "scan",
             "skillcheck",
             "store",
-            "vendor",
         ],
     ),
     (
@@ -78,6 +79,7 @@ const ALLOWED_EDGES: &[(&str, &[&str])] = &[
             "gitignore",
             "ids",
             "jsonutil",
+            "materialized",
             "paths",
             "plugin",
             "scope",
@@ -85,7 +87,7 @@ const ALLOWED_EDGES: &[(&str, &[&str])] = &[
     ),
     (
         "plugin",
-        &["fsutil", "ids", "manifest", "skillcheck", "vendor"],
+        &["fsutil", "ids", "manifest", "materialized", "skillcheck"],
     ),
     (
         "resolver",
@@ -96,6 +98,7 @@ const ALLOWED_EDGES: &[(&str, &[&str])] = &[
         &["ids", "jsonfile", "lockfile", "paths", "scope", "shell"],
     ),
     ("lockfile", &["ids", "jsonfile", "manifest", "version"]),
+    ("materialized", &["ids"]),
     (
         "manifest",
         &["ids", "jsonfile", "policy", "schema", "scope", "version"],
@@ -124,7 +127,7 @@ const CLI_DEPENDENTS: &[&str] = &["main"];
 /// merges with another, or a new cyclic group, fails as a layering regression
 /// to fix, and a group that splits or shrinks fails as stale until the list is
 /// shrunk to match.
-const KNOWN_CYCLIC_GROUPS: &[&[&str]] = &[&["plugin", "vendor"]];
+const KNOWN_CYCLIC_GROUPS: &[&[&str]] = &[];
 
 const TABLE: &str = "tests/cli/architecture.rs";
 
