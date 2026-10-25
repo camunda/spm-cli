@@ -8,13 +8,15 @@
 //! boundaries are the parser's, not ours), and anything the guard doesn't
 //! recognise as test-only counts as shipped, so a gap can only over-report.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use proc_macro2::{TokenStream, TokenTree};
 use syn::ext::IdentExt;
 use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
 use syn::{Attribute, Meta, Token};
+
+use crate::source::rust_files;
 
 /// The attribute's name, without a raw-identifier prefix (`r#allow`).
 fn name(meta: &Meta) -> Option<String> {
@@ -219,17 +221,6 @@ fn suppressions(src: &str) -> Vec<usize> {
     guard.lines.sort_unstable();
     guard.lines.dedup();
     guard.lines
-}
-
-fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    for entry in std::fs::read_dir(dir).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            rust_files(&path, out);
-        } else if path.extension().is_some_and(|e| e == "rs") {
-            out.push(path);
-        }
-    }
 }
 
 #[test]

@@ -1,22 +1,13 @@
 //! Repository layout guards.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+
+use crate::source::rust_files;
 
 /// Most lines any Rust source or test file may hold: past this, split it into
 /// focused modules (see `tests/cli/` and `src/git/`) rather than let one file
 /// become a monolith again.
 const MAX_FILE_LINES: usize = 2_500;
-
-fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    for entry in std::fs::read_dir(dir).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            rust_files(&path, out);
-        } else if path.extension().is_some_and(|e| e == "rs") {
-            out.push(path);
-        }
-    }
-}
 
 #[test]
 fn no_rust_file_exceeds_the_line_budget() {
