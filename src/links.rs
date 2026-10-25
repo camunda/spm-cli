@@ -11,11 +11,13 @@
 //! running `spm link` on this machine activates a local source.
 
 use crate::ids::DepName;
+use crate::jsonfile::Staged;
 use crate::paths;
 use crate::scope::Scope;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 const FILE: &str = "links.json";
@@ -144,14 +146,9 @@ impl Links {
     }
 
     fn load_from(p: &Path) -> Result<Self> {
-        let text = match std::fs::read_to_string(p) {
-            Ok(t) => t,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
-            Err(e) => return Err(e).with_context(|| format!("reading {}", p.display())),
-        };
         // Names are joined onto vendor skill dirs (and removed from shared
         // ones); as `DepName`s, a hand-edited file's are rejected while parsing.
-        serde_json::from_str(&text).with_context(|| format!("parsing {}", p.display()))
+        crate::jsonfile::load_or_default(p)
     }
 
     /// Persist the links file, deleting it once it holds nothing.
@@ -189,14 +186,18 @@ impl Links {
                 _ => Ok(()),
             };
         }
-        let staged = self.stage(p)?;
-        publish(&staged, p)
+        // Links files are read by every spm command on the machine (see
+        // [`Links::all_recorded`]), so a concurrent reader must see either
+        // the old or the new file, never a truncated one.
+        self.stage(p)?
+            .publish()
+            .with_context(|| format!("writing {}", p.display()))
     }
 
     /// Write the complete file next to its destination (following a symlinked
     /// links file, so publishing replaces what it points at, not the link) as
-    /// a staging file that readers skip, returning `(staging, destination)`.
-    fn stage(&self, p: &Path) -> Result<(PathBuf, PathBuf)> {
+    /// a staging file that readers skip.
+    fn stage(&self, p: &Path) -> Result<Staged> {
         if let Some(parent) = p.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
@@ -206,12 +207,9 @@ impl Links {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => p.to_path_buf(),
             Err(e) => return Err(e).with_context(|| format!("resolving {}", p.display())),
         };
-        let name = dest.file_name().unwrap_or_default().to_string_lossy();
-        let staging = dest.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
-        let text = serde_json::to_string_pretty(self)?;
-        std::fs::write(&staging, text + "\n")
-            .with_context(|| format!("writing {}", staging.display()))?;
-        Ok((staging, dest))
+        let text = crate::jsonfile::to_text(self)?;
+        Staged::write(&dest, |f| f.write_all(text.as_bytes()))
+            .with_context(|| format!("writing {}", p.display()))
     }
 
     /// Every skill name materialized for a scope with this lock and these
@@ -254,17 +252,6 @@ impl Links {
             display: display.clone(),
         }))
     }
-}
-
-/// Atomically replace the destination with the staged file: links files are
-/// read by every spm command on the machine (see [`Links::all_recorded`]), so
-/// a concurrent reader must see either the old or the new file, never a
-/// truncated one.
-fn publish((staging, dest): &(PathBuf, PathBuf), p: &Path) -> Result<()> {
-    std::fs::rename(staging, dest).with_context(|| {
-        let _ = std::fs::remove_file(staging);
-        format!("writing {}", p.display())
-    })
 }
 
 /// Where machine-local state about the project at `root` lives: one file per
@@ -411,10 +398,11 @@ mod tests {
         std::fs::write(dir.join("notes.txt"), "not json").unwrap();
 
         let staged = with("new").stage(&file).unwrap();
-        assert!(staged.0.exists());
+        let staging = staged.path().to_path_buf();
+        assert!(staging.exists());
         assert_eq!(read(), ["old"], "mid-publication");
-        publish(&staged, &file).unwrap();
-        assert!(!staged.0.exists());
+        staged.publish().unwrap();
+        assert!(!staging.exists());
         assert_eq!(read(), ["new"], "published");
         std::fs::remove_dir_all(&home).unwrap();
     }

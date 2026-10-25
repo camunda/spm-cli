@@ -188,9 +188,7 @@ impl Lockfile {
         if !p.exists() {
             return Ok(Self::default());
         }
-        let text = std::fs::read_to_string(&p)?;
-        let lock: Self =
-            serde_json::from_str(&text).with_context(|| format!("parsing {}", p.display()))?;
+        let lock: Self = crate::jsonfile::load(&p)?;
         lock.validate()
             .with_context(|| format!("in {}", p.display()))?;
         Ok(lock)
@@ -249,8 +247,7 @@ impl Lockfile {
 
     pub fn save(&self, dir: &Path) -> Result<()> {
         let p = Self::path_in(dir);
-        let text = serde_json::to_string_pretty(self)?;
-        std::fs::write(&p, text + "\n").with_context(|| format!("writing {}", p.display()))
+        crate::jsonfile::save(&p, self)
     }
 }
 

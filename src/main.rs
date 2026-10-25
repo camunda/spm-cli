@@ -3,6 +3,7 @@ mod fsutil;
 mod git;
 mod gitignore;
 mod ids;
+mod jsonfile;
 mod jsonutil;
 mod links;
 mod lockfile;
