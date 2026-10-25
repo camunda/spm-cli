@@ -256,6 +256,20 @@ mod tests {
         }
     }
 
+    /// Whether an exclusive lock on `p` is granted (blocking, like `spm`
+    /// itself) within a generous bound. A non-blocking probe is not enough
+    /// for release: a child spawned concurrently by another test inherits the
+    /// open file description, keeping the flock until its `exec` closes it.
+    fn released(p: &Path) -> bool {
+        let f = std::fs::OpenOptions::new().write(true).open(p).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f.lock().is_ok());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(30))
+            .unwrap_or(false)
+    }
+
     fn scope_lock(root: &Path) -> PathBuf {
         let dir = root.join("home").join(LOCK_DIR);
         let mut entries = std::fs::read_dir(dir).unwrap();
@@ -316,7 +330,7 @@ mod tests {
         assert!(!lockable(&scope_file, false), "scope lock is exclusive");
         assert!(!lockable(&machine, false), "machine lock is exclusive");
         drop(links);
-        assert!(lockable(&scope_file, true) && lockable(&machine, true));
+        assert!(released(&scope_file) && released(&machine));
         let _ = std::fs::remove_dir_all(root);
     }
 
