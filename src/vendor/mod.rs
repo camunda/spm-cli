@@ -282,6 +282,123 @@ pub fn for_target(target: &str) -> Result<Box<dyn Vendor>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ids::dep;
+
+    fn scratch(name: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let p =
+            std::env::temp_dir().join(format!("spm-vendor-{name}-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn make_skill(root: &Path, name: &str) -> MaterializedSkill {
+        let src = root.join("src").join(name);
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("SKILL.md"), format!("---\nname: {name}\n---\n")).unwrap();
+        MaterializedSkill {
+            name: DepName::try_from(name).unwrap(),
+            path: src,
+            root: root.to_path_buf(),
+        }
+    }
+
+    /// Copilot owns its whole project dir: a materialize rebuilds it (dropping
+    /// anything undeclared), it is ignored as one entry, status flags strays as
+    /// stale, clean deletes the dir, and an empty set leaves nothing behind.
+    #[test]
+    fn copilot_owns_its_whole_project_dir() {
+        let root = scratch("copilot-project");
+        let scope = Scope::Project { root: root.clone() };
+        let v = for_target("copilot").unwrap();
+        let dir = v.skills_dir(&scope).unwrap();
+        assert_eq!(dir, root.join(".agents/skills/spm-managed-skills"));
+        std::fs::create_dir_all(dir.join("old")).unwrap();
+
+        let greet = make_skill(&root, "greet");
+        let mut claimed = Vec::new();
+        v.materialize(&scope, "id", &[greet], &[], &mut |n| {
+            claimed.push(n.clone());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(claimed, [dep("greet")]);
+        assert!(dir.join("greet/SKILL.md").is_file());
+        assert!(!dir.join("old").exists(), "undeclared entry dropped");
+        let ignore = std::fs::read_to_string(root.join(".gitignore")).unwrap();
+        assert!(ignore
+            .lines()
+            .any(|l| l == ".agents/skills/spm-managed-skills/"));
+        assert_eq!(
+            v.gitignore_entries(&[dep("greet")]),
+            [".agents/skills/spm-managed-skills/"]
+        );
+        assert!(v.gitignore_entries(&[]).is_empty());
+
+        std::fs::create_dir_all(dir.join("stray")).unwrap();
+        let st = v.status(&scope, &[dep("greet"), dep("gone")]).unwrap();
+        assert_eq!(
+            (st.present, st.missing, st.stale),
+            (
+                vec![dep("greet")],
+                vec![dep("gone")],
+                vec!["stray".to_string()]
+            )
+        );
+
+        assert_eq!(
+            v.clean_paths(&scope, &[dep("greet")]).unwrap(),
+            std::slice::from_ref(&dir)
+        );
+        assert_eq!(
+            v.skill_paths(&scope, &[dep("greet")]).unwrap(),
+            [dir.join("greet")]
+        );
+        v.materialize(&scope, "id", &[], &[dep("greet")], &mut |_| Ok(()))
+            .unwrap();
+        assert!(!dir.exists(), "an empty set leaves no dir");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The global Copilot dir is shared with the user's own skills, so only the
+    /// managed entries in it are ever targeted, never the dir itself.
+    #[test]
+    fn copilot_never_targets_the_whole_global_dir() {
+        let v = for_target("copilot").unwrap();
+        let dir = crate::paths::home_dir().unwrap().join(".copilot/skills");
+        assert_eq!(v.skills_dir(&Scope::Global).unwrap(), dir);
+        let managed = [dep("greet")];
+        assert_eq!(
+            v.clean_paths(&Scope::Global, &managed).unwrap(),
+            [dir.join("greet")]
+        );
+        assert_eq!(
+            v.skill_paths(&Scope::Global, &managed).unwrap(),
+            [dir.join("greet")]
+        );
+        assert!(v.status(&Scope::Global, &managed).unwrap().stale.is_empty());
+    }
+
+    /// Cleanup removes a managed entry that is a symlink, never its target.
+    #[cfg(unix)]
+    #[test]
+    fn removing_a_symlinked_entry_keeps_its_target() {
+        let tmp = scratch("symlink-remove");
+        let target = tmp.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("keep.md"), "keep\n").unwrap();
+        let link = tmp.join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        remove_paths(std::slice::from_ref(&link)).unwrap();
+
+        assert!(std::fs::symlink_metadata(&link).is_err(), "link removed");
+        assert!(target.join("keep.md").is_file(), "target kept");
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
 
     /// Guard the drift surface: every advertised target must actually resolve to
     /// a vendor, and every resolvable name must be advertised. If someone adds a

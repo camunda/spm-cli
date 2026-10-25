@@ -96,6 +96,36 @@ mod tests {
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 
+    /// A managed entry that is a symlink is removed (or replaced) as a link:
+    /// its target outside the shared dir is never touched.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_managed_entries_are_unlinked_not_followed() {
+        let tmp = scratch("symlinked");
+        let dir = tmp.join("skills");
+        let target = tmp.join("elsewhere");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("SKILL.md"), "keep\n").unwrap();
+        std::os::unix::fs::symlink(&target, dir.join("old")).unwrap();
+        std::os::unix::fs::symlink(&target, dir.join("greet")).unwrap();
+
+        remove_managed(&dir, [&dep("old")].into_iter(), &mut |_| Ok(())).unwrap();
+        copy_skills_into(&dir, &[make_skill(&tmp, "greet")], &mut |_| Ok(())).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(dir.join("old")).is_err(),
+            "link removed"
+        );
+        let greet = std::fs::symlink_metadata(dir.join("greet")).unwrap();
+        assert!(greet.is_dir(), "link replaced by a real copy");
+        assert_eq!(
+            std::fs::read_to_string(target.join("SKILL.md")).unwrap(),
+            "keep\n"
+        );
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
     /// `remove_managed` removes only the named skills, leaving others intact.
     #[test]
     fn remove_managed_leaves_unnamed_entries() {
