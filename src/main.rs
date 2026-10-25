@@ -13,6 +13,7 @@ mod pathid;
 mod paths;
 mod plugin;
 mod policy;
+mod remote;
 mod resolver;
 mod scan;
 mod schema;

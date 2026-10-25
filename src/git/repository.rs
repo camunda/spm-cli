@@ -2,10 +2,9 @@
 //! remote, fetching one commit into a checkout, and local work-tree queries.
 
 use super::command::{git, git_command, git_remote, reject_option_like, run_git};
-use super::transport::{
-    is_connectivity_failure, protocol_of, rewrite, transport, with_transport, Protocol,
-};
+use super::transport::{is_connectivity_failure, transport, with_transport};
 use crate::ids::CommitSha;
+use crate::remote::{protocol_of, rewrite, Protocol};
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
 use std::path::Path;

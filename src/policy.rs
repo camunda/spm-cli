@@ -47,7 +47,7 @@ impl Source {
     /// Classify a dependency's `git` value.
     ///
     /// Remotes with an HTTPS/SSH equivalent are first folded through
-    /// [`crate::git::remote_identity`] — the same equivalence `--protocol`
+    /// [`crate::remote::remote_identity`] — the same equivalence `--protocol`
     /// rewriting relies on — so the interchangeable spellings of one repository
     /// can never be judged differently. Everything else is parsed strictly and
     /// fails closed to [`Source::Opaque`].
@@ -59,7 +59,7 @@ impl Source {
         if s.trim() != s {
             return Source::Opaque;
         }
-        if let Some(identity) = crate::git::remote_identity(s) {
+        if let Some(identity) = crate::remote::remote_identity(s) {
             return match identity
                 .strip_prefix("https://")
                 .and_then(|r| r.split_once('/'))

@@ -57,6 +57,7 @@ const ALLOWED_EDGES: &[(&str, &[&str])] = &[
             "paths",
             "plugin",
             "policy",
+            "remote",
             "resolver",
             "scan",
             "scope",
@@ -72,12 +73,12 @@ const ALLOWED_EDGES: &[(&str, &[&str])] = &[
         "transitive",
         &[
             "fsutil",
-            "git",
             "ids",
             "links",
             "lockfile",
             "manifest",
             "policy",
+            "remote",
             "resolver",
             "scan",
             "skillcheck",
@@ -120,8 +121,8 @@ const ALLOWED_EDGES: &[(&str, &[&str])] = &[
         "manifest",
         &["ids", "jsonfile", "policy", "schema", "scope", "version"],
     ),
-    ("policy", &["git", "manifest", "paths"]),
-    ("git", &["ids", "policy"]),
+    ("policy", &["manifest", "paths", "remote"]),
+    ("git", &["ids", "policy", "remote"]),
     ("ids", &["version"]),
     ("store", &["git", "lockfile", "paths", "policy"]),
     ("scan", &["fsutil", "jsonutil"]),
@@ -132,7 +133,7 @@ const ALLOWED_EDGES: &[(&str, &[&str])] = &[
 
 /// Modules that must depend on no other module of the crate.
 const LEAVES: &[&str] = &[
-    "fsutil", "jsonfile", "pathid", "paths", "schema", "shell", "version",
+    "fsutil", "jsonfile", "pathid", "paths", "remote", "schema", "shell", "version",
 ];
 
 /// The only modules allowed to depend on `cli`: it is the top of the stack.
@@ -144,7 +145,7 @@ const CLI_DEPENDENTS: &[&str] = &["main"];
 /// merges with another, or a new cyclic group, fails as a layering regression
 /// to fix, and a group that splits or shrinks fails as stale until the list is
 /// shrunk to match.
-const KNOWN_CYCLIC_GROUPS: &[&[&str]] = &[&["git", "manifest", "policy"], &["plugin", "vendor"]];
+const KNOWN_CYCLIC_GROUPS: &[&[&str]] = &[&["manifest", "policy"], &["plugin", "vendor"]];
 
 const TABLE: &str = "tests/cli/architecture.rs";
 
