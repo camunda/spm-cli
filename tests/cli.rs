@@ -7198,6 +7198,26 @@ fn advance_main(sb: &Sandbox) -> String {
     skill_head(&sb.skill_repo)
 }
 
+/// With nothing locked, the text report says why: nothing declared, or
+/// declared but never installed.
+#[test]
+fn outdated_text_explains_an_empty_report() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    assert_eq!(sb.ok(&["outdated"]), "no skills or plugins declared\n");
+    write_manifest(
+        &sb,
+        &format!(
+            r#"{{"targets":["copilot"],"skills":{{"greet":{{"git":"{}","tag":"v0.1.0"}}}}}}"#,
+            sb.skill_url()
+        ),
+    );
+    assert_eq!(
+        sb.ok(&["outdated"]),
+        "nothing locked yet — run `spm install`\n"
+    );
+}
+
 #[test]
 fn outdated_reports_up_to_date_and_exit_code_passes_when_nothing_moved() {
     let sb = Sandbox::new();
@@ -14982,6 +15002,113 @@ fn doctor_checks_policy_for_locked_transitive_sources() {
     let details = c["details"].to_string();
     assert!(details.contains(DEP_URL), "{c}");
     assert!(!details.contains("skill `alpha`"), "{c}");
+}
+
+/// The message of the single check with id `id` and status `status`.
+fn check_message<'a>(doc: &'a serde_json::Value, id: &str, status: &str) -> &'a str {
+    check(doc, id, status)["message"].as_str().unwrap()
+}
+
+/// An unreadable `ai.lock` fails the lock and materialization checks, each
+/// with the load error, without hiding the checks that don't read it — and
+/// the lock check still reports a problem it meets before reading the lock.
+#[test]
+fn doctor_reports_an_unreadable_lock_without_hiding_other_checks() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    std::fs::write(sb.project.join("ai.lock"), "not json").unwrap();
+
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(!ok);
+    check(&doc, "policy", "ok");
+    let lock = check_message(&doc, "lockfile", "error");
+    let err = lock
+        .strip_prefix("ai.lock can't be checked: ")
+        .unwrap_or_else(|| panic!("{lock}"));
+    assert!(err.contains("ai.lock"), "{err}");
+    assert_eq!(
+        check_message(&doc, "materialized", "error"),
+        format!("can't inspect the targets: {err}")
+    );
+
+    let out = sb.spm(&["doctor"]);
+    assert!(!out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains(&format!("✗ {lock}")), "{text}");
+    assert!(
+        text.contains("    fix: spm install and commit ai.lock"),
+        "{text}"
+    );
+
+    set_project_policy(&sb, &["example.test/*"]);
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(!ok);
+    let lock = check_message(&doc, "lockfile", "error");
+    assert!(lock.contains("not allowed by the source policy"), "{lock}");
+    let text = String::from_utf8_lossy(&sb.spm(&["doctor"]).stdout).into_owned();
+    assert!(
+        text.contains("\n    skill `greet`"),
+        "denied source details: {text}"
+    );
+}
+
+/// An unreadable links file fails the links check, and every check that reads
+/// link state reports it; the policy check (which needs the links) is skipped.
+/// The lock check reads links before `ai.lock`, the materialization check
+/// `ai.lock` first.
+#[test]
+fn doctor_reports_an_unreadable_links_file() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    local_skill_checkout(&sb, "dev", "LOCAL");
+    sb.ok(&["link", "greet", "../dev"]);
+    std::fs::write(sb.project_links(), "not json").unwrap();
+
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(!ok);
+    assert!(checks(&doc, "policy").is_empty(), "{doc:#}");
+    let msg = check_message(&doc, "links", "error");
+    let err = msg
+        .strip_prefix("links file is unreadable: ")
+        .unwrap_or_else(|| panic!("{msg}"));
+    assert_eq!(
+        check_message(&doc, "lockfile", "error"),
+        format!("ai.lock can't be checked: {err}")
+    );
+    assert_eq!(
+        check_message(&doc, "materialized", "error"),
+        format!("can't inspect the targets: {err}")
+    );
+
+    std::fs::write(sb.project.join("ai.lock"), "not json").unwrap();
+    let (_, doc) = doctor(&sb, &[]);
+    assert_eq!(
+        check_message(&doc, "lockfile", "error"),
+        format!("ai.lock can't be checked: {err}")
+    );
+    let targets = check_message(&doc, "materialized", "error");
+    assert!(!targets.contains(err), "{targets}");
+    assert!(targets.contains("ai.lock"), "{targets}");
+}
+
+#[test]
+fn doctor_text_marks_warnings() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    let out = sb
+        .command(&["doctor"])
+        .env("SPM_ALLOW_SUSPICIOUS", "1")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("! SPM_ALLOW_SUSPICIOUS=1: suspicious skill content"),
+        "{text}"
+    );
+    assert!(text.contains("0 errors, 1 warning\n"), "{text}");
 }
 
 #[test]
