@@ -2,6 +2,7 @@ mod add;
 mod clean;
 mod common;
 mod doctor;
+mod index;
 mod init;
 mod link;
 mod list;

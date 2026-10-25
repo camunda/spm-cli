@@ -122,8 +122,19 @@ impl ScopeSession {
     /// [`ScopeSession::snapshot`] for a `manifest` already read from this
     /// session: the single definition of the order the rest is loaded in.
     pub(super) fn snapshot_with(&self, manifest: Manifest) -> Result<ScopeSnapshot> {
-        let lock = self.lockfile()?;
-        let links = self.links()?;
+        self.snapshot_from(manifest, self.lockfile(), self.links())
+    }
+
+    /// [`ScopeSession::snapshot_with`] from `ai.lock` and links already
+    /// loaded (by a command that reports on each even when the other won't
+    /// load): fails with the first part, in the canonical order, that didn't.
+    pub(super) fn snapshot_from(
+        &self,
+        manifest: Manifest,
+        lock: Result<Lockfile>,
+        links: Result<Links>,
+    ) -> Result<ScopeSnapshot> {
+        let (lock, links) = (lock?, links?);
         let ownership = self.ownership(&lock, &links, &manifest.targets)?;
         Ok(ScopeSnapshot {
             manifest,
@@ -276,6 +287,36 @@ mod tests {
         let file = entries.next().unwrap().unwrap().path();
         assert!(entries.next().is_none(), "one scope lock");
         file
+    }
+
+    /// Parts loaded separately assemble like a [`ScopeSession::snapshot`]:
+    /// the first part that didn't load, in the canonical order, is the error.
+    #[test]
+    fn snapshot_from_fails_with_the_first_unloaded_part() {
+        let (root, scope, _home) = sandbox("parts");
+        let session = ScopeSession::open(&scope, Access::Read).unwrap();
+        let manifest =
+            || Manifest::parse(r#"{"targets":["claude"]}"#, Path::new("ai.json")).unwrap();
+        let failed = |lock: Result<Lockfile>, links: Result<Links>| {
+            let e = session
+                .snapshot_from(manifest(), lock, links)
+                .err()
+                .unwrap();
+            format!("{e:#}")
+        };
+        assert_eq!(
+            failed(Err(anyhow::anyhow!("lock")), Err(anyhow::anyhow!("links"))),
+            "lock"
+        );
+        assert_eq!(
+            failed(Ok(Lockfile::default()), Err(anyhow::anyhow!("links"))),
+            "links"
+        );
+        let state = session
+            .snapshot_from(manifest(), Ok(Lockfile::default()), Ok(Links::default()))
+            .unwrap();
+        assert_eq!(state.manifest.targets, ["claude"]);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

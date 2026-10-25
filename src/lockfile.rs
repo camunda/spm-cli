@@ -320,7 +320,7 @@ pub fn validate_project_id(id: &str) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::ids::dep;
 
@@ -345,7 +345,7 @@ mod tests {
     }
 
     /// A valid entry for `git` pinned at `c` repeated into a SHA.
-    fn entry(git: &str, c: char, reference: &str) -> LockedSkill {
+    pub(crate) fn entry(git: &str, c: char, reference: &str) -> LockedSkill {
         let commit = CommitSha::try_from(c.to_string().repeat(40)).unwrap();
         LockedSkill {
             git: git.into(),
