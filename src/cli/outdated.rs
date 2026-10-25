@@ -1,4 +1,5 @@
 use super::common::print_json;
+use super::session::{Access, ScopeSession};
 use crate::git;
 use crate::lockfile::{LockedSkill, Lockfile};
 use crate::manifest::{semver_of_tag, Manifest, Version};
@@ -221,12 +222,12 @@ pub(super) fn outdated(
     json: bool,
     exit_code: bool,
 ) -> Result<()> {
-    let dir = scope.manifest_dir()?;
-    let manifest = Manifest::load(&dir, scope)?;
+    let session = ScopeSession::open(scope, Access::Read)?;
+    let manifest = session.manifest()?;
     // Every remote this reports on is queried through the policy gate; a denied
     // source shows up as an error row instead of being contacted.
-    crate::policy::activate(&manifest, &dir)?;
-    let lock = Lockfile::load_or_default(&dir)?;
+    crate::policy::activate(&manifest, session.dir())?;
+    let lock = session.lockfile()?;
     if let Some(name) = name {
         if !lock.skills.contains_key(name) && !lock.plugins.contains_key(name) {
             bail!("`{name}` is not in ai.lock — run `spm install` first, or check the name");

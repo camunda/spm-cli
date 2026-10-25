@@ -1,26 +1,19 @@
 use super::common::{confirm, human_size};
-use crate::links::Links;
-use crate::lockfile::Lockfile;
-use crate::manifest::Manifest;
-use crate::owned::Ownership;
+use super::session::{Access, ScopeSession, ScopeSnapshot};
 use crate::scope::Scope;
 use crate::vendor;
 use crate::{paths, store};
 use anyhow::Result;
 
 pub(super) fn clean(scope: &Scope) -> Result<()> {
-    let dir = scope.manifest_dir()?;
     // Held from reading `ai.json` and link state until the deletions below are
-    // done (see `StateLock`).
-    let _state_lock = crate::links::StateLock::acquire(scope, false)?;
-    let manifest = Manifest::load(&dir, scope)?;
-    let lock = Lockfile::load_or_default(&dir)?;
-    let ownership = Ownership::load(
-        scope,
-        &lock,
-        &Links::load(scope)?.managed,
-        &manifest.targets,
-    )?;
+    // done.
+    let session = ScopeSession::open(scope, Access::Write)?;
+    let ScopeSnapshot {
+        manifest,
+        ownership,
+        ..
+    } = session.snapshot()?;
     let vendors = manifest
         .targets
         .iter()
@@ -33,7 +26,7 @@ pub(super) fn clean(scope: &Scope) -> Result<()> {
         .collect();
     super::sync::guard_working_copies(
         scope,
-        &dir,
+        session.dir(),
         &vendors,
         &Default::default(),
         &owned,

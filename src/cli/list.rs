@@ -1,4 +1,5 @@
 use super::common::print_json;
+use super::session::{Access, ScopeSession};
 use crate::links::Links;
 use crate::lockfile::{LockedSkill, Lockfile};
 use crate::manifest::{Manifest, Version};
@@ -58,10 +59,10 @@ struct PluginRow<'a> {
 }
 
 pub(super) fn list(scope: &Scope, json: bool) -> Result<()> {
-    let dir = scope.manifest_dir()?;
-    let manifest = Manifest::load(&dir, scope)?;
-    let lock = Lockfile::load_or_default(&dir)?;
-    let links = Links::load(scope)?;
+    let session = ScopeSession::open(scope, Access::Read)?;
+    let manifest = session.manifest()?;
+    let lock = session.lockfile()?;
+    let links = session.links()?;
     let report = collect(scope, &manifest, &lock, &links)?;
     if json {
         print_json(&report)

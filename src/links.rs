@@ -21,10 +21,6 @@ use std::path::{Path, PathBuf};
 const FILE: &str = "links.json";
 /// `$SPM_HOME` subdirectory holding one links file per project.
 const PROJECT_DIR: &str = "links";
-/// `$SPM_HOME` file locked machine-wide by [`StateLock`].
-const LOCK_FILE: &str = "links.lock";
-/// Per-scope lock files, under `$SPM_HOME` (see [`StateLock`]).
-const LOCK_DIR: &str = "locks";
 
 /// The parsed links file.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -263,88 +259,6 @@ impl Links {
             display: display.clone(),
         }))
     }
-}
-
-/// The locks over link state and target ownership, held by a mutating
-/// command from before it reads link state until its last write or deletion:
-///
-/// - the scope's own lock, always exclusively: commands on the same project
-///   (or on the global scope) run one at a time, so none plans from ownership
-///   records (`managed`) another is about to replace;
-/// - the machine-wide lock: exclusively by commands that may activate a link
-///   (`spm link`, `spm unlink`), shared by every other one. So no link can be
-///   published into another project's output between that project's command
-///   checking for links and rewriting the output — while commands on
-///   different projects still run side by side.
-///
-/// Always taken in that order, so two commands can't deadlock. Lock files live
-/// in their own directory, never next to the links files (which may be
-/// redirected into a target's output).
-pub struct StateLock {
-    _scope: std::fs::File,
-    _machine: std::fs::File,
-    exclusive: bool,
-}
-
-impl StateLock {
-    /// Take both locks, waiting (and saying so on stderr) while another
-    /// command holds one in a conflicting mode. `exclusive` is for the
-    /// machine-wide lock. Take them before reading any link state.
-    pub fn acquire(scope: &Scope, exclusive: bool) -> Result<Self> {
-        let home = paths::spm_home()?;
-        let stem = Links::path(scope)?
-            .file_stem()
-            .context("links file has no name")?
-            .to_owned();
-        let mut scope_lock = home.join(LOCK_DIR).join(stem);
-        scope_lock.set_extension("lock");
-        Ok(Self {
-            _scope: lock(&scope_lock, true)?,
-            _machine: lock(&home.join(LOCK_FILE), exclusive)?,
-            exclusive,
-        })
-    }
-
-    pub fn is_exclusive(&self) -> bool {
-        self.exclusive
-    }
-}
-
-/// Open (creating it and its directory) and lock the file `p`.
-fn lock(p: &Path, exclusive: bool) -> Result<std::fs::File> {
-    if let Some(dir) = p.parent() {
-        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    }
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(p)
-        .with_context(|| format!("opening {}", p.display()))?;
-    let attempt = if exclusive {
-        file.try_lock()
-    } else {
-        file.try_lock_shared()
-    };
-    match attempt {
-        Ok(()) => {}
-        Err(std::fs::TryLockError::WouldBlock) => {
-            eprintln!(
-                "waiting for another spm command to finish (lock: {})...",
-                p.display()
-            );
-            if exclusive {
-                file.lock()
-            } else {
-                file.lock_shared()
-            }
-            .with_context(|| format!("locking {}", p.display()))?;
-        }
-        Err(std::fs::TryLockError::Error(e)) => {
-            return Err(e).with_context(|| format!("locking {}", p.display()))
-        }
-    }
-    Ok(file)
 }
 
 /// Atomically replace the destination with the staged file: links files are

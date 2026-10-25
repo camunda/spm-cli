@@ -1,9 +1,5 @@
 use super::common::print_json;
-use crate::links::Links;
-use crate::lockfile::Lockfile;
-use crate::manifest::Manifest;
-use crate::owned::Ownership;
-use crate::paths;
+use super::session::{Access, ScopeSession, ScopeSnapshot};
 use crate::scope::Scope;
 use crate::vendor::{self, VendorStatus};
 use anyhow::{bail, Result};
@@ -127,7 +123,7 @@ impl StatusReport {
 /// doubles as an automated gate. With `json`, the report is printed *before*
 /// the non-zero exit, so a consumer gets both the data and the status.
 pub(super) fn status(scope: &Scope, json: bool) -> Result<()> {
-    let report = collect(scope)?;
+    let report = collect(&ScopeSession::open(scope, Access::Read)?)?;
     if json {
         print_json(&report)?;
     } else {
@@ -136,17 +132,19 @@ pub(super) fn status(scope: &Scope, json: bool) -> Result<()> {
     report.outcome()
 }
 
-pub(super) fn collect(scope: &Scope) -> Result<StatusReport> {
-    let dir = scope.manifest_dir()?;
-    let manifest = Manifest::load(&dir, scope)?;
-    let lock = Lockfile::load_or_default(&dir)?;
-    let links = Links::load(scope)?;
+pub(super) fn collect(session: &ScopeSession) -> Result<StatusReport> {
+    let scope = session.scope();
+    let ScopeSnapshot {
+        manifest,
+        lock,
+        links,
+        ownership,
+    } = session.snapshot()?;
     // Plugin-bundled skills are flattened into every vendor's skills dir just
     // like standalone skills, so they belong in `expected` — otherwise `status`
     // would flag them as stale (present on disk, not declared). A linked
     // plugin contributes its working tree's bundled skills instead.
     let expected = links.effective_skill_names(&lock);
-    let ownership = Ownership::load(scope, &lock, &links.managed, &manifest.targets)?;
     let links = links
         .links
         .into_iter()
@@ -246,7 +244,7 @@ pub(super) fn collect(scope: &Scope) -> Result<StatusReport> {
     };
     let mut report = StatusReport {
         scope: scope.label(),
-        root: dir,
+        root: session.dir().to_path_buf(),
         expected,
         plugins: declared_plugins,
         unlocked_plugins,
@@ -382,22 +380,23 @@ fn render_text(report: &StatusReport) {
 /// by `status` to warn about global/project name collisions. Returns an empty
 /// list when the opposite scope has no lockfile.
 fn shadowed_names(scope: &Scope, expected: &[String]) -> Result<Vec<String>> {
-    let other_dir = match scope {
-        Scope::Project { .. } => paths::spm_home()?,
-        Scope::Global => std::env::current_dir()?,
-    };
-    let other = Lockfile::load_or_default(&other_dir)?;
     let other_scope = match scope {
         Scope::Project { .. } => Scope::Global,
-        Scope::Global => Scope::Project { root: other_dir },
+        Scope::Global => Scope::Project {
+            root: std::env::current_dir()?,
+        },
     };
+    // Only peeked at, never written: no lock.
+    let other = ScopeSession::open(&other_scope, Access::Read)?;
     // A name provided by a plugin's bundled skills in the *other* scope
     // collides on disk just as much as a standalone skill of the same name
     // (both are flattened into the same vendor skills dir), so it must be
     // checked here too — computed exactly as for this scope, so a linked
     // plugin's working-tree bundle replaces its locked one.
-    let other_names: std::collections::HashSet<String> = Links::load(&other_scope)?
-        .effective_skill_names(&other)
+    let other_lock = other.lockfile()?;
+    let other_names: std::collections::HashSet<String> = other
+        .links()?
+        .effective_skill_names(&other_lock)
         .into_iter()
         .collect();
     Ok(expected
@@ -405,4 +404,35 @@ fn shadowed_names(scope: &Scope, expected: &[String]) -> Result<Vec<String>> {
         .filter(|n| other_names.contains(n.as_str()))
         .cloned()
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::links::Links;
+    use crate::lockfile::Lockfile;
+
+    /// The other scope's `ai.lock` is read before its links, as in every
+    /// [`ScopeSession::snapshot`], so with both broken the lock is reported.
+    #[test]
+    fn shadowed_names_reads_the_other_lock_before_its_links() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("spm-status-order-{nanos}"));
+        let home = root.join("home");
+        std::fs::create_dir_all(root.join("project")).unwrap();
+        let _home = crate::paths::SpmHomeGuard::set(&home);
+        let scope = Scope::Project {
+            root: root.join("project"),
+        };
+        let links = Links::path(&Scope::Global).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(Lockfile::path_in(&home), "not json").unwrap();
+        std::fs::write(&links, "not json").unwrap();
+        let err = format!("{:#}", shadowed_names(&scope, &[]).unwrap_err());
+        assert!(err.contains("ai.lock"), "{err}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

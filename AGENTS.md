@@ -32,6 +32,7 @@ generated source to regenerate.
 | --- | --- |
 | `src/main.rs` | Binary entry point; wires up modules and maps errors to exit codes. |
 | `src/cli.rs` | `clap` command definitions and the top-level command dispatch (`init`, `add`, `remove`, `update`, `install`, `list`, `clean`, `prune`). Primary edit surface for CLI behavior. |
+| `src/cli/session.rs` | `ScopeSession`: the only way a command takes the state lock (private `StateLock`, re-entry guarded) and loads `ai.json`/`ai.lock`/links/ownership, in canonical order via `snapshot`. |
 | `src/manifest.rs` | The user-authored `ai.json` model (targets + skill specs) and its (de)serialization. |
 | `src/lockfile.rs` | The generated, VCS-committed `ai.lock` pin file for reproducible installs. |
 | `src/schema.rs` | Embedded JSON Schema validation for `ai.json`. |

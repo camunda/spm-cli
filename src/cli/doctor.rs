@@ -7,9 +7,10 @@
 //! contacts remotes only with `--online`.
 
 use super::common::print_json;
+use super::session::{Access, ScopeSession};
 use super::{status, sync};
 use crate::git::{self, Reach};
-use crate::links::{Links, StateLock};
+use crate::links::Links;
 use crate::lockfile::Lockfile;
 use crate::manifest::Manifest;
 use crate::policy::Policy;
@@ -157,8 +158,8 @@ fn diagnose(scope: &Scope, root: &Path, online: bool) -> Vec<Check> {
     // state (shared machine-wide: doctor activates no link). Without it a
     // concurrent command may be rewriting that state, so only the checks that
     // read none of it still run.
-    let state_lock = match StateLock::acquire(scope, false) {
-        Ok(lock) => lock,
+    let session = match ScopeSession::open(scope, Access::Write) {
+        Ok(session) => session,
         Err(e) => {
             checks.push(Check::error(
                 "state-lock",
@@ -177,7 +178,7 @@ fn diagnose(scope: &Scope, root: &Path, online: bool) -> Vec<Check> {
         checks.push(check_machine_policy());
         return checks;
     }
-    let manifest = match Manifest::load(root, scope) {
+    let manifest = match session.manifest() {
         Ok(m) => m,
         Err(e) => {
             checks.push(
@@ -196,7 +197,7 @@ fn diagnose(scope: &Scope, root: &Path, online: bool) -> Vec<Check> {
     checks.push(check_targets(scope, &manifest));
     checks.push(check_machine_policy());
 
-    let links = Links::load(scope);
+    let links = session.links();
     if let Ok(links) = &links {
         checks.push(check_policy(root, &manifest, links));
     }
@@ -218,7 +219,7 @@ fn diagnose(scope: &Scope, root: &Path, online: bool) -> Vec<Check> {
             Check::ok("lockfile", "no ai.lock (nothing declared yet)")
         });
     } else {
-        match sync::check_lock(scope, &manifest, &state_lock) {
+        match sync::check_lock(&session, &manifest) {
             Ok(verdict) => checks.extend(lock_checks(scope, verdict)),
             Err(e) => checks.push(
                 Check::error("lockfile", format!("ai.lock can't be checked: {e:#}")).fix(format!(
@@ -229,7 +230,7 @@ fn diagnose(scope: &Scope, root: &Path, online: bool) -> Vec<Check> {
         }
     }
 
-    match status::collect(scope) {
+    match status::collect(&session) {
         Ok(report) => {
             checks.extend(materialization_checks(scope, &report));
             if !scope.is_global() {
@@ -245,7 +246,7 @@ fn diagnose(scope: &Scope, root: &Path, online: bool) -> Vec<Check> {
     // Snapshot the remotes under the lock, then release it before the slow
     // network probes so a concurrent install isn't blocked on them.
     let remotes = (online && policy_active).then(|| remote_urls(root, &manifest));
-    drop(state_lock);
+    drop(session);
 
     if let Some(c) = check_ssh_agent(&manifest) {
         checks.push(c);
