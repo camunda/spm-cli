@@ -9,23 +9,22 @@ use std::path::{Path, PathBuf};
 /// symlink out of the checkout" and the "never materialize `.git`" guarantees.
 ///
 /// The caller supplies an already-canonical `boundary` so only the link target
-/// is canonicalized. Hot traversal paths (`copy_tree`, `scan`, `skillcheck`,
+/// is canonicalized. Hot traversal paths ([`walk_tree`], `skillcheck`,
 /// `plugin_skills`) canonicalize the boundary once up front — it comes from
 /// [`crate::store::Ensured::root`], which is already canonical — and call this
 /// per entry to avoid re-canonicalizing the boundary on every filesystem entry.
 ///
 /// This is the single source of truth for "does this symlink stay inside the
-/// checkout (and out of `.git`)?", shared by the copy (`copy_tree`), the
-/// pre-materialize scan (`scan`), the skill-loadability check (`skillcheck`),
+/// checkout (and out of `.git`)?", shared by [`walk_tree`] (behind both the
+/// copy and the pre-materialize scan), the skill-loadability check (`skillcheck`),
 /// and bundled-skill enumeration (`plugin_skills`), so they can never disagree
 /// about which symlinks are followed.
 ///
-/// The `.git` exclusion matters because `copy_tree`/`scan` skip a `.git` entry
-/// by *name* at every directory level, but a symlink target like `assets ->
+/// The `.git` exclusion matters because [`walk_tree`] skips a `.git` entry by
+/// *name* at every directory level, but a symlink target like `assets ->
 /// ../../.git` would otherwise slip past that filter and copy the whole repo
-/// metadata dir under an arbitrary name. Rejecting any resolved target with a
-/// `.git` path component (relative to the boundary) keeps the two filters in
-/// lockstep.
+/// metadata dir under an arbitrary name, so any resolved target with a `.git`
+/// path component (relative to the boundary) is rejected as well.
 pub(crate) fn resolve_within_canonical(boundary: &Path, link: &Path) -> Option<PathBuf> {
     let target = std::fs::canonicalize(link).ok()?;
     contains(boundary, &target).then_some(target)
@@ -76,6 +75,10 @@ pub fn copy_tree(src: &Path, dst: &Path, boundary: &Path) -> Result<()> {
             std::fs::copy(from, dst.join(rel))?;
             Ok(())
         }
+        Entry::Skipped { path, why } => {
+            warn_skipped(path, why);
+            Ok(())
+        }
     })
 }
 
@@ -83,8 +86,13 @@ pub fn copy_tree(src: &Path, dst: &Path, boundary: &Path) -> Result<()> {
 /// from `src` can be read: each directory listed and each file opened.
 pub fn check_readable(src: &Path, boundary: &Path) -> Result<()> {
     walk_tree(src, boundary, &mut |entry| {
-        if let Entry::File { from, .. } = entry {
-            std::fs::File::open(from).with_context(|| format!("reading `{}`", from.display()))?;
+        match entry {
+            Entry::File { from, .. } => {
+                std::fs::File::open(from)
+                    .with_context(|| format!("reading `{}`", from.display()))?;
+            }
+            Entry::Skipped { path, why } => warn_skipped(path, why),
+            Entry::Dir(_) => {}
         }
         Ok(())
     })
@@ -96,11 +104,47 @@ pub enum Entry<'a> {
     Dir(&'a Path),
     /// A regular file to materialize, read from `from` (a symlink's target).
     File { from: &'a Path, rel: &'a Path },
+    /// Something deliberately not traversed, at `path` as reached.
+    Skipped { path: &'a Path, why: Skip },
 }
 
-/// The single traversal behind [`copy_tree`] (see there for the rules:
-/// `.git` skipped, symlinks followed only inside `boundary`, cycles and
-/// non-regular files skipped).
+/// Why [`walk_tree`] skipped a path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Skip {
+    /// A directory resolving outside the boundary or into `.git`.
+    Outside,
+    /// A directory already on the recursion path (a symlink cycle).
+    Cycle,
+    /// A symlink that is broken, escapes the boundary or reaches into `.git`.
+    Link,
+}
+
+/// The warning the materializing walks ([`copy_tree`], [`check_readable`])
+/// print for a skipped path.
+fn warn_skipped(path: &Path, why: Skip) {
+    let path = path.display();
+    match why {
+        Skip::Outside => {
+            eprintln!("warning: skipping directory `{path}` (resolves outside the checkout)")
+        }
+        Skip::Cycle => {
+            eprintln!("warning: skipping already-visited directory `{path}` (symlink cycle)")
+        }
+        Skip::Link => eprintln!(
+            "warning: skipping symlink `{path}` (target is missing or escapes the checkout)"
+        ),
+    }
+}
+
+/// The single traversal behind materialization ([`copy_tree`]) and the
+/// pre-materialize scan ([`crate::scan`]), so the scan reads exactly what the
+/// copy lands. See [`copy_tree`] for the rules: `.git` skipped, symlinks
+/// followed only inside `boundary`, cycles and non-regular files skipped.
+///
+/// Each directory is canonicalized, checked against the boundary and then
+/// listed through that checked canonical path. An IO error (an unresolvable or
+/// unlistable directory, a vanished symlink target) fails the walk rather than
+/// being skipped, so an unreadable tree can never pass for an empty one.
 pub fn walk_tree(
     src: &Path,
     boundary: &Path,
@@ -122,31 +166,31 @@ fn walk_dir(
     // Track the canonical path of every directory currently on the recursion
     // stack so a symlink pointing back at an ancestor can't spin forever.
     let src_canon = std::fs::canonicalize(src)
-        .with_context(|| format!("resolving copy source `{}`", src.display()))?;
+        .with_context(|| format!("resolving directory `{}`", src.display()))?;
     // Harden the *root*: not just symlink entries but the directory we are about
     // to descend into must stay inside the checkout (and out of `.git`). A
-    // symlinked copy root pointing outside the boundary is refused here.
+    // symlinked root pointing outside the boundary is refused here.
     if !contains(boundary, &src_canon) {
-        eprintln!(
-            "warning: skipping directory `{}` (resolves outside the checkout)",
-            src.display()
-        );
-        return Ok(());
+        return visit(Entry::Skipped {
+            path: src,
+            why: Skip::Outside,
+        });
     }
     // Detect an in-boundary symlink cycle *before* visiting the directory, so
     // a skipped cycle entry (e.g. `loop -> .`) does not leave an empty
     // placeholder directory in the materialized output.
     if stack.contains(&src_canon) {
-        eprintln!(
-            "warning: skipping already-visited directory `{}` (symlink cycle)",
-            src.display()
-        );
-        return Ok(());
+        return visit(Entry::Skipped {
+            path: src,
+            why: Skip::Cycle,
+        });
     }
     visit(Entry::Dir(rel))?;
+    let entries = std::fs::read_dir(&src_canon)
+        .with_context(|| format!("listing `{}`", src_canon.display()))?;
     stack.push(src_canon);
 
-    for entry in std::fs::read_dir(src).with_context(|| format!("listing `{}`", src.display()))? {
+    for entry in entries {
         let entry = entry?;
         let name = entry.file_name();
         if name == ".git" {
@@ -173,12 +217,10 @@ fn walk_dir(
                     }
                     // Non-regular symlink targets are skipped (see below).
                 }
-                None => {
-                    eprintln!(
-                        "warning: skipping symlink `{}` (target is missing or escapes the checkout)",
-                        from.display()
-                    );
-                }
+                None => visit(Entry::Skipped {
+                    path: &from,
+                    why: Skip::Link,
+                })?,
             }
             continue;
         }
@@ -190,10 +232,9 @@ fn walk_dir(
                 rel: &to,
             })?;
         }
-        // Non-regular files (FIFOs, sockets, device nodes) are skipped rather
-        // than copied: `std::fs::copy` would error and abort the whole install,
-        // and they carry no skill content. This mirrors `scan`, which also skips
-        // them, so the copy and the scan agree on what is materializable.
+        // Non-regular files (FIFOs, sockets, device nodes) are skipped: they
+        // carry no skill content, `std::fs::copy` would error and abort the
+        // install, and opening one to scan it could block indefinitely.
     }
 
     stack.pop();
@@ -244,6 +285,49 @@ mod tests {
         );
         std::fs::remove_dir_all(&checkout).ok();
         std::fs::remove_dir_all(&dst_root).ok();
+    }
+
+    #[test]
+    fn walk_reports_each_skip_with_its_reason() {
+        let checkout = scratch("skips");
+        let outside = scratch("skips-outside");
+        let root = checkout.join("p");
+        std::fs::create_dir_all(&root).unwrap();
+        symlink(&outside, root.join("escape")).unwrap();
+        symlink("nowhere", root.join("broken")).unwrap();
+        symlink(".", root.join("loop")).unwrap();
+
+        let skips = |src: &Path| {
+            let mut out = Vec::new();
+            walk_tree(src, &checkout, &mut |entry| {
+                if let Entry::Skipped { path, why } = entry {
+                    out.push((path.file_name().unwrap().to_owned(), why));
+                }
+                Ok(())
+            })
+            .unwrap();
+            out.sort_by(|a, b| a.0.cmp(&b.0));
+            out
+        };
+        let inside = skips(&root);
+        let escaped_root = skips(&outside);
+        std::fs::remove_dir_all(&checkout).ok();
+        std::fs::remove_dir_all(&outside).ok();
+
+        assert_eq!(
+            inside,
+            [
+                ("broken".into(), Skip::Link),
+                ("escape".into(), Skip::Link),
+                // A followed link recurses at its target, so a cycle is
+                // reported at the directory it re-enters.
+                ("p".into(), Skip::Cycle),
+            ]
+        );
+        assert_eq!(
+            escaped_root,
+            [(outside.file_name().unwrap().to_owned(), Skip::Outside)]
+        );
     }
 
     #[test]
