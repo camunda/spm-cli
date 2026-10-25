@@ -165,7 +165,7 @@ impl Upgrade {
             }
             let locked = lock.get_dependency(req);
             let selector = locked.map(|q| q.reference.version());
-            let requesters = index.requested_by(req);
+            let requesters = index.requesters(req);
             match selector {
                 Some(Version::Branch(_)) => up.via_branch = true,
                 Some(Version::Range(r)) => up.in_range.push((req.to_string(), r.clone())),
@@ -1015,6 +1015,34 @@ mod tests {
                  run `spm update`",
             ]
         );
+    }
+
+    /// A stale lock may leave `requested_by` on a name `ai.json` now declares
+    /// as another kind: the walk up stops at that declaration, which is what
+    /// to edit, instead of following its stale parents.
+    #[test]
+    fn upgrade_walk_stops_at_a_name_declared_as_any_kind() {
+        use crate::cli::index::DependencyIndex;
+        use crate::lockfile::{tests::entry, Lockfile};
+        use crate::manifest::Manifest;
+        let manifest = Manifest::parse(
+            r#"{"targets":["claude"],"plugins":{"mid":{"git":"u","tag":"v1"}}}"#,
+            std::path::Path::new("ai.json"),
+        )
+        .unwrap();
+        let mut mid = entry("https://h/mid.git", 'a', "tag:v1");
+        mid.requested_by = vec![dep("top")];
+        let lock = Lockfile {
+            skills: BTreeMap::from([(dep("mid"), mid)]),
+            ..Default::default()
+        };
+        let up = Upgrade::plan(
+            &[dep("mid")],
+            &lock,
+            &DependencyIndex::new(&manifest, &lock),
+        );
+        assert!(up.republish.is_empty(), "{:?}", up.republish);
+        assert_eq!(up.local_edits, ["mid"]);
     }
 
     #[test]

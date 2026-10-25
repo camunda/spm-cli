@@ -84,6 +84,19 @@ impl<'a> DependencyIndex<'a> {
             .filter(|l| is_transitive(DependencyKind::Skill, l, self.manifest.skills.get(name)))
             .map_or(&[], |l| l.requested_by.as_slice())
     }
+
+    /// Where a walk up from a transitive skill toward `ai.json` goes next from
+    /// `name`: the `requested_by` of its pin (of either kind) — or nowhere once
+    /// `ai.json` declares `name` (as any kind), since that declaration is what
+    /// to edit, whatever a stale `ai.lock` says requested it.
+    pub(super) fn requesters(&self, name: &str) -> &'a [DepName] {
+        if self.manifest.contains_dependency(name) {
+            return &[];
+        }
+        self.lock
+            .get_dependency(name)
+            .map_or(&[], |l| l.requested_by.as_slice())
+    }
 }
 
 /// Only skills are pulled in transitively. A name declared in `ai.json` is
@@ -175,6 +188,20 @@ mod tests {
         assert_eq!(names(index.requested_by("leaf").iter()), ["top"]);
         for name in ["top", "old", "kit", "new", "missing"] {
             assert!(index.requested_by(name).is_empty(), "{name}");
+        }
+    }
+
+    /// The walk up follows any undeclared pin's requesters and stops at every
+    /// name `ai.json` declares, of either kind.
+    #[test]
+    fn requesters_stop_at_any_declared_name() {
+        let (manifest, mut lock) = fixture();
+        lock.skills
+            .insert(dep("kit"), requested(lock.plugins["kit"].clone(), &["x"]));
+        let index = DependencyIndex::new(&manifest, &lock);
+        assert_eq!(names(index.requesters("leaf").iter()), ["top"]);
+        for name in ["top", "kit", "new", "old", "missing"] {
+            assert!(index.requesters(name).is_empty(), "{name}");
         }
     }
 
