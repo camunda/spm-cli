@@ -8,6 +8,7 @@ mod list;
 mod outdated;
 mod remove;
 mod scan;
+mod session;
 mod shorthand;
 mod status;
 mod sync;

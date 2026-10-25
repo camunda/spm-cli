@@ -1,7 +1,5 @@
+use super::session::{Access, ScopeSession};
 use super::sync::{save_and_sync, Apply};
-use crate::lockfile::Lockfile;
-use crate::manifest::Manifest;
-use crate::owned::Ownership;
 use crate::pathid::{deletion_target, existing_identity, identity, resolve, NodeId};
 use crate::scope::Scope;
 use crate::vendor;
@@ -14,12 +12,10 @@ use std::path::{Path, PathBuf};
 /// interactive numbered picker. Adding an already-configured target is a skip,
 /// not an error, so the command is safe to re-run.
 pub(super) fn target_add(scope: &Scope, vendors: Vec<String>) -> Result<()> {
-    let dir = scope.manifest_dir()?;
-
     let requested = if vendors.is_empty() {
         // Not locked yet: no command should wait on an interactive prompt. The
         // choice is re-checked against `ai.json` as read under the lock below.
-        let manifest = Manifest::load(&dir, scope)?;
+        let manifest = ScopeSession::open(scope, Access::Read)?.manifest()?;
         let available: Vec<&str> = vendor::ALL_TARGETS
             .iter()
             .copied()
@@ -42,9 +38,9 @@ pub(super) fn target_add(scope: &Scope, vendors: Vec<String>) -> Result<()> {
         vendors
     };
 
-    // Held from reading `ai.json` to the last write (see `StateLock`).
-    let state_lock = crate::links::StateLock::acquire(scope, false)?;
-    let mut manifest = Manifest::load(&dir, scope)?;
+    // Held from reading `ai.json` to the last write.
+    let session = ScopeSession::open(scope, Access::Write)?;
+    let mut manifest = session.manifest()?;
     let mut added = Vec::new();
     for v in requested {
         if manifest.targets.iter().any(|cur| cur == &v) {
@@ -61,7 +57,7 @@ pub(super) fn target_add(scope: &Scope, vendors: Vec<String>) -> Result<()> {
     }
 
     // Materialize existing skills into the newly-added vendor(s).
-    save_and_sync(scope, state_lock, &manifest, Apply::Install)?;
+    save_and_sync(session, &manifest, Apply::Install)?;
     println!("added target(s): {}", added.join(", "));
     Ok(())
 }
@@ -75,11 +71,11 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
     for v in &vendors {
         vendor::for_target(v)?;
     }
-    let dir = scope.manifest_dir()?;
     // Held from reading `ai.json` and link state until the deletions below are
-    // done (see `StateLock`).
-    let _state_lock = crate::links::StateLock::acquire(scope, false)?;
-    let mut manifest = Manifest::load(&dir, scope)?;
+    // done.
+    let session = ScopeSession::open(scope, Access::Write)?;
+    let dir = session.dir();
+    let manifest = session.manifest()?;
 
     let mut removed: Vec<String> = Vec::new();
     for v in vendors {
@@ -116,16 +112,11 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
         );
     }
 
-    let lock = Lockfile::load_or_default(&dir)?;
     // Each target's own spm output (see `crate::owned`).
-    let mut owned = Ownership::load(
-        scope,
-        &lock,
-        &crate::links::Links::load(scope)?.managed,
-        &manifest.targets,
-    )?
+    let snapshot = session.snapshot_with(manifest)?;
+    let mut manifest = snapshot.manifest;
     // Exact, so each removal below can be released before it starts.
-    .exact(&manifest.targets);
+    let mut owned = snapshot.ownership.exact(&manifest.targets);
     // Physical locations a remaining target still loads skills, plugins or
     // their metadata from (`content`), plus every location reaching them
     // depends on (`traversed`: symlinks, and dirs passed through before a
@@ -172,7 +163,7 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
     let removed_owned: Vec<_> = removed.iter().map(|t| owned.for_target(t)).collect();
     super::sync::guard_working_copies(
         scope,
-        &dir,
+        dir,
         &removed_vendors,
         &Default::default(),
         &removed_owned,
@@ -256,7 +247,7 @@ pub(super) fn target_remove(scope: &Scope, vendors: Vec<String>) -> Result<()> {
     owned.save(scope)?;
 
     manifest.targets = remaining;
-    manifest.save(&dir)?;
+    manifest.save(dir)?;
     println!("removed target(s): {}", removed.join(", "));
     Ok(())
 }
