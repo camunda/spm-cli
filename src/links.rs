@@ -419,6 +419,45 @@ mod tests {
         std::fs::remove_dir_all(&home).unwrap();
     }
 
+    /// A links file that exists but can't be read is an error naming it, not
+    /// an empty set of links.
+    #[test]
+    fn an_unreadable_links_file_is_an_error() {
+        let root = tmp("unreadable");
+        let file = root.join(FILE);
+        std::fs::create_dir_all(&file).unwrap();
+        let err = format!("{:#}", Links::load_from(&file).unwrap_err());
+        assert!(
+            err.starts_with(&format!("reading {}", file.display())),
+            "{err}"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A save that can't replace the links file fails naming it, keeps what
+    /// was there, and leaves no staging file behind.
+    #[test]
+    fn a_failed_publication_keeps_the_old_file_and_no_staging_file() {
+        let root = tmp("unpublished");
+        let file = root.join(FILE);
+        std::fs::create_dir_all(file.join("occupied")).unwrap();
+        let mut links = Links::default();
+        links.links.insert(dep("a"), "dir".into());
+        let err = format!("{:#}", links.save_to(&file).unwrap_err());
+        assert!(
+            err.starts_with(&format!("writing {}", file.display())),
+            "{err}"
+        );
+        assert!(file.join("occupied").is_dir(), "old entry kept");
+        let leftovers: Vec<_> = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "staging file removed: {leftovers:?}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     /// Saving through a symlinked links file updates what it points at and
     /// keeps the symlink.
     #[cfg(unix)]
