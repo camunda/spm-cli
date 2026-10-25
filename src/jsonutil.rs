@@ -2,7 +2,7 @@
 //! settings.local.json, Copilot's .vscode/settings.json) without clobbering keys
 //! the user set themselves, plus serde glue for spm's `--json` output.
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use serde::Serializer;
 use serde_json::{Map, Value};
 use std::path::Path;
@@ -34,13 +34,16 @@ pub fn write(path: &Path, value: &Value) -> Result<()> {
     crate::jsonfile::save(path, value)
 }
 
-/// Get (or create) a nested object field on `root`.
-pub fn object_mut<'a>(root: &'a mut Value, key: &str) -> &'a mut Map<String, Value> {
-    let map = root.as_object_mut().expect("json root is an object");
+/// Get (or create) a nested object field on `root`. Fails, rather than
+/// clobbering the user's value, when `root` or the field is not an object.
+pub fn object_mut<'a>(root: &'a mut Value, key: &str) -> Result<&'a mut Map<String, Value>> {
+    let map = root
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("expected a JSON object at the top level"))?;
     map.entry(key.to_string())
         .or_insert_with(|| Value::Object(Map::new()))
         .as_object_mut()
-        .expect("json field is an object")
+        .ok_or_else(|| anyhow!("expected `{key}` to be a JSON object"))
 }
 
 /// Remove `inner` from the object at `outer`, dropping `outer` itself if it becomes empty.
@@ -142,9 +145,13 @@ mod tests {
     #[test]
     fn object_mut_creates_then_reuses_nested_object() {
         let mut root = Value::Object(Map::new());
-        object_mut(&mut root, "outer").insert("a".into(), Value::Bool(true));
+        object_mut(&mut root, "outer")
+            .unwrap()
+            .insert("a".into(), Value::Bool(true));
         // Second call must reuse the same nested object, not clobber it.
-        object_mut(&mut root, "outer").insert("b".into(), Value::Bool(false));
+        object_mut(&mut root, "outer")
+            .unwrap()
+            .insert("b".into(), Value::Bool(false));
         let outer = root["outer"].as_object().unwrap();
         assert_eq!(outer.len(), 2);
     }

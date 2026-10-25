@@ -30,7 +30,10 @@ pub fn ensure(locked: &LockedSkill) -> Result<Ensured> {
         if repo_dir.exists() {
             std::fs::remove_dir_all(repo_dir)?;
         }
-        std::fs::create_dir_all(repo_dir.parent().unwrap())?;
+        let parent = repo_dir
+            .parent()
+            .with_context(|| format!("{} has no parent directory", repo_dir.display()))?;
+        std::fs::create_dir_all(parent)?;
         git::fetch_commit(&locked.git, &locked.commit, repo_dir)?;
         if checkout.restricted {
             std::fs::write(&checkout.marker, "")

@@ -96,6 +96,13 @@ you touch dependencies or use newer std/APIs, keep the MSRV job green (or bump
 `--cap-lints`, etc.) in `src/` just to make a build pass — fix the underlying
 issue. Formatting, clippy, and tests must all be green before merging.
 
+Both are enforced: `tests/cli/lint_policy.rs` fails on any `#[allow(..)]`,
+`#![allow(..)]`, `#[expect(..)]` or `cfg_attr`-wrapped one in `src/` outside
+`#[cfg(test)]` items, and `[lints.clippy]` in `Cargo.toml` denies
+`unwrap_used`/`expect_used` — propagate errors with `anyhow` context instead.
+Test code may unwrap (`clippy.toml`); the `tests/cli` crate is `#![cfg(test)]`
+so its shared helpers count as test code.
+
 
 ## No Such Thing as "Flaky Tests"
 

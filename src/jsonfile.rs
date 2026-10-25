@@ -86,8 +86,12 @@ impl Staged {
         dest: &Path,
         write: impl FnOnce(&mut File) -> std::io::Result<()>,
     ) -> std::io::Result<Self> {
-        let dir = dest.parent().expect("destination has a parent");
-        let name = dest.file_name().expect("destination has a file name");
+        let (Some(dir), Some(name)) = (dest.parent(), dest.file_name()) else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{} is not a file path", dest.display()),
+            ));
+        };
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());

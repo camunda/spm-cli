@@ -246,7 +246,8 @@ fn resolve_hops(p: &Path, chain: &mut Vec<PathBuf>, hops: &mut u32) -> Result<Pa
     Ok(cur)
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::*;
 

@@ -3,6 +3,10 @@
 //! Each test gets an isolated scratch dir and its own `SPM_HOME`, so the global
 //! store/vendor areas never leak between tests or into the developer's home.
 
+// Marks the whole harness as test code so clippy's `allow-*-in-tests`
+// (clippy.toml) also covers the shared helpers, not only `#[test]` fns.
+#![cfg(test)]
+
 mod add;
 mod commands;
 mod common;
@@ -15,6 +19,7 @@ mod global;
 mod json;
 mod layout;
 mod links;
+mod lint_policy;
 mod lock_only;
 mod locked;
 mod outdated;

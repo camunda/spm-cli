@@ -46,3 +46,9 @@ opt-level = 3
 lto = true
 strip = true
 codegen-units = 1
+
+# Non-test code propagates errors instead of panicking; tests may unwrap
+# (`allow-unwrap-in-tests`/`allow-expect-in-tests` in clippy.toml).
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

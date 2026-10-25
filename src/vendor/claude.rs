@@ -217,6 +217,7 @@ impl PluginHost for Claude {
             let plugin_name = crate::plugin::plugin_name(&dest, &p.name)?;
             entries.push(json!({ "name": plugin_name, "source": format!("./{}", p.name) }));
             jsonutil::object_mut(&mut root, "enabledPlugins")
+                .with_context(|| format!("updating {}", settings.display()))?
                 .insert(format!("{plugin_name}@{market}"), Value::Bool(true));
         }
 
@@ -228,7 +229,9 @@ impl PluginHost for Claude {
                 "plugins": entries,
             }),
         )?;
-        jsonutil::object_mut(&mut root, "extraKnownMarketplaces").insert(
+        jsonutil::object_mut(&mut root, "extraKnownMarketplaces")
+            .with_context(|| format!("updating {}", settings.display()))?
+            .insert(
             market.to_string(),
             json!({ "source": { "source": "directory", "path": market_dir.to_string_lossy() } }),
         );
@@ -373,13 +376,16 @@ fn patch_settings(scope: &Scope, market_dir: &Path, skills: &[MaterializedSkill]
     let market = marketplace(scope);
     let mut root = jsonutil::read_object(&path)?;
 
-    jsonutil::object_mut(&mut root, "extraKnownMarketplaces").insert(
-        market.to_string(),
-        json!({ "source": { "source": "directory", "path": market_dir.to_string_lossy() } }),
-    );
+    jsonutil::object_mut(&mut root, "extraKnownMarketplaces")
+        .with_context(|| format!("updating {}", path.display()))?
+        .insert(
+            market.to_string(),
+            json!({ "source": { "source": "directory", "path": market_dir.to_string_lossy() } }),
+        );
 
     let key = plugin_key(scope);
-    let enabled = jsonutil::object_mut(&mut root, "enabledPlugins");
+    let enabled = jsonutil::object_mut(&mut root, "enabledPlugins")
+        .with_context(|| format!("updating {}", path.display()))?;
     // Only enable the wrapper plugin if there is at least one skill.
     if skills.is_empty() {
         enabled.remove(&key);
