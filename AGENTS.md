@@ -43,7 +43,7 @@ generated source to regenerate.
 | `src/store.rs` | Manages the global store (`~/.spm/store/<repo>@<sha>`) — one clone per commit, shared across projects. |
 | `src/git.rs` | Thin wrapper over the system `git` binary (no libgit2); handles SSH/HTTPS and non-interactive auth. |
 | `src/paths.rs` | Resolves the store (fetch-cache) root; honors the `SPM_HOME` override. Vendor output is project-local, not under this root. |
-| `src/fsutil.rs` | Safe recursive copy (skips `.git`, does not follow symlinks to avoid exfiltration). |
+| `src/fsutil.rs` | `walk_tree`: the single boundary-aware traversal (skips `.git`, follows symlinks only inside the checkout, breaks cycles) behind both the safe copy (`copy_tree`) and the scan, so the gate reads exactly what lands. |
 | `src/scan.rs` | Deterministic content scanner: rule table (pattern → category → severity) flagging prompt injection, secret exfiltration, encoded/obfuscated payloads and auto-run triggers. Runs as a pre-materialize gate in `sync` and backs `spm scan`. |
 | `src/shell.rs` | Quotes names/paths interpolated into suggested commands (fix hints) so they paste as single shell arguments. |
 | `src/jsonfile.rs` | The one way spm reads/writes its JSON files (`load`/`load_or_default`/`save`, pretty + trailing newline, path-named errors) and the single atomic-replace implementation (`save_atomic`, `Staged`). |
