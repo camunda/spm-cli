@@ -1,9 +1,10 @@
-use super::common::print_json;
+use super::common::render_report;
+use super::index::DependencyIndex;
 use super::session::{Access, ScopeSession};
 use crate::git;
 use crate::ids::{DepName, LockReference};
 use crate::lockfile::{LockedSkill, Lockfile};
-use crate::manifest::{semver_of_tag, DependencyKind, Manifest, Version};
+use crate::manifest::{semver_of_tag, DependencyKind, Version};
 use crate::scope::Scope;
 use anyhow::{bail, Result};
 use serde::Serialize;
@@ -154,7 +155,7 @@ struct Upgrade {
 }
 
 impl Upgrade {
-    fn plan(requested_by: &[DepName], lock: &Lockfile, manifest: &Manifest) -> Self {
+    fn plan(requested_by: &[DepName], lock: &Lockfile, index: &DependencyIndex) -> Self {
         let mut up = Upgrade::default();
         let mut seen = std::collections::BTreeSet::new();
         let mut queue: std::collections::VecDeque<&DepName> = requested_by.iter().collect();
@@ -164,16 +165,16 @@ impl Upgrade {
             }
             let locked = lock.get_dependency(req);
             let selector = locked.map(|q| q.reference.version());
-            let local = manifest.contains_dependency(req);
-            match (locked, selector) {
-                (_, Some(Version::Branch(_))) => up.via_branch = true,
-                (_, Some(Version::Range(r))) => up.in_range.push((req.to_string(), r.clone())),
-                (Some(q), _) if !local && !q.requested_by.is_empty() => {
+            let requesters = index.requested_by(req);
+            match selector {
+                Some(Version::Branch(_)) => up.via_branch = true,
+                Some(Version::Range(r)) => up.in_range.push((req.to_string(), r.clone())),
+                _ if !requesters.is_empty() => {
                     up.republish.push((
                         req.to_string(),
-                        q.requested_by.iter().map(DepName::to_string).collect(),
+                        requesters.iter().map(DepName::to_string).collect(),
                     ));
-                    queue.extend(&q.requested_by);
+                    queue.extend(requesters);
                 }
                 _ => up.local_edits.push(req.to_string()),
             }
@@ -248,16 +249,20 @@ pub(super) fn outdated(
     let mut remotes = Remotes::default();
     let mut skills = Vec::new();
     let mut plugins = Vec::new();
-    for (kind, n, l) in lock.dependencies().filter(|(_, n, _)| wanted(n)) {
-        let spec = manifest.deps(kind).get(n);
-        let plugin = kind == DependencyKind::Plugin;
-        // Only skills are pulled in transitively.
-        let transitive = !plugin && !l.requested_by.is_empty() && spec.is_none();
-        let mut row = check(n, l, plugin, transitive, &mut remotes);
-        if transitive {
-            row.upgrade = Upgrade::plan(&l.requested_by, &lock, &manifest);
+    let index = DependencyIndex::new(&manifest, &lock);
+    for e in index.locked().filter(|e| wanted(e.name)) {
+        let (kind, l) = (e.kind, e.locked);
+        let mut row = check(
+            e.name,
+            l,
+            kind == DependencyKind::Plugin,
+            e.transitive,
+            &mut remotes,
+        );
+        if e.transitive {
+            row.upgrade = Upgrade::plan(&l.requested_by, &lock, &index);
         }
-        row.drift = drift(l, spec)?;
+        row.drift = drift(l, e.spec)?;
         match kind {
             DependencyKind::Skill => skills.push(row),
             DependencyKind::Plugin => plugins.push(row),
@@ -268,11 +273,9 @@ pub(super) fn outdated(
         skills,
         plugins,
     };
-    if json {
-        print_json(&report)?;
-    } else {
-        render_text(&report, manifest.dependencies().count());
-    }
+    render_report(&report, json, |r| {
+        render_text(r, manifest.dependencies().count())
+    })?;
     report.outcome(exit_code)
 }
 

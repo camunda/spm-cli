@@ -1,9 +1,10 @@
-use super::common::print_json;
+use super::common::render_report;
+use super::index::DependencyIndex;
 use super::session::{Access, ScopeSession};
 use crate::ids::DepName;
 use crate::links::Links;
 use crate::lockfile::{LockedSkill, Lockfile};
-use crate::manifest::{Manifest, Version};
+use crate::manifest::{DependencyKind, Manifest, Version};
 use crate::scope::Scope;
 use anyhow::Result;
 use serde::Serialize;
@@ -65,12 +66,7 @@ pub(super) fn list(scope: &Scope, json: bool) -> Result<()> {
     let lock = session.lockfile()?;
     let links = session.links()?;
     let report = collect(scope, &manifest, &lock, &links)?;
-    if json {
-        print_json(&report)
-    } else {
-        render_text(&report);
-        Ok(())
-    }
+    render_report(&report, json, render_text)
 }
 
 fn collect<'a>(
@@ -88,30 +84,28 @@ fn collect<'a>(
     if !manifest.declares_any() {
         return Ok(report);
     }
-    for (name, spec) in &manifest.skills {
-        let l = lock.skills.get(name);
+    let index = DependencyIndex::new(manifest, lock);
+    for d in index.direct(DependencyKind::Skill) {
         report.skills.push(SkillRow {
-            name,
-            git: &spec.git,
-            path: spec.path.as_deref(),
-            selector: Some(spec.version()?),
-            resolved_tag: l.and_then(|l| l.resolved_tag.as_deref()),
-            commit: l.map(|l| l.commit.as_str()),
-            installed: l.is_some(),
+            name: d.name,
+            git: &d.spec.git,
+            path: d.spec.path.as_deref(),
+            selector: Some(d.spec.version()?),
+            resolved_tag: d.locked.and_then(|l| l.resolved_tag.as_deref()),
+            commit: d.locked.map(|l| l.commit.as_str()),
+            installed: d.locked.is_some(),
             transitive: false,
             requested_by: &[],
-            linked: linked(name),
-            lock: l,
+            linked: linked(d.name),
+            lock: d.locked,
         });
     }
     // Transitively-resolved skills live in `ai.lock` but not the manifest; list
     // them under their direct requester(s) so the dependency graph is visible.
-    for (name, l) in &lock.skills {
-        if l.requested_by.is_empty() || manifest.skills.contains_key(name) {
-            continue;
-        }
+    for t in index.transitive() {
+        let l = t.locked;
         report.skills.push(SkillRow {
-            name,
+            name: t.name,
             git: &l.git,
             path: l.path.as_deref(),
             selector: Some(l.reference.version().clone()),
@@ -124,19 +118,18 @@ fn collect<'a>(
             lock: Some(l),
         });
     }
-    for (name, spec) in &manifest.plugins {
-        let l = lock.plugins.get(name);
+    for d in index.direct(DependencyKind::Plugin) {
         report.plugins.push(PluginRow {
-            name,
-            git: &spec.git,
-            path: spec.path.as_deref(),
-            selector: Some(spec.version()?),
-            resolved_tag: l.and_then(|l| l.resolved_tag.as_deref()),
-            commit: l.map(|l| l.commit.as_str()),
-            installed: l.is_some(),
-            bundled_skills: l.map(|l| l.bundled_skills.as_slice()).unwrap_or(&[]),
-            linked: linked(name),
-            lock: l,
+            name: d.name,
+            git: &d.spec.git,
+            path: d.spec.path.as_deref(),
+            selector: Some(d.spec.version()?),
+            resolved_tag: d.locked.and_then(|l| l.resolved_tag.as_deref()),
+            commit: d.locked.map(|l| l.commit.as_str()),
+            installed: d.locked.is_some(),
+            bundled_skills: d.locked.map(|l| l.bundled_skills.as_slice()).unwrap_or(&[]),
+            linked: linked(d.name),
+            lock: d.locked,
         });
     }
     Ok(report)

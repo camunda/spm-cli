@@ -1,4 +1,4 @@
-use super::session::{Access, ScopeSession};
+use super::session::{Access, ScopeSession, ScopeSnapshot};
 use crate::ids::DepName;
 use crate::links::{Linked, Links};
 use crate::lockfile::{LockedSkill, Lockfile, Satisfied};
@@ -69,7 +69,7 @@ pub(super) fn sync(
     } else {
         LockMode::Write(apply)
     };
-    plan(&session, &manifest, links, force_refresh, only, mode)?.apply(scope)
+    plan(&session, &manifest, links, None, force_refresh, only, mode)?.apply(scope)
 }
 
 /// Sync with an edited set of `spm link` overrides, persisting them only once
@@ -82,7 +82,16 @@ pub(super) fn sync(
 /// [`Access::Links`].
 pub(super) fn sync_with_links(session: ScopeSession, links: Links) -> Result<usize> {
     let manifest = session.manifest()?;
-    plan(&session, &manifest, links, false, None, LockMode::Links)?.apply(session.scope())
+    plan(
+        &session,
+        &manifest,
+        links,
+        None,
+        false,
+        None,
+        LockMode::Links,
+    )?
+    .apply(session.scope())
 }
 
 /// How a sync may treat `ai.lock`.
@@ -161,6 +170,7 @@ pub(super) fn save_and_sync(
         &session,
         &manifest,
         session.links()?,
+        None,
         false,
         None,
         LockMode::Write(apply),
@@ -267,10 +277,15 @@ impl Drop for Snapshots {
 /// when they were edited (`LockMode::Links`) — and the caller holds it until
 /// the plan has been applied (it is only borrowed here, so no failure can
 /// release it early), so no other command changes link state in between.
+///
+/// `loaded` is the scope's state already read under `session` (or why it
+/// couldn't be), used instead of reading `ai.lock` and ownership again; a
+/// load error fails the plan just where reading them would have.
 fn plan(
     session: &ScopeSession,
     manifest: &Manifest,
     mut links: Links,
+    loaded: Option<Result<&ScopeSnapshot, &anyhow::Error>>,
     force_refresh: bool,
     only: Option<&str>,
     mode: LockMode,
@@ -334,7 +349,19 @@ fn plan(
             mode.fix_hint(scope)
         );
     }
-    let mut prev = session.lockfile()?;
+    let (mut prev, previously_owned) = match loaded {
+        Some(Ok(state)) => (state.lock.clone(), state.ownership.clone()),
+        Some(Err(e)) => bail!("{e:#}"),
+        None => {
+            let prev = session.lockfile()?;
+            // What spm owns in each target before this sync (see
+            // `crate::owned`): global/shared-dir vendors share a directory
+            // with the user's own skills, so they purge only entries spm put
+            // there that are no longer wanted.
+            let owned = session.ownership(&prev, &links, &manifest.targets)?;
+            (prev, owned)
+        }
+    };
     // `--locked` only: every way `ai.lock` disagrees with `ai.json`.
     let mut mismatches: Vec<String> = Vec::new();
     // `--locked` only: direct skills that failed the pin check and so are not
@@ -343,11 +370,6 @@ fn plan(
     // `LockMode::Check` only: entries whose store checkout is missing, so what
     // they contribute to `ai.lock` could not be verified offline.
     let mut unverified: Vec<String> = Vec::new();
-
-    // What spm owns in each target before this sync (see `crate::owned`):
-    // global/shared-dir vendors share a directory with the user's own skills,
-    // so they purge only entries spm put there that are no longer wanted.
-    let previously_owned = session.ownership(&prev, &links, &manifest.targets)?;
 
     // Stable, path-independent project id: reuse the locked one, else mint & persist.
     let id = if prev.id.is_empty() {
@@ -823,11 +845,26 @@ pub(super) struct LockCheck {
 
 /// Judge `ai.lock` against `manifest` by the exact `spm install --locked`
 /// rules, without fetching, scanning, printing or writing anything (`spm
-/// doctor`). `ai.lock` must exist. `manifest` must have been read from
-/// `session`, which the caller keeps holding for its further reads.
-pub(super) fn check_lock(session: &ScopeSession, manifest: &Manifest) -> Result<LockCheck> {
-    let links = session.links()?;
-    let plan = plan(session, manifest, links, false, None, LockMode::Check)?;
+/// doctor`). `ai.lock` must exist. `manifest` and `state` (or the error
+/// loading it) must have been read from `session`, which the caller keeps
+/// holding for its further reads; an unreadable links file is the caller's to
+/// report first.
+pub(super) fn check_lock(
+    session: &ScopeSession,
+    manifest: &Manifest,
+    state: Result<&ScopeSnapshot, &anyhow::Error>,
+) -> Result<LockCheck> {
+    // A check never resolves links, so none are needed until `state` is.
+    let links = state.map_or_else(|_| Links::default(), |s| s.links.clone());
+    let plan = plan(
+        session,
+        manifest,
+        links,
+        Some(state),
+        false,
+        None,
+        LockMode::Check,
+    )?;
     Ok(plan.verdict)
 }
 
@@ -1825,9 +1862,17 @@ mod tests {
             Manifest::parse(r#"{"targets": ["claude"]}"#, &root.join("ai.json")).unwrap();
         let err = |access, mode| {
             let session = ScopeSession::open(&scope, access).unwrap();
-            let err = plan(&session, &manifest, Links::default(), false, None, mode)
-                .err()
-                .unwrap();
+            let err = plan(
+                &session,
+                &manifest,
+                Links::default(),
+                None,
+                false,
+                None,
+                mode,
+            )
+            .err()
+            .unwrap();
             format!("{err:#}")
         };
         for mode in [

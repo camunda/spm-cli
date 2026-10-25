@@ -6,7 +6,8 @@
 //! never writes `ai.json`, `ai.lock`, links, the store or any target, and
 //! contacts remotes only with `--online`.
 
-use super::common::print_json;
+use super::common::{render_report, scope_header};
+use super::index::DependencyIndex;
 use super::session::{Access, ScopeSession};
 use super::{status, sync};
 use crate::git::{self, Reach};
@@ -17,7 +18,7 @@ use crate::manifest::Manifest;
 use crate::policy::Policy;
 use crate::scope::Scope;
 use crate::{gitignore, paths, scan, skillcheck, vendor};
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -102,11 +103,7 @@ pub(super) fn doctor(scope: &Scope, online: bool, json: bool) -> Result<()> {
         warnings: count(Level::Warn),
         checks,
     };
-    if json {
-        print_json(&report)?;
-    } else {
-        render_text(&report);
-    }
+    render_report(&report, json, render_text)?;
     match report.errors {
         0 => Ok(()),
         1 => bail!("spm doctor found 1 problem"),
@@ -115,7 +112,7 @@ pub(super) fn doctor(scope: &Scope, online: bool, json: bool) -> Result<()> {
 }
 
 fn render_text(report: &DoctorReport) {
-    println!("{}: {}", report.scope, report.root.display());
+    println!("{}", scope_header(report.scope, &report.root));
     for c in &report.checks {
         let mark = match c.status {
             Level::Ok => "✓",
@@ -198,11 +195,18 @@ fn diagnose(scope: &Scope, root: &Path, online: bool) -> Vec<Check> {
     checks.push(check_targets(scope, &manifest));
     checks.push(check_machine_policy());
 
+    // The rest of the state, each part read once (in the canonical order)
+    // and reported on by every check that can run with what did load.
+    let lock = session.lockfile();
     let links = session.links();
     if let Ok(links) = &links {
-        checks.push(check_policy(root, &manifest, links));
+        checks.push(check_policy(root, &manifest, links, lock.as_ref().ok()));
     }
-    checks.extend(check_links(scope, &manifest, links));
+    checks.extend(check_links(scope, &manifest, links.as_ref()));
+    // Snapshot the remotes under the lock; they are probed once it's released.
+    let remotes = (online && policy_active).then(|| remote_urls(&manifest, lock.as_ref().ok()));
+    let links_error = links.as_ref().err().map(|e| anyhow!("{e:#}"));
+    let state = session.snapshot_from(manifest.clone(), lock, links);
 
     let lockfile = Lockfile::path_in(root);
     let declares_any = manifest.declares_any();
@@ -220,7 +224,12 @@ fn diagnose(scope: &Scope, root: &Path, online: bool) -> Vec<Check> {
             Check::ok("lockfile", "no ai.lock (nothing declared yet)")
         });
     } else {
-        match sync::check_lock(&session, &manifest) {
+        // Like `install --locked`, the check reads links before `ai.lock`.
+        let verdict = match links_error {
+            Some(e) => Err(e),
+            None => sync::check_lock(&session, &manifest, state.as_ref()),
+        };
+        match verdict {
             Ok(verdict) => checks.extend(lock_checks(scope, verdict)),
             Err(e) => checks.push(
                 Check::error("lockfile", format!("ai.lock can't be checked: {e:#}")).fix(format!(
@@ -231,7 +240,7 @@ fn diagnose(scope: &Scope, root: &Path, online: bool) -> Vec<Check> {
         }
     }
 
-    match status::collect(&session) {
+    match state.and_then(|state| status::collect(&session, &state)) {
         Ok(report) => {
             checks.extend(materialization_checks(scope, &report));
             if !scope.is_global() {
@@ -244,9 +253,8 @@ fn diagnose(scope: &Scope, root: &Path, online: bool) -> Vec<Check> {
             format!("can't inspect the targets: {e:#}"),
         )),
     }
-    // Snapshot the remotes under the lock, then release it before the slow
-    // network probes so a concurrent install isn't blocked on them.
-    let remotes = (online && policy_active).then(|| remote_urls(root, &manifest));
+    // Release the lock before the slow network probes so a concurrent install
+    // isn't blocked on them.
     drop(session);
 
     if let Some(c) = check_ssh_agent(&manifest) {
@@ -426,7 +434,7 @@ fn check_machine_policy() -> Check {
 
 /// Every declared source, linked dir and locked transitive source against the
 /// effective policy — the same rule `spm install` enforces before fetching.
-fn check_policy(root: &Path, manifest: &Manifest, links: &Links) -> Check {
+fn check_policy(root: &Path, manifest: &Manifest, links: &Links, lock: Option<&Lockfile>) -> Check {
     let policy = match Policy::load(manifest, &Manifest::path_in(root)) {
         Ok(p) => p,
         Err(e) => {
@@ -443,13 +451,10 @@ fn check_policy(root: &Path, manifest: &Manifest, links: &Links) -> Check {
     // `install --locked` fetches locked transitive pins once their root is,
     // so they are gated too, even when doctor can't walk that root. An
     // unreadable lock is reported by the lockfile check.
-    if let Ok(lock) = Lockfile::load_or_default(root) {
-        for (kind, name, l) in lock.dependencies() {
-            if manifest.contains_dependency(name) {
-                continue;
-            }
-            if let Err(e) = policy.check(&l.git) {
-                denied.push(format!("locked {kind} `{name}`: {e:#}"));
+    if let Some(lock) = lock {
+        for l in DependencyIndex::new(manifest, lock).undeclared() {
+            if let Err(e) = policy.check(&l.locked.git) {
+                denied.push(format!("locked {} `{}`: {e:#}", l.kind, l.name));
             }
         }
     }
@@ -462,7 +467,11 @@ fn check_policy(root: &Path, manifest: &Manifest, links: &Links) -> Check {
     }
 }
 
-fn check_links(scope: &Scope, manifest: &Manifest, links: Result<Links>) -> Vec<Check> {
+fn check_links(
+    scope: &Scope,
+    manifest: &Manifest,
+    links: Result<&Links, &anyhow::Error>,
+) -> Vec<Check> {
     let links = match links {
         Ok(l) => l,
         Err(e) => {
@@ -818,12 +827,12 @@ fn check_ssh_agent(manifest: &Manifest) -> Option<Check> {
 
 /// `--online`: every remote in ai.json and ai.lock answers `git ls-remote`.
 /// Every remote declared in `ai.json` or pinned in `ai.lock`.
-fn remote_urls(root: &Path, manifest: &Manifest) -> BTreeSet<String> {
+fn remote_urls(manifest: &Manifest, lock: Option<&Lockfile>) -> BTreeSet<String> {
     let mut urls: BTreeSet<String> = manifest
         .dependencies()
         .map(|(_, _, s)| s.git.clone())
         .collect();
-    if let Ok(lock) = Lockfile::load_or_default(root) {
+    if let Some(lock) = lock {
         urls.extend(lock.dependencies().map(|(_, _, l)| l.git.clone()));
     }
     urls

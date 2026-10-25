@@ -1,6 +1,8 @@
-use super::common::print_json;
+use super::common::{render_report, scope_header};
+use super::index::DependencyIndex;
 use super::session::{Access, ScopeSession, ScopeSnapshot};
 use crate::ids::DepName;
+use crate::manifest::DependencyKind;
 use crate::scope::Scope;
 use crate::vendor::{self, VendorStatus};
 use anyhow::{bail, Result};
@@ -124,35 +126,34 @@ impl StatusReport {
 /// doubles as an automated gate. With `json`, the report is printed *before*
 /// the non-zero exit, so a consumer gets both the data and the status.
 pub(super) fn status(scope: &Scope, json: bool) -> Result<()> {
-    let report = collect(&ScopeSession::open(scope, Access::Read)?)?;
-    if json {
-        print_json(&report)?;
-    } else {
-        render_text(&report);
-    }
+    let session = ScopeSession::open(scope, Access::Read)?;
+    let report = collect(&session, &session.snapshot()?)?;
+    render_report(&report, json, render_text)?;
     report.outcome()
 }
 
-pub(super) fn collect(session: &ScopeSession) -> Result<StatusReport> {
+/// The report on `state`, as loaded by `session` (which `doctor` shares).
+pub(super) fn collect(session: &ScopeSession, state: &ScopeSnapshot) -> Result<StatusReport> {
     let scope = session.scope();
     let ScopeSnapshot {
         manifest,
         lock,
         links,
         ownership,
-    } = session.snapshot()?;
+    } = state;
+    let index = DependencyIndex::new(manifest, lock);
     // Plugin-bundled skills are flattened into every vendor's skills dir just
     // like standalone skills, so they belong in `expected` — otherwise `status`
     // would flag them as stale (present on disk, not declared). A linked
     // plugin contributes its working tree's bundled skills instead.
-    let expected = links.effective_skill_names(&lock);
+    let expected = links.effective_skill_names(lock);
     let links = links
         .links
-        .into_iter()
+        .iter()
         .map(|(name, path)| LinkStatus {
-            declared: manifest.contains_dependency(&name),
-            name,
-            path,
+            declared: manifest.contains_dependency(name),
+            name: name.clone(),
+            path: path.clone(),
         })
         .collect();
     // Warn when a skill name is materialized in *both* scopes: the vendor
@@ -174,11 +175,14 @@ pub(super) fn collect(session: &ScopeSession) -> Result<StatusReport> {
     // was declared but never resolved/installed; comparing against the on-disk
     // marketplace (via each vendor's `status_plugins`) catches a deleted
     // `.spm/claude-plugins` dir or a fresh worktree that was never installed.
-    let declared_plugins: Vec<DepName> = manifest.plugins.keys().cloned().collect();
-    let unlocked_plugins: Vec<DepName> = declared_plugins
-        .iter()
-        .filter(|n| !lock.plugins.contains_key(*n))
-        .cloned()
+    let declared_plugins: Vec<DepName> = index
+        .direct(DependencyKind::Plugin)
+        .map(|d| d.name.clone())
+        .collect();
+    let unlocked_plugins: Vec<DepName> = index
+        .direct(DependencyKind::Plugin)
+        .filter(|d| d.locked.is_none())
+        .map(|d| d.name.clone())
         .collect();
 
     let mut targets = Vec::new();
@@ -223,20 +227,13 @@ pub(super) fn collect(session: &ScopeSession) -> Result<StatusReport> {
     }
 
     // Annotate a transitively-resolved skill with its requester(s) so `status`
-    // surfaces the dependency graph, not just names. A name declared directly
-    // in `ai.json` is a direct skill even if a stale or hand-edited `ai.lock`
-    // left a `requested_by` on it, so exclude manifest skills — matching
-    // `spm list`.
+    // surfaces the dependency graph, not just names — classified as `spm list`
+    // does.
     let expected: Vec<ExpectedSkill> = expected
         .into_iter()
-        .map(|name| {
-            let requested_by = lock
-                .skills
-                .get(&name)
-                .filter(|_| !manifest.skills.contains_key(&name))
-                .map(|l| l.requested_by.clone())
-                .unwrap_or_default();
-            ExpectedSkill { name, requested_by }
+        .map(|name| ExpectedSkill {
+            requested_by: index.requested_by(&name).to_vec(),
+            name,
         })
         .collect();
 
@@ -271,7 +268,7 @@ pub(super) fn collect(session: &ScopeSession) -> Result<StatusReport> {
 }
 
 fn render_text(report: &StatusReport) {
-    println!("{}: {}", report.scope, report.root.display());
+    println!("{}", scope_header(report.scope, &report.root));
     let names: Vec<&str> = report.targets.iter().map(|t| t.target.as_str()).collect();
     println!("targets: {}", names.join(", "));
     for c in &report.collisions {

@@ -83,6 +83,27 @@ pub(crate) fn print_json<T: Serialize>(body: &T) -> Result<()> {
     Ok(())
 }
 
+/// Print a report as `--json` or as human text — the one choice every
+/// reporting command makes. Rendering never decides the exit status: callers
+/// derive it from the report afterwards, the same for both formats.
+pub(super) fn render_report<T: Serialize>(
+    report: &T,
+    json: bool,
+    text: impl FnOnce(&T),
+) -> Result<()> {
+    if json {
+        print_json(report)
+    } else {
+        text(report);
+        Ok(())
+    }
+}
+
+/// The first line of a text report about one scope: `<scope>: <root>`.
+pub(super) fn scope_header(scope: &str, root: &Path) -> String {
+    format!("{scope}: {}", root.display())
+}
+
 /// The opt-in protocol controls shared by every command that can contact a git
 /// remote: those that run a `sync` (`add`, `install`, `update`, `remove`,
 /// `target add`) plus the read-only `outdated` and `doctor`. Flattened into each of those and
