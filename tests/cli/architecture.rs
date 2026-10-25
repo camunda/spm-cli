@@ -21,6 +21,10 @@
 //! (`crate::$m`, a bare `crate` passed to a macro) and relative paths in a
 //! `macro_rules!` body (`super::`, `self::`, `$root::`), which resolve
 //! wherever the macro is invoked.
+//!
+//! The graph must also stay acyclic (a DAG): any cycle fails, reported as the
+//! group of modules it binds (a strongly connected component). Every module
+//! the tables name must exist, so a rename cannot leave a check vacuous.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -141,14 +145,6 @@ const LEAVES: &[&str] = &[
 
 /// The only modules allowed to depend on `cli`: it is the top of the stack.
 const CLI_DEPENDENTS: &[&str] = &["main"];
-
-/// Dependency cycles tolerated today, as the module groups they bind: each
-/// group is a strongly connected component of the graph (every module in it
-/// reaches every other). This list may only shrink: a group that grows or
-/// merges with another, or a new cyclic group, fails as a layering regression
-/// to fix, and a group that splits or shrinks fails as stale until the list is
-/// shrunk to match.
-const KNOWN_CYCLIC_GROUPS: &[&[&str]] = &[];
 
 const TABLE: &str = "tests/cli/architecture.rs";
 
@@ -776,8 +772,16 @@ fn module_of(rel: &Path) -> (String, usize) {
     (parts[0].clone(), depth)
 }
 
-/// The actual graph of `src/`, with the first `file:line` of every edge.
-fn source_graph() -> (Graph, BTreeMap<(String, String), String>) {
+/// The actual module graph of `src/`.
+struct SourceGraph {
+    /// Every top-level module (`main` included).
+    modules: BTreeSet<String>,
+    graph: Graph,
+    /// The first `file:line` of every edge.
+    sites: BTreeMap<(String, String), String>,
+}
+
+fn source_graph() -> SourceGraph {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let src = root.join("src");
     let modules: BTreeSet<String> = shipped_files(&src.join("main.rs"))
@@ -788,7 +792,12 @@ fn source_graph() -> (Graph, BTreeMap<(String, String), String>) {
         modules.contains("main") && modules.contains("cli") && modules.len() > 10,
         "scan found too few modules: {modules:?}"
     );
-    graph_of_crate(root)
+    let (graph, sites) = graph_of_crate(root);
+    SourceGraph {
+        modules,
+        graph,
+        sites,
+    }
 }
 
 /// The graph of the crate at `root` (its `src/main.rs` and the module files a
@@ -923,50 +932,31 @@ fn sccs(graph: &Graph) -> Vec<BTreeSet<String>> {
     tarjan.out
 }
 
-/// Every way the cyclic groups of `graph` (its strongly connected components
-/// of two or more modules) differ from `known`.
-fn cycle_violations(graph: &Graph, known: &[&[&str]]) -> Vec<String> {
-    let known: Vec<BTreeSet<String>> = known
+/// The dependency cycles of `graph`, as the module groups they bind: its
+/// strongly connected components of two or more modules (every module in one
+/// reaches every other). Self-edges never occur: a module's references to
+/// itself are not edges.
+fn cycles(graph: &Graph) -> Vec<BTreeSet<String>> {
+    sccs(graph).into_iter().filter(|g| g.len() > 1).collect()
+}
+
+/// The names in `lists` (`(list name, names)`) that are not in `modules`.
+fn unknown_names(modules: &BTreeSet<String>, lists: &[(&str, Vec<&str>)]) -> Vec<String> {
+    lists
         .iter()
-        .map(|g| g.iter().map(|m| m.to_string()).collect())
-        .collect();
-    let actual: Vec<BTreeSet<String>> = sccs(graph).into_iter().filter(|g| g.len() > 1).collect();
-    let mut errors = Vec::new();
-    for group in actual.iter().filter(|g| !known.contains(g)) {
-        if known.iter().any(|k| group.is_subset(k)) {
-            continue; // what is left of a split group: reported below as stale
-        }
-        let inside: Vec<_> = known.iter().filter(|k| k.is_subset(group)).collect();
-        errors.push(if inside.is_empty() {
-            format!(
-                "new dependency cycle among {group:?}, not in KNOWN_CYCLIC_GROUPS ({TABLE}).\n\
-                 Break it (move the shared code down a layer); KNOWN_CYCLIC_GROUPS may only shrink."
-            )
-        } else {
-            format!(
-                "known cyclic group(s) {inside:?} grew into the cycle {group:?} \
-                 (KNOWN_CYCLIC_GROUPS, {TABLE}).\nBreak the new dependency; \
-                 KNOWN_CYCLIC_GROUPS may only shrink."
-            )
-        });
-    }
-    for group in known.iter().filter(|k| !actual.contains(k)) {
-        if actual.iter().any(|g| group.is_subset(g)) {
-            continue; // reported above as grown
-        }
-        let now: Vec<_> = actual.iter().filter(|g| !g.is_disjoint(group)).collect();
-        errors.push(format!(
-            "KNOWN_CYCLIC_GROUPS ({TABLE}) lists {group:?}, which is no longer a cycle \
-             (cyclic groups among these modules now: {now:?}).\nShrink KNOWN_CYCLIC_GROUPS to match."
-        ));
-    }
-    errors
+        .flat_map(|(list, names)| {
+            names
+                .iter()
+                .filter(|n| !modules.contains(**n))
+                .map(move |n| format!("  `{n}` in {list}"))
+        })
+        .collect()
 }
 
 #[test]
 fn module_graph_matches_the_allowed_edges() {
-    let (actual, sites) = source_graph();
-    let (actual, allowed) = (edges(&actual), edges(&allowed_graph()));
+    let SourceGraph { graph, sites, .. } = source_graph();
+    let (actual, allowed) = (edges(&graph), edges(&allowed_graph()));
     let new: Vec<String> = actual
         .difference(&allowed)
         .map(|e| format!("  {} -> {}  ({})", e.0, e.1, sites[e]))
@@ -992,7 +982,7 @@ fn module_graph_matches_the_allowed_edges() {
 
 #[test]
 fn module_graph_keeps_its_invariants() {
-    let (graph, sites) = source_graph();
+    let SourceGraph { graph, sites, .. } = source_graph();
     let site = |f: &str, t: &str| sites[&(f.to_string(), t.to_string())].clone();
     for leaf in LEAVES {
         let deps = graph.get(*leaf).cloned().unwrap_or_default();
@@ -1009,8 +999,48 @@ fn module_graph_keeps_its_invariants() {
             site(from, "cli")
         );
     }
-    let errors = cycle_violations(&graph, KNOWN_CYCLIC_GROUPS);
-    assert!(errors.is_empty(), "{}", errors.join("\n"));
+    let cycles: Vec<String> = cycles(&graph)
+        .iter()
+        .map(|group| {
+            let inside: Vec<String> = group
+                .iter()
+                .flat_map(|f| graph[f].intersection(group).map(move |t| (f, t)))
+                .map(|(f, t)| format!("    {f} -> {t}  ({})", site(f, t)))
+                .collect();
+            format!("  {group:?}:\n{}", inside.join("\n"))
+        })
+        .collect();
+    assert!(
+        cycles.is_empty(),
+        "the module graph must stay acyclic, but these modules depend on each other \
+         in a cycle:\n{}\nBreak it: move the shared code down a layer.",
+        cycles.join("\n")
+    );
+}
+
+/// Every module named by the tables above exists, so a rename or removal can
+/// never leave a check silently guarding nothing.
+#[test]
+fn module_lists_name_real_modules() {
+    let SourceGraph { modules, .. } = source_graph();
+    let edges = ALLOWED_EDGES
+        .iter()
+        .flat_map(|(from, tos)| std::iter::once(*from).chain(tos.iter().copied()))
+        .collect();
+    let unknown = unknown_names(
+        &modules,
+        &[
+            ("ALLOWED_EDGES", edges),
+            ("LEAVES", LEAVES.to_vec()),
+            ("CLI_DEPENDENTS", CLI_DEPENDENTS.to_vec()),
+        ],
+    );
+    assert!(
+        unknown.is_empty(),
+        "{TABLE} names modules that do not exist under src/:\n{}\n\
+         Rename or remove them so the checks keep guarding real modules.",
+        unknown.join("\n")
+    );
 }
 
 #[test]
@@ -1632,60 +1662,40 @@ fn graph_of(edges: &[(&str, &str)]) -> Graph {
 }
 
 #[test]
-fn cycle_check_catches_a_known_group_that_grew() {
-    // Known `a <-> b` plus new `b -> c -> a`: the longer cycle reuses a known
-    // edge, so only the component view sees it.
-    let graph = graph_of(&[("a", "b"), ("b", "a"), ("b", "c"), ("c", "a")]);
-    let errors = cycle_violations(&graph, &[&["a", "b"]]);
-    assert_eq!(errors.len(), 1, "{errors:?}");
-    assert!(errors[0].contains("grew"), "{errors:?}");
-    // Two known groups merged by a new edge each way.
+fn cycle_check_reports_each_cycle_as_its_module_group() {
+    // A three-module cycle is one group, a two-module one another; the
+    // acyclic tail (`c -> x`) and a module reached from both stay out.
     let graph = graph_of(&[
         ("a", "b"),
-        ("b", "a"),
-        ("c", "d"),
-        ("d", "c"),
         ("b", "c"),
-        ("d", "a"),
+        ("c", "a"),
+        ("c", "x"),
+        ("d", "e"),
+        ("e", "d"),
+        ("e", "x"),
     ]);
-    let errors = cycle_violations(&graph, &[&["a", "b"], &["c", "d"]]);
-    assert_eq!(errors.len(), 1, "{errors:?}");
-    assert!(errors[0].contains("grew"), "{errors:?}");
-}
-
-#[test]
-fn cycle_check_catches_a_new_cycle() {
-    let graph = graph_of(&[("a", "b"), ("b", "a"), ("c", "d"), ("d", "e"), ("e", "c")]);
-    let errors = cycle_violations(&graph, &[&["a", "b"]]);
-    assert_eq!(errors.len(), 1, "{errors:?}");
-    assert!(errors[0].contains("new dependency cycle"), "{errors:?}");
-}
-
-#[test]
-fn cycle_check_reports_a_split_or_broken_group_as_stale() {
-    let graph = graph_of(&[("a", "b"), ("b", "a"), ("c", "d"), ("d", "c")]);
-    assert!(cycle_violations(&graph, &[&["a", "b"], &["c", "d"]]).is_empty());
-    // `{a, b, c}` split: only `a <-> b` is left.
-    let graph = graph_of(&[("a", "b"), ("b", "a"), ("b", "c")]);
-    let errors = cycle_violations(&graph, &[&["a", "b", "c"]]);
-    assert_eq!(errors.len(), 1, "{errors:?}");
-    assert!(
-        errors[0].contains("Shrink KNOWN_CYCLIC_GROUPS"),
-        "{errors:?}"
-    );
-    // `{a, b}` broken entirely.
-    let errors = cycle_violations(&graph_of(&[("a", "b")]), &[&["a", "b"]]);
-    assert_eq!(errors.len(), 1, "{errors:?}");
-    assert!(
-        errors[0].contains("Shrink KNOWN_CYCLIC_GROUPS"),
-        "{errors:?}"
-    );
+    let set =
+        |names: &[&str]| -> BTreeSet<String> { names.iter().map(|n| n.to_string()).collect() };
+    assert_eq!(cycles(&graph), [set(&["a", "b", "c"]), set(&["d", "e"])]);
 }
 
 #[test]
 fn cycle_check_passes_an_acyclic_graph() {
     let graph = graph_of(&[("a", "b"), ("b", "c"), ("a", "c")]);
-    assert!(cycle_violations(&graph, &[]).is_empty());
+    assert!(cycles(&graph).is_empty());
+}
+
+#[test]
+fn unknown_names_reports_names_that_are_not_modules() {
+    let modules: BTreeSet<String> = ["cli", "main", "paths"].map(String::from).into();
+    let unknown = unknown_names(
+        &modules,
+        &[
+            ("LEAVES", vec!["paths", "pahts"]),
+            ("CLI_DEPENDENTS", vec!["main"]),
+        ],
+    );
+    assert_eq!(unknown, ["  `pahts` in LEAVES"]);
 }
 
 #[test]
