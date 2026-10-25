@@ -228,8 +228,8 @@ pub trait PluginHost {
     fn deregister_plugins(&self, scope: &Scope) -> Result<()>;
 }
 
-/// Delete each entry in `paths`, ignoring absent ones and leaving a regular
-/// file alone. A symlink is removed itself, never followed.
+/// Delete each entry in `paths`, ignoring absent ones and leaving anything but
+/// a directory or symlink alone. A symlink is removed itself, never followed.
 pub fn remove_paths(paths: &[PathBuf]) -> Result<()> {
     for p in paths {
         crate::fsutil::remove_managed_path(p)

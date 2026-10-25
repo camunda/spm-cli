@@ -37,7 +37,8 @@ pub fn copy_skills_into(dir: &Path, skills: &[MaterializedSkill], claim: Claim) 
 /// Remove `dir/<name>` for each managed `name` (a symlink there is unlinked,
 /// never followed), ignoring absent entries and leaving every other entry in
 /// `dir` (e.g. the user's own skills) untouched.
-/// Each present entry is `claim`ed right before it is removed.
+/// Each [managed entry](fsutil::is_managed_entry) is `claim`ed right before it
+/// is removed; anything else at a managed name is neither claimed nor removed.
 pub fn remove_managed<'a>(
     dir: &Path,
     names: impl Iterator<Item = &'a DepName>,
@@ -45,9 +46,7 @@ pub fn remove_managed<'a>(
 ) -> Result<()> {
     for name in names {
         let target = dir.join(name);
-        // Judged without following a symlink, like the removal itself; a
-        // regular file is the user's, not a managed entry, and is left alone.
-        if std::fs::symlink_metadata(&target).is_ok_and(|m| !m.is_file()) {
+        if fsutil::is_managed_entry(&target) {
             claim(name)?;
             fsutil::remove_managed_path(&target)
                 .with_context(|| format!("removing {}", target.display()))?;
@@ -125,6 +124,34 @@ mod tests {
             std::fs::read_to_string(target.join("SKILL.md")).unwrap(),
             "keep\n"
         );
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    /// A special file (here a FIFO) at a managed name is not something spm
+    /// wrote: cleanup neither claims nor removes it, and does not fail on it.
+    #[cfg(unix)]
+    #[test]
+    fn special_files_at_managed_names_are_neither_claimed_nor_removed() {
+        let tmp = scratch("special");
+        let dir = tmp.join("skills");
+        std::fs::create_dir_all(&dir).unwrap();
+        let fifo = dir.join("greet");
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success());
+
+        let mut claimed = Vec::new();
+        remove_managed(&dir, [&dep("greet")].into_iter(), &mut |n| {
+            claimed.push(n.to_string());
+            Ok(())
+        })
+        .unwrap();
+        assert!(claimed.is_empty(), "not claimed: {claimed:?}");
+        assert!(std::fs::symlink_metadata(&fifo).is_ok(), "left in place");
+        crate::vendor::remove_paths(std::slice::from_ref(&fifo)).unwrap();
+        assert!(std::fs::symlink_metadata(&fifo).is_ok(), "left in place");
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 

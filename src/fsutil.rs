@@ -49,14 +49,15 @@ pub(crate) fn contains(boundary: &Path, candidate: &Path) -> bool {
 /// Remove the directory tree or symlink at `path`, returning whether anything
 /// was there. Presence is judged without following symlinks, and a symlink
 /// (to anything, or dangling) is removed itself, never its target, so a managed
-/// entry that was replaced by a link can't route a cleanup elsewhere. A regular
-/// file is refused with an error: spm only ever writes directories at these
-/// paths, so a file there is the user's and is never silently deleted.
+/// entry that was replaced by a link can't route a cleanup elsewhere. Any other
+/// file (regular, FIFO, socket, ...) is refused with an error: spm only ever
+/// writes directories at these paths, so a file there is the user's and is
+/// never silently deleted.
 pub fn remove_path_if_present(path: &Path) -> std::io::Result<bool> {
     match std::fs::symlink_metadata(path) {
         Ok(_) => {
             // `remove_dir_all` unlinks a symlink itself on every platform and
-            // fails on a regular file.
+            // fails on any other non-directory.
             std::fs::remove_dir_all(path)?;
             Ok(true)
         }
@@ -65,14 +66,22 @@ pub fn remove_path_if_present(path: &Path) -> std::io::Result<bool> {
     }
 }
 
+/// Whether `path` holds something spm may have written there: a directory, or
+/// a symlink (judged without following it). Anything else — a regular file, a
+/// FIFO, a socket, a device — is never spm's.
+pub fn is_managed_entry(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir() || m.file_type().is_symlink())
+}
+
 /// Like [`remove_path_if_present`], for a cleanup that must never fail on the
-/// user's own data: a regular file at `path` is left alone (reported as
-/// absent) rather than refused.
+/// user's own data: anything at `path` that is not a [managed
+/// entry](is_managed_entry) is left alone (reported as absent) rather than
+/// refused.
 pub fn remove_managed_path(path: &Path) -> std::io::Result<bool> {
-    match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_file() => Ok(false),
-        _ => remove_path_if_present(path),
+    if !is_managed_entry(path) {
+        return Ok(false);
     }
+    remove_path_if_present(path)
 }
 
 /// Recursively copy `src` dir into `dst`, skipping the `.git` directory.
