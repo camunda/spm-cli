@@ -15009,6 +15009,35 @@ fn check_message<'a>(doc: &'a serde_json::Value, id: &str, status: &str) -> &'a 
     check(doc, id, status)["message"].as_str().unwrap()
 }
 
+/// A lock without a project `id` is out of sync: `install --locked` rejects it
+/// with the whole problem list and fix, and doctor reports the same problem.
+#[test]
+fn locked_install_and_doctor_reject_a_lock_without_a_project_id() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let mut lock: serde_json::Value = serde_json::from_str(&sb.read("ai.lock")).unwrap();
+    lock.as_object_mut().unwrap().remove("id").unwrap();
+    std::fs::write(sb.project.join("ai.lock"), lock.to_string()).unwrap();
+
+    let err = fails(&sb, &["install", "--locked"]);
+    assert!(
+        err.contains(
+            "--locked: ai.lock is out of sync with ai.json (1 problem(s)):\n  \
+             - ai.lock has no project `id`\n\
+             run `spm install` (without --locked) and commit ai.lock"
+        ),
+        "{err}"
+    );
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(!ok);
+    let c = check(&doc, "lockfile", "error");
+    assert_eq!(
+        c["details"],
+        serde_json::json!(["ai.lock has no project `id`"])
+    );
+}
+
 /// An unreadable `ai.lock` fails the lock and materialization checks, each
 /// with the load error, without hiding the checks that don't read it — and
 /// the lock check still reports a problem it meets before reading the lock.
