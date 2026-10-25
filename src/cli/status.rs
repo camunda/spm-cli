@@ -393,9 +393,10 @@ fn shadowed_names(scope: &Scope, expected: &[String]) -> Result<Vec<String>> {
     // (both are flattened into the same vendor skills dir), so it must be
     // checked here too — computed exactly as for this scope, so a linked
     // plugin's working-tree bundle replaces its locked one.
+    let other_lock = other.lockfile()?;
     let other_names: std::collections::HashSet<String> = other
         .links()?
-        .effective_skill_names(&other.lockfile()?)
+        .effective_skill_names(&other_lock)
         .into_iter()
         .collect();
     Ok(expected
@@ -403,4 +404,35 @@ fn shadowed_names(scope: &Scope, expected: &[String]) -> Result<Vec<String>> {
         .filter(|n| other_names.contains(n.as_str()))
         .cloned()
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::links::Links;
+    use crate::lockfile::Lockfile;
+
+    /// The other scope's `ai.lock` is read before its links, as in every
+    /// [`ScopeSession::snapshot`], so with both broken the lock is reported.
+    #[test]
+    fn shadowed_names_reads_the_other_lock_before_its_links() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("spm-status-order-{nanos}"));
+        let home = root.join("home");
+        std::fs::create_dir_all(root.join("project")).unwrap();
+        let _home = crate::paths::SpmHomeGuard::set(&home);
+        let scope = Scope::Project {
+            root: root.join("project"),
+        };
+        let links = Links::path(&Scope::Global).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(Lockfile::path_in(&home), "not json").unwrap();
+        std::fs::write(&links, "not json").unwrap();
+        let err = format!("{:#}", shadowed_names(&scope, &[]).unwrap_err());
+        assert!(err.contains("ai.lock"), "{err}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
