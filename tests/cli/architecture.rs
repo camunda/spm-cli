@@ -44,6 +44,7 @@ const ALLOWED_EDGES: &[(&str, &[&str])] = &[
             "store",
             "transitive",
             "vendor",
+            "version",
         ],
     ),
     (
@@ -85,19 +86,22 @@ const ALLOWED_EDGES: &[(&str, &[&str])] = &[
         "plugin",
         &["fsutil", "ids", "manifest", "skillcheck", "vendor"],
     ),
-    ("resolver", &["git", "ids", "lockfile", "manifest"]),
+    (
+        "resolver",
+        &["git", "ids", "lockfile", "manifest", "version"],
+    ),
     (
         "links",
         &["ids", "jsonfile", "lockfile", "paths", "scope", "shell"],
     ),
-    ("lockfile", &["ids", "jsonfile", "manifest"]),
+    ("lockfile", &["ids", "jsonfile", "manifest", "version"]),
     (
         "manifest",
-        &["ids", "jsonfile", "policy", "schema", "scope"],
+        &["ids", "jsonfile", "policy", "schema", "scope", "version"],
     ),
     ("policy", &["git", "manifest", "paths"]),
     ("git", &["ids", "policy"]),
-    ("ids", &["manifest"]),
+    ("ids", &["version"]),
     ("store", &["git", "lockfile", "paths", "policy"]),
     ("scan", &["fsutil", "jsonutil"]),
     ("skillcheck", &["fsutil"]),
@@ -106,7 +110,9 @@ const ALLOWED_EDGES: &[(&str, &[&str])] = &[
 ];
 
 /// Modules that must depend on no other module of the crate.
-const LEAVES: &[&str] = &["fsutil", "jsonfile", "pathid", "paths", "schema", "shell"];
+const LEAVES: &[&str] = &[
+    "fsutil", "jsonfile", "pathid", "paths", "schema", "shell", "version",
+];
 
 /// The only modules allowed to depend on `cli`: it is the top of the stack.
 const CLI_DEPENDENTS: &[&str] = &["main"];
@@ -117,8 +123,7 @@ const CLI_DEPENDENTS: &[&str] = &["main"];
 /// merges with another, or a new cyclic group, fails as a layering regression
 /// to fix, and a group that splits or shrinks fails as stale until the list is
 /// shrunk to match.
-const KNOWN_CYCLIC_GROUPS: &[&[&str]] =
-    &[&["git", "ids", "manifest", "policy"], &["plugin", "vendor"]];
+const KNOWN_CYCLIC_GROUPS: &[&[&str]] = &[&["git", "manifest", "policy"], &["plugin", "vendor"]];
 
 const TABLE: &str = "tests/cli/architecture.rs";
 

@@ -37,6 +37,7 @@ generated source to regenerate.
 | `src/cli/sync/mod.rs` | The sync pipeline shared by add/remove/update/install/link: `plan` (a short orchestrator over the phases below) and `LockMode`/`Run`/`Plan`. `resolve.rs` pins direct deps, fetches plugins/skills and walks transitive ones; `validate.rs` holds the pre-resolution checks (policy, targets, links) and post-resolution ones (collisions, `--locked` backstop); `guard.rs` the overlap guard protecting linked working copies and state files; `apply.rs` writes a `Plan` into the targets. |
 | `src/cli/verdict.rs` | `LockVerdict`: the one judgement of `ai.lock` against `ai.json` (missing, drift, stale, unresolved, rewritten, unverified) and every message/fix hint about it, rendered as the `install --locked`/`link` error or as `doctor`'s lockfile checks. |
 | `src/manifest.rs` | The user-authored `ai.json` model (targets + skill specs) and its (de)serialization. |
+| `src/version.rs` | The version selector (`Version`: tag/branch/commit/semver range) and the one semver requirement parser and tag-to-version rule; a leaf shared by `ids`, `manifest`, `lockfile`, `resolver` and `cli`. |
 | `src/lockfile.rs` | The generated, VCS-committed `ai.lock` pin file for reproducible installs. |
 | `src/schema.rs` | Embedded JSON Schema validation for `ai.json`. |
 | `src/resolver.rs` | Resolves a skill spec (tag/branch/commit) to an immutable commit SHA + store key. |

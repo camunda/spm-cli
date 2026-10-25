@@ -22,6 +22,7 @@ mod skillcheck;
 mod store;
 mod transitive;
 mod vendor;
+mod version;
 
 fn main() {
     if let Err(err) = cli::run() {

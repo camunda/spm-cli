@@ -8,7 +8,7 @@
 //! checked, and the check lives in exactly one place instead of at every
 //! boundary that reads one.
 
-use crate::manifest::Version;
+use crate::version::Version;
 use anyhow::{bail, Error, Result};
 use serde::{Deserialize, Serialize};
 use std::borrow::Borrow;
