@@ -1168,6 +1168,7 @@ mod tests {
     }
 
     /// The relative paths of the files a scan reported.
+    #[cfg(unix)]
     fn flagged(findings: &[Finding]) -> std::collections::BTreeSet<PathBuf> {
         findings.iter().map(|f| f.path.clone()).collect()
     }
