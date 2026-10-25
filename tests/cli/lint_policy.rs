@@ -134,15 +134,34 @@ fn attribute(code: &[char], i: usize) -> Option<(String, usize)> {
     None
 }
 
-/// Whether a compacted attribute body is `cfg(..)` enabling only under test.
+/// Whether a compacted attribute body is a `cfg` that enables its item only
+/// under test: exactly `cfg(test)`, or `cfg(all(..))` with `test` as a direct
+/// argument. `any(..)`/`not(..)` (and anything else) can ship, so they are not.
 fn is_cfg_test(body: &str) -> bool {
-    let Some(pred) = body.strip_prefix("cfg(") else {
+    let Some(pred) = body.strip_prefix("cfg(").and_then(|p| p.strip_suffix(')')) else {
         return false;
     };
-    !pred.contains("not(")
-        && pred
-            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
-            .any(|tok| tok == "test")
+    if pred == "test" {
+        return true;
+    }
+    let Some(args) = pred.strip_prefix("all(").and_then(|p| p.strip_suffix(')')) else {
+        return false;
+    };
+    let (mut depth, mut start) = (0usize, 0usize);
+    for (k, c) in args.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                if &args[start..k] == "test" {
+                    return true;
+                }
+                start = k + 1;
+            }
+            _ => {}
+        }
+    }
+    &args[start..] == "test"
 }
 
 /// Whether a compacted attribute body silences a lint.
@@ -156,7 +175,9 @@ fn suppresses(body: &str) -> bool {
 /// 1-based lines of `src` holding a lint suppression outside test code.
 fn suppressions(src: &str) -> Vec<usize> {
     let mut code = code_only(src);
-    // Blank every `#[cfg(test)]` item: its attributes, signature and body.
+    // Blank every `#[cfg(test)]` item: its attributes, signature and body. An
+    // item ends at a top-level `;`, `,` (a field/arm/variant) or `{..}` block,
+    // or just before a `}` closing the enclosing block.
     let mut i = 0;
     while i < code.len() {
         let Some((body, end)) = attribute(&code, i) else {
@@ -172,7 +193,11 @@ fn suppressions(src: &str) -> Vec<usize> {
             match code[j] {
                 '(' | '[' => depth += 1,
                 ')' | ']' => depth = depth.saturating_sub(1),
-                ';' if depth == 0 => break,
+                ';' | ',' if depth == 0 => break,
+                '}' if depth == 0 => {
+                    j -= 1;
+                    break;
+                }
                 '{' if depth == 0 => {
                     let mut braces = 0usize;
                     while j < code.len() {
@@ -265,10 +290,16 @@ fn b() {}
 #[cfg_attr(feature = \"x\", allow(unused))]
 #[cfg(not(test))]
 mod live { #[allow(unused)] fn c() {} }
+#[cfg(any(test, unix))]
+mod m { #[allow(x)] fn f() {} }
+struct T { #[cfg(test)] a: u8, #[allow(dead_code)] b: u8 }
+struct U { a: u8, #[cfg(test)] b: u8 }
+#[allow(after_field)]
+fn d(x: u8) { match x { #[cfg(test)] 0 => {} #[allow(unused)] _ => {} } }
 #[derive(Debug)]
 struct S;
 ";
-    assert_eq!(suppressions(src), vec![2, 4, 5, 6, 7, 9]);
+    assert_eq!(suppressions(src), vec![2, 4, 5, 6, 7, 9, 11, 12, 14, 15]);
 }
 
 #[test]
@@ -291,8 +322,9 @@ mod tests {
 fn test_only() {}
 #[cfg(all(test, unix))]
 mod unix_tests { #[allow(x)] fn h() {} }
+#[cfg(test)] mod inline_tests { #[allow(x)] fn g() { let _ = (1, 2); } }
 #[allow(after_tests)]
 fn live() {}
 "####;
-    assert_eq!(suppressions(src), vec![19]);
+    assert_eq!(suppressions(src), vec![20]);
 }
