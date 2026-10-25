@@ -8,6 +8,7 @@ mod jsonutil;
 mod links;
 mod lockfile;
 mod manifest;
+mod materialized;
 mod owned;
 mod pathid;
 mod paths;

@@ -37,9 +37,9 @@
 use crate::ids::{CommitSha, DepName, LockReference, StoreKey};
 use crate::lockfile::{LockedSkill, Satisfied};
 use crate::manifest::{DependencyManifest, Manifest, SkillSpec};
+use crate::materialized::MaterializedSkill;
 use crate::resolver;
 use crate::store;
-use crate::vendor::MaterializedSkill;
 use anyhow::{bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};

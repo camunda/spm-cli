@@ -16,9 +16,10 @@ use super::verdict::{Enforcer, LockFindings, LockVerdict};
 use crate::links::Links;
 use crate::lockfile::Lockfile;
 use crate::manifest::Manifest;
+use crate::materialized::{MaterializedPlugin, MaterializedSkill};
 use crate::owned::Ownership;
 use crate::scope::Scope;
-use crate::vendor::{MaterializedPlugin, MaterializedSkill, Vendor};
+use crate::vendor::Vendor;
 use anyhow::{anyhow, bail, Result};
 use std::path::PathBuf;
 

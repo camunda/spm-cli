@@ -1,5 +1,6 @@
-use super::{Claim, MaterializedPlugin, MaterializedSkill, PluginHost, Registration, Vendor};
+use super::{Claim, PluginHost, Registration, Vendor};
 use crate::ids::DepName;
+use crate::materialized::{MaterializedPlugin, MaterializedSkill};
 use crate::scope::Scope;
 use crate::{fsutil, gitignore, jsonutil, paths};
 use anyhow::{Context, Result};

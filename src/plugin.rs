@@ -14,7 +14,7 @@
 
 use crate::ids::DepName;
 use crate::manifest::validate_subpath;
-use crate::vendor::MaterializedSkill;
+use crate::materialized::MaterializedSkill;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
