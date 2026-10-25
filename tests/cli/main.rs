@@ -13,6 +13,7 @@ mod doctor;
 #[cfg(unix)]
 mod global;
 mod json;
+mod layout;
 mod links;
 mod lock_only;
 mod locked;
