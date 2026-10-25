@@ -15,6 +15,7 @@ mod status;
 mod sync;
 mod target;
 mod update;
+mod verdict;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

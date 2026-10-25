@@ -34,6 +34,7 @@ generated source to regenerate.
 | `src/cli.rs` | `clap` command definitions and the top-level command dispatch (`init`, `add`, `remove`, `update`, `install`, `list`, `clean`, `prune`). Primary edit surface for CLI behavior. |
 | `src/cli/session.rs` | `ScopeSession`: the only way a command takes the state lock (private `StateLock`, re-entry guarded) and loads `ai.json`/`ai.lock`/links/ownership, in canonical order via `snapshot`. |
 | `src/cli/index.rs` | `DependencyIndex`: the one classification of `ai.json` + `ai.lock` entries (direct per kind, transitive, undeclared, `requested_by`) shared by `list`, `status`, `outdated` and `doctor`. |
+| `src/cli/verdict.rs` | `LockVerdict`: the one judgement of `ai.lock` against `ai.json` (missing, drift, stale, unresolved, rewritten, unverified) and every message/fix hint about it, rendered as the `install --locked`/`link` error or as `doctor`'s lockfile checks. |
 | `src/manifest.rs` | The user-authored `ai.json` model (targets + skill specs) and its (de)serialization. |
 | `src/lockfile.rs` | The generated, VCS-committed `ai.lock` pin file for reproducible installs. |
 | `src/schema.rs` | Embedded JSON Schema validation for `ai.json`. |

@@ -13852,6 +13852,140 @@ fn doctor_flags_a_lock_out_of_sync_and_a_missing_lock() {
     assert!(c["message"].as_str().unwrap().contains("no ai.lock"), "{c}");
 }
 
+/// Doctor and `install --locked` render one verdict: for every class of lock
+/// problem, both reject the lock and doctor details exactly the problems
+/// `install --locked` lists.
+#[test]
+fn doctor_and_locked_install_report_the_same_lock_problem_class() {
+    fn greet(sb: &Sandbox) {
+        sb.ok(&["init", "--target", "copilot"]);
+        sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    }
+    fn edit_lock(sb: &Sandbox, edit: impl FnOnce(&mut serde_json::Value)) {
+        let mut lock: serde_json::Value = serde_json::from_str(&sb.read("ai.lock")).unwrap();
+        edit(&mut lock);
+        std::fs::write(sb.project.join("ai.lock"), lock.to_string()).unwrap();
+    }
+    // Each case drifts a fresh project and returns the problem it expects.
+    type Drift = fn(&Sandbox) -> String;
+    let cases: [(&str, Drift); 5] = [
+        ("missing id", |sb| {
+            greet(sb);
+            edit_lock(sb, |l| {
+                l.as_object_mut().unwrap().remove("id");
+            });
+            "ai.lock has no project `id`".into()
+        }),
+        ("drifted selector", |sb| {
+            greet(sb);
+            write_manifest(sb, &sb.read("ai.json").replace("v0.1.0", "v0.2.0"));
+            "skill `greet`: changed since ai.lock was written".into()
+        }),
+        ("stale entry", |sb| {
+            greet(sb);
+            write_manifest(sb, r#"{"targets":["copilot"]}"#);
+            "skill `greet`: in ai.lock but not declared in ai.json".into()
+        }),
+        ("unresolved transitive", |sb| {
+            let leaf = make_repo(
+                &sb.root.join("leaf"),
+                &[("SKILL.md", "---\nname: leaf\n---\nLeaf.\n")],
+            );
+            let top = make_repo(
+                &sb.root.join("top"),
+                &[
+                    ("SKILL.md", "---\nname: top\n---\nTop.\n"),
+                    (
+                        "ai.json",
+                        &format!(r#"{{"skills":{{"leaf":{{"git":"{leaf}","branch":"main"}}}}}}"#),
+                    ),
+                ],
+            );
+            sb.ok(&["init", "--target", "copilot"]);
+            write_manifest(
+                sb,
+                &format!(
+                    r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{"top":{{"git":"{top}","branch":"main"}}}}}}"#
+                ),
+            );
+            sb.ok(&["install"]);
+            let mut leaf_name = String::new();
+            edit_lock(sb, |l| {
+                let skills = l["skills"].as_object_mut().unwrap();
+                leaf_name = skills
+                    .keys()
+                    .find(|k| k.starts_with("top__leaf-"))
+                    .unwrap()
+                    .clone();
+                skills.remove(&leaf_name);
+            });
+            format!(
+                "transitive skill `{leaf_name}` (`leaf` required by `top`): missing from ai.lock"
+            )
+        }),
+        ("lock spm would rewrite", |sb| {
+            sb.add_plugin();
+            sb.ok(&["init", "--target", "copilot"]);
+            sb.ok(&[
+                "add",
+                &sb.skill_url(),
+                "--plugin",
+                "--branch",
+                "main",
+                "--path",
+                "pkg",
+                "--name",
+                "ds",
+            ]);
+            edit_lock(sb, |l| {
+                l["plugins"]["ds"]["bundled_skills"] = serde_json::json!([])
+            });
+            "ai.lock differs from what spm would write".into()
+        }),
+    ];
+    for (class, drift) in cases {
+        let sb = Sandbox::new();
+        let expected = drift(&sb);
+        let err = fails(&sb, &["install", "--locked"]);
+        let (ok, doc) = doctor(&sb, &[]);
+        assert!(!ok, "{class}: {doc:#}");
+        let c = check(&doc, "lockfile", "error");
+        let details: Vec<&str> = c["details"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{class}: {c}"))
+            .iter()
+            .map(|d| d.as_str().unwrap())
+            .collect();
+        assert!(
+            details.iter().any(|d| d.starts_with(&expected)),
+            "{class}: {details:?}"
+        );
+        assert!(
+            err.contains(&format!(
+                "--locked: ai.lock is out of sync with ai.json ({} problem(s)):",
+                details.len()
+            )),
+            "{class}: {err}"
+        );
+        for d in &details {
+            assert!(err.contains(&format!("  - {d}\n")), "{class}: {d} vs {err}");
+        }
+    }
+
+    // A missing lock is its own class.
+    let sb = Sandbox::new();
+    greet(&sb);
+    std::fs::remove_file(sb.project.join("ai.lock")).unwrap();
+    let err = fails(&sb, &["install", "--locked"]);
+    assert!(err.contains("ai.lock not found"), "{err}");
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(!ok);
+    assert_eq!(
+        check_message(&doc, "lockfile", "error"),
+        "no ai.lock: declared dependencies are not pinned"
+    );
+}
+
 /// Offline, doctor never fetches: a dependency missing from the store is
 /// reported as unverified (a warning), and the store stays empty.
 #[test]
@@ -15007,6 +15141,35 @@ fn doctor_checks_policy_for_locked_transitive_sources() {
 /// The message of the single check with id `id` and status `status`.
 fn check_message<'a>(doc: &'a serde_json::Value, id: &str, status: &str) -> &'a str {
     check(doc, id, status)["message"].as_str().unwrap()
+}
+
+/// A lock without a project `id` is out of sync: `install --locked` rejects it
+/// with the whole problem list and fix, and doctor reports the same problem.
+#[test]
+fn locked_install_and_doctor_reject_a_lock_without_a_project_id() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let mut lock: serde_json::Value = serde_json::from_str(&sb.read("ai.lock")).unwrap();
+    lock.as_object_mut().unwrap().remove("id").unwrap();
+    std::fs::write(sb.project.join("ai.lock"), lock.to_string()).unwrap();
+
+    let err = fails(&sb, &["install", "--locked"]);
+    assert!(
+        err.contains(
+            "--locked: ai.lock is out of sync with ai.json (1 problem(s)):\n  \
+             - ai.lock has no project `id`\n\
+             run `spm install` (without --locked) and commit ai.lock"
+        ),
+        "{err}"
+    );
+    let (ok, doc) = doctor(&sb, &[]);
+    assert!(!ok);
+    let c = check(&doc, "lockfile", "error");
+    assert_eq!(
+        c["details"],
+        serde_json::json!(["ai.lock has no project `id`"])
+    );
 }
 
 /// An unreadable `ai.lock` fails the lock and materialization checks, each
