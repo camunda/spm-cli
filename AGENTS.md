@@ -41,7 +41,7 @@ generated source to regenerate.
 | `src/schema.rs` | Embedded JSON Schema validation for `ai.json`. |
 | `src/resolver.rs` | Resolves a skill spec (tag/branch/commit) to an immutable commit SHA + store key. |
 | `src/store.rs` | Manages the global store (`~/.spm/store/<repo>@<sha>`) — one clone per commit, shared across projects. |
-| `src/git.rs` | Thin wrapper over the system `git` binary (no libgit2); handles SSH/HTTPS and non-interactive auth. |
+| `src/git/` | Thin wrapper over the system `git` binary (no libgit2), public API re-exported from `mod.rs`: `command.rs` spawns git (hardened env, failure capture, option-injection guard), `transport.rs` handles SSH/HTTPS rewriting and fallback, `repository.rs` holds the remote/checkout operations. |
 | `src/paths.rs` | Resolves the store (fetch-cache) root; honors the `SPM_HOME` override. Vendor output is project-local, not under this root. |
 | `src/fsutil.rs` | `walk_tree`: the single boundary-aware traversal (skips `.git`, follows symlinks only inside the checkout, breaks cycles) behind both the safe copy (`copy_tree`) and the scan, so the gate reads exactly what lands. |
 | `src/scan.rs` | Deterministic content scanner: rule table (pattern → category → severity) flagging prompt injection, secret exfiltration, encoded/obfuscated payloads and auto-run triggers. Runs as a pre-materialize gate in `sync` and backs `spm scan`. |

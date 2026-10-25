@@ -16,7 +16,8 @@
 //!
 //! Enforcement happens before any network access: callers check each source up
 //! front for a precise error, and two choke points back that up categorically —
-//! every URL handed to git for a remote operation (`git::with_transport`) and
+//! every URL handed to git for a remote operation
+//! (`git::transport::with_transport`) and
 //! every store checkout, even a cached one (`store::ensure`), passes [`gate`].
 
 use crate::manifest::Manifest;

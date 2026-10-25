@@ -981,7 +981,7 @@ mod tests {
         // the HTTPS identity. (Uppercase `HTTPS://` happens to collapse via the
         // generic lowercasing branch, but `SSH://` keeps its distinct `ssh://`
         // scheme + `git@` there, so only a case-insensitive remote parser folds
-        // it — see `git::split_remote`.)
+        // it — see `git::transport::split_remote`.)
         assert_eq!(normalize_git("SSH://git@GitHub.com/o/r"), https);
         assert_eq!(normalize_git("Ssh://git@github.com/o/r.git"), https);
     }
