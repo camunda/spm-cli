@@ -53,7 +53,7 @@ pub(super) fn preflight(
     }
     // Source policy: judge every direct source before any network access, and
     // report all denied ones at once.
-    let policy = crate::policy::activate(manifest, dir)?;
+    let policy = crate::policy::activate(manifest.policy(dir)?);
     // `ai.lock` never depends on links, and a lock-only sync writes nothing
     // else, so it ignores them (a missing linked directory can't block it).
     let linked = if run.lock_only || run.check {

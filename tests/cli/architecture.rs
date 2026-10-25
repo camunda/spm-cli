@@ -100,7 +100,7 @@ const ALLOWED_EDGES: &[(&str, &[&str])] = &[
         "manifest",
         &["ids", "jsonfile", "policy", "schema", "scope", "version"],
     ),
-    ("policy", &["manifest", "paths", "remote"]),
+    ("policy", &["paths", "remote"]),
     ("git", &["ids", "policy", "remote"]),
     ("ids", &["version"]),
     ("store", &["git", "lockfile", "paths", "policy"]),
@@ -124,7 +124,7 @@ const CLI_DEPENDENTS: &[&str] = &["main"];
 /// merges with another, or a new cyclic group, fails as a layering regression
 /// to fix, and a group that splits or shrinks fails as stale until the list is
 /// shrunk to match.
-const KNOWN_CYCLIC_GROUPS: &[&[&str]] = &[&["manifest", "policy"], &["plugin", "vendor"]];
+const KNOWN_CYCLIC_GROUPS: &[&[&str]] = &[&["plugin", "vendor"]];
 
 const TABLE: &str = "tests/cli/architecture.rs";
 

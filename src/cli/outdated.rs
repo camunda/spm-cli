@@ -232,7 +232,7 @@ pub(super) fn outdated(
     let manifest = session.manifest()?;
     // Every remote this reports on is queried through the policy gate; a denied
     // source shows up as an error row instead of being contacted.
-    crate::policy::activate(&manifest, session.dir())?;
+    crate::policy::activate(manifest.policy(session.dir())?);
     let lock = session.lockfile()?;
     if let Some(name) = name {
         if !lock.contains_dependency(name) {
