@@ -282,7 +282,7 @@ fn validate_locked_map(map: &BTreeMap<DepName, LockedSkill>, kind: DependencyKin
 /// one. A hand-edited `ai.lock` therefore cannot make `list`/`outdated` claim a
 /// tag the range could never have picked.
 fn validate_resolved_tag(reference: &LockReference, resolved_tag: Option<&str>) -> Result<()> {
-    use crate::manifest::{parse_version_req, semver_of_tag, Version};
+    use crate::version::{parse_version_req, semver_of_tag, Version};
     match (reference.version(), resolved_tag) {
         (Version::Range(req), Some(tag)) => {
             let req = parse_version_req(req)?;
