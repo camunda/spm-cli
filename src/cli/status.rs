@@ -210,15 +210,16 @@ pub(super) fn collect(session: &ScopeSession, state: &ScopeSnapshot) -> Result<S
             expected: !expected.is_empty(),
         };
         // Full-plugin materialization is only meaningful for vendors that
-        // register plugins beyond their bundled skills (currently Claude);
-        // `status_plugins` returns `None` for the rest. Inspected even with
-        // none declared, so a leftover registered plugin surfaces as stale.
-        let plugins = vendor
-            .status_plugins(scope, &declared_plugins)?
-            .map(|status| Inspected {
-                status,
+        // register plugins beyond their bundled skills (currently Claude).
+        // Inspected even with none declared, so a leftover registered plugin
+        // surfaces as stale.
+        let plugins = match vendor.plugins() {
+            Some(p) => Some(Inspected {
+                status: p.status_plugins(scope, &declared_plugins)?,
                 expected: !declared_plugins.is_empty(),
-            });
+            }),
+            None => None,
+        };
         targets.push(TargetStatus {
             target: target.clone(),
             skills,

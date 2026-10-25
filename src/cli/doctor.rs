@@ -592,6 +592,13 @@ fn materialization_checks(scope: &Scope, report: &status::StatusReport) -> Vec<C
     checks
 }
 
+/// What `v` writes for full plugins in `scope` (nothing when it loads only
+/// skills).
+fn plugin_clean_paths(v: &dyn vendor::Vendor, scope: &Scope) -> Result<Vec<PathBuf>> {
+    v.plugins()
+        .map_or(Ok(Vec::new()), |p| p.plugin_clean_paths(scope, &[]))
+}
+
 /// Project scope: each vendor's `.gitignore` entries, the same ones `spm
 /// install` ensures — so spm's output can't be committed.
 fn check_gitignore(
@@ -615,11 +622,14 @@ fn check_gitignore(
         // Even with nothing declared, an install may have written output
         // (e.g. Claude's empty marketplace) that must stay ignored.
         let has_output = || {
-            [v.clean_paths(scope, &[]), v.plugin_clean_paths(scope, &[])]
-                .into_iter()
-                .flatten()
-                .flatten()
-                .any(|p| p.exists())
+            [
+                v.clean_paths(scope, &[]),
+                plugin_clean_paths(v.as_ref(), scope),
+            ]
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|p| p.exists())
         };
         // Leftover skills (e.g. from another branch) need their entries too.
         let stale = report
@@ -652,7 +662,7 @@ fn check_gitignore(
         };
         let outputs = [
             v.clean_paths(scope, &owned),
-            v.plugin_clean_paths(scope, &[]),
+            plugin_clean_paths(v.as_ref(), scope),
         ]
         .into_iter()
         .flatten()

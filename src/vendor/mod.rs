@@ -1,5 +1,4 @@
 mod claude;
-mod copilot;
 mod dirskills;
 mod shareddir;
 
@@ -131,11 +130,15 @@ pub trait Vendor {
     ) -> Result<()>;
 
     /// Remove everything this vendor generated for this `scope`: deletes each of
-    /// [`clean_paths`](Vendor::clean_paths), then [`deregister`](Vendor::deregister)s.
-    /// `managed` lists the skill names spm currently owns (from the lockfile).
+    /// [`clean_paths`](Vendor::clean_paths), then drops its
+    /// [`registration`](Vendor::registration), if any. `managed` lists the skill
+    /// names spm currently owns (from the lockfile).
     fn clean(&self, scope: &Scope, managed: &[DepName]) -> Result<()> {
         remove_paths(&self.clean_paths(scope, managed)?)?;
-        self.deregister(scope)
+        match self.registration() {
+            Some(r) => r.deregister(scope),
+            None => Ok(()),
+        }
     }
 
     /// The paths [`clean`](Vendor::clean) deletes for `scope`. Vendors sharing a
@@ -154,21 +157,6 @@ pub trait Vendor {
     /// `<dir>/<name>/` (also where [`status`](Vendor::status) looks).
     fn skills_dir(&self, scope: &Scope) -> Result<PathBuf>;
 
-    /// Files this vendor edits *in place* in `scope` (e.g. Claude's settings),
-    /// writing through a symlink at their path instead of replacing it — unlike
-    /// [`clean_paths`](Vendor::clean_paths), whose final symlink is removed.
-    /// Default: none.
-    fn patched_files(&self, _scope: &Scope) -> Result<Vec<PathBuf>> {
-        Ok(Vec::new())
-    }
-
-    /// Drop the config pointing this vendor at spm's output (e.g. Claude's
-    /// settings entries) without deleting the output itself. Default: nothing to
-    /// drop.
-    fn deregister(&self, _scope: &Scope) -> Result<()> {
-        Ok(())
-    }
-
     /// The `.gitignore` entries a project-scope [`materialize`](Vendor::materialize)
     /// of `skills` ensures (each with this vendor's comment), so spm's output
     /// stays out of version control. The single source for both.
@@ -178,77 +166,74 @@ pub trait Vendor {
     /// against the declared `expected` skill names (from `ai.lock`).
     fn status(&self, scope: &Scope, expected: &[DepName]) -> Result<VendorStatus>;
 
-    /// Register full plugins (agents, MCP servers, hooks, scripts) for this
-    /// vendor. Only targets that can load more than a `SKILL.md` override this;
-    /// the default is a no-op because a plugin's *skills* are already flattened
-    /// into the ordinary [`materialize`](Vendor::materialize) list, so every
-    /// vendor gets the skills-only subset for free and only richer targets (e.g.
-    /// Claude) need to do more here.
-    ///
-    /// `previously_managed` lists the plugin names spm registered on the last
-    /// sync (from the prior lockfile), mirroring
-    /// [`materialize`](Vendor::materialize).
+    /// The tool config this vendor registers its output in (e.g. Claude's
+    /// settings), or `None` when the tool discovers it by location alone.
+    fn registration(&self) -> Option<&dyn Registration>;
+
+    /// Full-plugin support (agents, MCP servers, hooks, scripts), or `None` for
+    /// a vendor that loads only skills. A plugin's *skills* are flattened into
+    /// the ordinary [`materialize`](Vendor::materialize) list either way, so
+    /// every vendor gets that subset; only richer targets (e.g. Claude) do more.
+    fn plugins(&self) -> Option<&dyn PluginHost>;
+}
+
+/// A vendor that registers its output in the tool's own config.
+pub trait Registration {
+    /// Files this vendor edits *in place* in `scope` (e.g. Claude's settings),
+    /// writing through a symlink at their path instead of replacing it — unlike
+    /// [`Vendor::clean_paths`], whose final symlink is removed.
+    fn patched_files(&self, scope: &Scope) -> Result<Vec<PathBuf>>;
+
+    /// Drop the config pointing this vendor at spm's output (e.g. Claude's
+    /// settings entries) without deleting the output itself.
+    fn deregister(&self, scope: &Scope) -> Result<()>;
+}
+
+/// A vendor that registers full plugins, not just their skills.
+pub trait PluginHost {
+    /// Register full plugins for `scope`. `previously_managed` lists the plugin
+    /// names spm registered on the last sync (from the prior lockfile),
+    /// mirroring [`Vendor::materialize`].
     fn materialize_plugins(
         &self,
-        _scope: &Scope,
-        _project_id: &str,
-        _plugins: &[MaterializedPlugin],
-        _previously_managed: &[DepName],
-    ) -> Result<()> {
-        Ok(())
-    }
+        scope: &Scope,
+        project_id: &str,
+        plugins: &[MaterializedPlugin],
+        previously_managed: &[DepName],
+    ) -> Result<()>;
 
     /// Report what full plugins this vendor has materialized in `scope`,
     /// compared against the declared plugin names (the `ai.json`/`ai.lock`
-    /// plugin keys). Returns `None` for vendors that don't register full plugins
-    /// (their plugins contribute only *skills*, already covered by
-    /// [`status`](Vendor::status)); richer targets (e.g. Claude) return `Some`
-    /// so `spm status` can catch a deleted marketplace dir or a fresh worktree
-    /// whose plugin registration was never installed here.
-    fn status_plugins(
-        &self,
-        _scope: &Scope,
-        _expected: &[DepName],
-    ) -> Result<Option<VendorStatus>> {
-        Ok(None)
-    }
+    /// plugin keys), so `spm status` can catch a deleted marketplace dir or a
+    /// fresh worktree whose plugin registration was never installed here.
+    fn status_plugins(&self, scope: &Scope, expected: &[DepName]) -> Result<VendorStatus>;
 
     /// Remove everything this vendor registered for full plugins in this
-    /// `scope`: deletes each of [`plugin_clean_paths`](Vendor::plugin_clean_paths),
-    /// then [`deregister_plugins`](Vendor::deregister_plugins). Counterpart to
-    /// [`materialize_plugins`](Vendor::materialize_plugins).
+    /// `scope`: deletes each of [`plugin_clean_paths`](PluginHost::plugin_clean_paths),
+    /// then [`deregister_plugins`](PluginHost::deregister_plugins).
     fn clean_plugins(&self, scope: &Scope, managed: &[DepName]) -> Result<()> {
         remove_paths(&self.plugin_clean_paths(scope, managed)?)?;
         self.deregister_plugins(scope)
     }
 
-    /// The paths [`clean_plugins`](Vendor::clean_plugins) deletes. Default: none,
-    /// for targets that never register full plugins.
-    fn plugin_clean_paths(&self, _scope: &Scope, _managed: &[DepName]) -> Result<Vec<PathBuf>> {
-        Ok(Vec::new())
-    }
+    /// The paths [`clean_plugins`](PluginHost::clean_plugins) deletes.
+    fn plugin_clean_paths(&self, scope: &Scope, managed: &[DepName]) -> Result<Vec<PathBuf>>;
 
     /// The paths this vendor loads the `managed` full plugins (and their
-    /// metadata) from, protected like [`skill_paths`](Vendor::skill_paths).
-    /// Default: none.
-    fn plugin_paths(&self, _scope: &Scope, _managed: &[DepName]) -> Result<Vec<PathBuf>> {
-        Ok(Vec::new())
-    }
+    /// metadata) from, protected like [`Vendor::skill_paths`].
+    fn plugin_paths(&self, scope: &Scope, managed: &[DepName]) -> Result<Vec<PathBuf>>;
 
     /// Drop the config registering this vendor's full plugins without deleting
-    /// them. Default: nothing to drop.
-    fn deregister_plugins(&self, _scope: &Scope) -> Result<()> {
-        Ok(())
-    }
+    /// them.
+    fn deregister_plugins(&self, scope: &Scope) -> Result<()>;
 }
 
-/// Delete each directory in `paths`, ignoring absent ones. A symlink is removed
-/// itself, never followed.
+/// Delete each entry in `paths`, ignoring absent ones and leaving a regular
+/// file alone. A symlink is removed itself, never followed.
 pub fn remove_paths(paths: &[PathBuf]) -> Result<()> {
     for p in paths {
-        if p.is_dir() {
-            std::fs::remove_dir_all(p).with_context(|| format!("removing {}", p.display()))?;
-        }
+        crate::fsutil::remove_managed_path(p)
+            .with_context(|| format!("removing {}", p.display()))?;
     }
     Ok(())
 }
@@ -268,7 +253,7 @@ pub fn for_target(target: &str) -> Result<Box<dyn Vendor>> {
         "claude" => Ok(Box::new(claude::Claude)),
         "cline" => Ok(Box::new(shareddir::cline())),
         "codex" => Ok(Box::new(shareddir::codex())),
-        "copilot" => Ok(Box::new(copilot::Copilot)),
+        "copilot" => Ok(Box::new(shareddir::copilot())),
         "cursor" => Ok(Box::new(shareddir::cursor())),
         "gemini" => Ok(Box::new(shareddir::gemini())),
         "windsurf" => Ok(Box::new(shareddir::windsurf())),

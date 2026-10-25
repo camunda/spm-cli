@@ -59,7 +59,12 @@ impl Plan {
                     &owned.skill_names(),
                     claim,
                 )?;
-                vendor.materialize_plugins(scope, &lock.id, &self.plugins, &owned.plugin_names())
+                match vendor.plugins() {
+                    Some(p) => {
+                        p.materialize_plugins(scope, &lock.id, &self.plugins, &owned.plugin_names())
+                    }
+                    None => Ok(()),
+                }
             })?;
         // Only persist `ai.lock` once every fallible step (resolution, fetching,
         // collision checks, and vendor materialization) has succeeded —

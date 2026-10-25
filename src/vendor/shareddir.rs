@@ -1,41 +1,71 @@
 //! A generic vendor for tools that auto-discover `SKILL.md` skills **one
-//! directory deep** under a skills root the user also authors into — i.e. a
-//! *shared*, potentially version-controlled dir (Gemini CLI's `.gemini/skills`,
-//! Codex CLI's `.agents/skills`, …).
+//! directory deep** under a skills root (Copilot CLI's
+//! `.agents/skills/spm-managed-skills`, Gemini CLI's `.gemini/skills`, Codex
+//! CLI's `.agents/skills`, …).
 //!
-//! These adapters differ only in *where* the skills root is per scope and the
-//! `.gitignore` comment, so they are expressed as [`SharedDirVendor`] config
-//! rather than duplicated per tool (see the "Derivation Over Duplication" rule
-//! in `AGENTS.md`). The mechanics are identical to the Copilot adapter's
-//! *global* branch, applied to **both** scopes:
+//! These adapters differ only in *where* the skills root is per scope, the
+//! `.gitignore` comment and who owns the project dir, so they are expressed as
+//! [`SharedDirVendor`] config rather than duplicated per tool (see the
+//! "Derivation Over Duplication" rule in `AGENTS.md`):
 //!
-//! - The dir is shared with the user's own hand-authored skills, so spm never
-//!   wipes it; it removes only the entries it previously managed (∪ the ones it
-//!   is about to write) and copies the current set.
-//! - spm's materialized skills must still stay out of VCS without hiding the
-//!   user's own committed skills in the same dir, so in [`Scope::Project`] each
-//!   spm-managed skill subdir is added to `.gitignore` individually.
-//! - In [`Scope::Global`] there is no repo, so no `.gitignore` is written.
+//! - A **shared** dir ([`Ownership::Shared`]) also holds the user's own
+//!   hand-authored skills, so spm never wipes it; it removes only the entries
+//!   it previously managed (∪ the ones it is about to write) and copies the
+//!   current set. In [`Scope::Project`] each spm-managed skill subdir is added
+//!   to `.gitignore` individually, keeping spm's skills out of VCS without
+//!   hiding the user's own committed skills in the same dir.
+//! - An **exclusive** dir ([`Ownership::Exclusive`], Copilot's project dir) is
+//!   wholly spm's: each materialize rebuilds it from scratch, it is ignored and
+//!   cleaned as one entry, and anything undeclared in it is reported stale.
+//! - The [`Scope::Global`] dir is always shared (e.g. `~/.copilot/skills`,
+//!   where Copilot only discovers skills one level deep, so spm can't nest
+//!   them under a dir of its own). There is no repo, so no `.gitignore` is
+//!   written.
 
 use super::dirskills::{copy_skills_into, remove_managed};
 use super::{Claim, MaterializedSkill, Vendor};
 use crate::ids::DepName;
 use crate::scope::Scope;
-use crate::{gitignore, paths};
-use anyhow::Result;
+use crate::{fsutil, gitignore, paths};
+use anyhow::{Context, Result};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-/// Config-driven adapter for a "shared skills dir, one level deep" tool.
+/// Who owns a vendor's skills dir.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ownership {
+    /// Shared with the user's own skills: spm touches only its entries.
+    Shared,
+    /// Wholly spm's: rebuilt, ignored and cleaned as a whole.
+    Exclusive,
+}
+
+/// Config-driven adapter for a "skills dir, one level deep" tool.
 pub struct SharedDirVendor {
     /// Target key (e.g. `"gemini"`, `"codex"`).
     name: &'static str,
     /// Project-scope skills dir segments, relative to the project root.
     project_segs: &'static [&'static str],
+    /// Who owns the project-scope dir (the global one is always shared).
+    project_ownership: Ownership,
     /// Global-scope skills dir segments, relative to the user's home dir.
     global_segs: &'static [&'static str],
     /// Comment written above each spm-managed `.gitignore` entry.
     gitignore_comment: &'static str,
+}
+
+/// GitHub Copilot CLI: the spm-owned project dir
+/// `.agents/skills/spm-managed-skills/` + the user's personal-skills dir
+/// `~/.copilot/skills/`, shared with their hand-authored skills.
+pub fn copilot() -> SharedDirVendor {
+    SharedDirVendor {
+        name: "copilot",
+        project_segs: &[".agents", "skills", "spm-managed-skills"],
+        project_ownership: Ownership::Exclusive,
+        global_segs: &[".copilot", "skills"],
+        gitignore_comment:
+            "# spm-managed Copilot skills — materialized locally by `spm`, not committed.",
+    }
 }
 
 /// Gemini CLI: workspace `.gemini/skills/` + user `~/.gemini/skills/`.
@@ -43,6 +73,7 @@ pub fn gemini() -> SharedDirVendor {
     SharedDirVendor {
         name: "gemini",
         project_segs: &[".gemini", "skills"],
+        project_ownership: Ownership::Shared,
         global_segs: &[".gemini", "skills"],
         gitignore_comment:
             "# spm-managed Gemini skills — materialized locally by `spm`, not committed.",
@@ -56,6 +87,7 @@ pub fn codex() -> SharedDirVendor {
     SharedDirVendor {
         name: "codex",
         project_segs: &[".agents", "skills"],
+        project_ownership: Ownership::Shared,
         global_segs: &[".agents", "skills"],
         gitignore_comment:
             "# spm-managed Codex skills — materialized locally by `spm`, not committed.",
@@ -73,6 +105,7 @@ pub fn cursor() -> SharedDirVendor {
     SharedDirVendor {
         name: "cursor",
         project_segs: &[".cursor", "skills"],
+        project_ownership: Ownership::Shared,
         global_segs: &[".cursor", "skills"],
         gitignore_comment:
             "# spm-managed Cursor skills — materialized locally by `spm`, not committed.",
@@ -86,6 +119,7 @@ pub fn cline() -> SharedDirVendor {
     SharedDirVendor {
         name: "cline",
         project_segs: &[".cline", "skills"],
+        project_ownership: Ownership::Shared,
         global_segs: &[".cline", "skills"],
         gitignore_comment:
             "# spm-managed Cline skills — materialized locally by `spm`, not committed.",
@@ -102,6 +136,7 @@ pub fn windsurf() -> SharedDirVendor {
     SharedDirVendor {
         name: "windsurf",
         project_segs: &[".windsurf", "skills"],
+        project_ownership: Ownership::Shared,
         global_segs: &[".codeium", "windsurf", "skills"],
         gitignore_comment:
             "# spm-managed Windsurf skills — materialized locally by `spm`, not committed.",
@@ -117,9 +152,19 @@ pub fn amp() -> SharedDirVendor {
     SharedDirVendor {
         name: "amp",
         project_segs: &[".agents", "skills"],
+        project_ownership: Ownership::Shared,
         global_segs: &[".config", "agents", "skills"],
         gitignore_comment:
             "# spm-managed Amp skills — materialized locally by `spm`, not committed.",
+    }
+}
+
+impl SharedDirVendor {
+    fn ownership(&self, scope: &Scope) -> Ownership {
+        match scope {
+            Scope::Project { .. } => self.project_ownership,
+            Scope::Global => Ownership::Shared,
+        }
     }
 }
 
@@ -137,16 +182,23 @@ impl Vendor for SharedDirVendor {
         claim: Claim,
     ) -> Result<()> {
         let dir = self.skills_dir(scope)?;
-        // Shared dir: remove only the entries spm owns (previously-managed ∪
-        // about-to-write), then copy the current set. Never wipe the whole dir.
-        let mut owned: BTreeSet<&DepName> = previously_managed.iter().collect();
-        owned.extend(skills.iter().map(|s| &s.name));
-        remove_managed(&dir, owned.iter().copied(), claim)?;
+        match self.ownership(scope) {
+            // Rebuild from scratch so removed skills disappear.
+            Ownership::Exclusive => {
+                fsutil::remove_path_if_present(&dir)
+                    .with_context(|| format!("clearing {}", dir.display()))?;
+            }
+            // Remove only the entries spm owns (previously-managed ∪
+            // about-to-write). Never wipe the whole dir.
+            Ownership::Shared => {
+                let mut owned: BTreeSet<&DepName> = previously_managed.iter().collect();
+                owned.extend(skills.iter().map(|s| &s.name));
+                remove_managed(&dir, owned.iter().copied(), claim)?;
+            }
+        }
         if !skills.is_empty() {
             copy_skills_into(&dir, skills, claim)?;
         }
-        // Keep spm's skills out of VCS without ignoring the user's own committed
-        // skills in the same shared dir: ignore each managed subdir by name.
         if let Scope::Project { root } = scope {
             let names: Vec<DepName> = skills.iter().map(|s| s.name.clone()).collect();
             for entry in self.gitignore_entries(&names) {
@@ -157,22 +209,30 @@ impl Vendor for SharedDirVendor {
     }
 
     fn gitignore_entries(&self, skills: &[DepName]) -> Vec<String> {
-        // Each managed subdir by name: the user's own skills share the dir.
-        // A `[` would start a pattern class (`g[1]/` matches `g1/`); the other
-        // glob characters are not valid in names.
         let dir = self.project_segs.join("/");
-        skills
-            .iter()
-            .map(|s| format!("{dir}/{}/", s.replace('[', "\\[")))
-            .collect()
+        match self.project_ownership {
+            // Nothing is materialized (nor ignored) for an empty skill set.
+            Ownership::Exclusive if skills.is_empty() => Vec::new(),
+            Ownership::Exclusive => vec![format!("{dir}/")],
+            // Each managed subdir by name: the user's own skills share the dir.
+            // A `[` would start a pattern class (`g[1]/` matches `g1/`); the
+            // other glob characters are not valid in names.
+            Ownership::Shared => skills
+                .iter()
+                .map(|s| format!("{dir}/{}/", s.replace('[', "\\[")))
+                .collect(),
+        }
     }
 
     fn clean_paths(&self, scope: &Scope, managed: &[DepName]) -> Result<Vec<PathBuf>> {
-        // Shared dir: only the skills spm owns, never the whole dir.
-        // `.gitignore` is intentionally left untouched: the per-skill entries spm
-        // added are harmless once the materialized dirs are gone, and rewriting a
+        // `.gitignore` is intentionally left untouched: the entries spm added are
+        // harmless once the materialized dirs are gone, and rewriting a
         // user-owned file on `clean` risks clobbering it.
-        self.skill_paths(scope, managed)
+        match self.ownership(scope) {
+            Ownership::Exclusive => Ok(vec![self.skills_dir(scope)?]),
+            // Shared dir: only the skills spm owns, never the whole dir.
+            Ownership::Shared => self.skill_paths(scope, managed),
+        }
     }
 
     fn skills_dir(&self, scope: &Scope) -> Result<PathBuf> {
@@ -188,9 +248,22 @@ impl Vendor for SharedDirVendor {
     }
 
     fn status(&self, scope: &Scope, expected: &[DepName]) -> Result<super::VendorStatus> {
-        // The dir is shared with the user's own skills in *both* scopes, so stale
-        // detection would mislabel those — never enable it here.
-        Ok(super::classify(&self.skills_dir(scope)?, expected, false))
+        // A shared dir holds the user's own skills too, so stale detection would
+        // mislabel those; only an exclusive dir can have stale entries.
+        let detect_stale = self.ownership(scope) == Ownership::Exclusive;
+        Ok(super::classify(
+            &self.skills_dir(scope)?,
+            expected,
+            detect_stale,
+        ))
+    }
+
+    fn registration(&self) -> Option<&dyn super::Registration> {
+        None
+    }
+
+    fn plugins(&self) -> Option<&dyn super::PluginHost> {
+        None
     }
 }
 

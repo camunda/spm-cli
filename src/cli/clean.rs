@@ -38,9 +38,13 @@ pub(super) fn clean(scope: &Scope) -> Result<()> {
     // what it left in place is reclaimed (see `Ownership::fail`).
     ownership.cleaned(&manifest.targets).save(scope)?;
     for (vendor, names) in vendors.iter().zip(&owned) {
-        if let Err(e) = vendor
-            .clean(scope, &names.skill_names())
-            .and_then(|()| vendor.clean_plugins(scope, &names.plugin_names()))
+        if let Err(e) =
+            vendor
+                .clean(scope, &names.skill_names())
+                .and_then(|()| match vendor.plugins() {
+                    Some(p) => p.clean_plugins(scope, &names.plugin_names()),
+                    None => Ok(()),
+                })
         {
             return Err(ownership.fail(scope, &manifest.targets, e));
         }
