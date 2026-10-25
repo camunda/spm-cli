@@ -120,7 +120,7 @@ flowchart TD
 
 ## Command flow
 
-Every command that changes a scope — `add`, `remove`, `update`, `install`,
+Every command that syncs a scope — `add`, `remove`, `update`, `install`,
 `target add`, `link` and `unlink` — runs the same path through `src/cli/`. It
 first opens a `ScopeSession` (`src/cli/session.rs`), the only way to take the
 scope's state lock, and holds it until its last write, so nothing it read can
@@ -128,36 +128,48 @@ change underneath it. The shared sync pipeline (`src/cli/sync/`) then plans
 everything without writing outside the global store, and only a fully checked
 plan is applied.
 
+`spm target remove` and `spm clean` also take a `ScopeSession` (`Write`) but
+bypass the sync pipeline: they resolve and fetch nothing, and remove spm's
+output from the targets themselves (`target remove` also rewrites `ai.json`),
+behind the same overlap guard (`sync::guard_working_copies`).
+
 ```mermaid
 flowchart TD
   cmd["spm add / remove / target add<br/>spm update / install<br/>spm link / unlink"]
   open["ScopeSession::open<br/>state lock: Write, or Links for link / unlink"]
-  load["load ai.json, links file,<br/>then ai.lock + target ownership"]
-  cmd --> open --> load --> preflight
+  read["read ai.json + links file"]
+  cmd --> open --> read --> preflight
 
   subgraph plan ["sync::plan: writes nothing outside the store"]
     preflight["validate::preflight<br/>targets → vendor::for_target, source policy,<br/>linked dirs, ai.lock present when --locked"]
+    previous["previous<br/>load ai.lock + target ownership"]
     resolve["resolve<br/>pin direct deps, fetch + scan plugins and skills,<br/>walk transitive deps"]
     collisions["validate::collisions"]
     guard["guard<br/>overlap guard for linked working copies<br/>and spm's state files"]
     verdict["validate::backstop + LockVerdict<br/>--locked and link / unlink only"]
-    preflight --> resolve --> collisions --> guard --> verdict
+    preflight --> previous --> resolve --> collisions --> guard --> verdict
   end
 
   verdict --> manifest["write ai.json<br/>add / remove / target add only"]
   verdict --> apply
   manifest --> apply
   subgraph applyphase ["Plan::apply"]
+    pending["write pending links file<br/>linked plugins' skills, before any vendor write"]
     apply["materialize into every target<br/>and record ownership"]
     lock["write ai.lock<br/>not with --locked or link / unlink"]
-    links["write links file<br/>only when it changed"]
-    apply --> lock --> links
+    links["write final links file<br/>only when it changed"]
+    pending --> apply --> lock --> links
   end
 ```
 
 - **`ai.json` is written only after the plan succeeds**, so a failed `add` (an
   unreachable source, a bad ref, a blocked scan, …) leaves it untouched and the
   command can be retried.
+- **Linked skills are recorded before they are written.** When the links file
+  changes, `apply` first saves a pending one listing the skills planned from
+  linked plugins alongside the previous ones, so a materialization that fails part-way never
+  leaves spm-written skills unrecorded; the final links file narrows it once
+  every target succeeded.
 - **`ai.lock` is written only after every target is materialized**, so it never
   pins state that was not installed. `--lock-only` skips materialization and
   writes `ai.lock` alone.
