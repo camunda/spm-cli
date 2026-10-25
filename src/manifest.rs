@@ -380,12 +380,12 @@ impl Manifest {
 
     pub fn save(&self, dir: &Path) -> Result<()> {
         let p = Self::path_in(dir);
-        std::fs::write(&p, self.to_text()?).with_context(|| format!("writing {}", p.display()))
+        crate::jsonfile::save(&p, self)
     }
 
     /// The exact text [`Manifest::save`] writes.
     pub fn to_text(&self) -> Result<String> {
-        Ok(serde_json::to_string_pretty(self)? + "\n")
+        crate::jsonfile::to_text(self)
     }
 
     pub fn exists(dir: &Path) -> bool {

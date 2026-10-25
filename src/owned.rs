@@ -27,8 +27,7 @@ use crate::vendor::Claim;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// `$SPM_HOME` subdirectory holding one record per project.
 const PROJECT_DIR: &str = "owned";
@@ -158,12 +157,9 @@ impl Ownership {
             owned.skills.extend(linked.iter().cloned());
             return Ok(Self::Legacy(owned));
         }
-        let text =
-            std::fs::read_to_string(&p).with_context(|| format!("reading {}", p.display()))?;
         // The names are joined onto target dirs that get deleted; as
         // `DepName`s, a tampered record's are rejected while parsing.
-        let record: Record =
-            serde_json::from_str(&text).with_context(|| format!("parsing {}", p.display()))?;
+        let record: Record = crate::jsonfile::load(&p)?;
         // Skill names are bound to the dir spm wrote them into: once a
         // target's skills dir is gone or is a different directory (moved
         // aside, or a symlink re-pointed at the user's own skills), the names
@@ -431,9 +427,9 @@ impl Ownership {
             targets: targets.clone(),
             dirs,
         };
-        let text = serde_json::to_string_pretty(&record)?;
-        replace_atomically(&p, (text + "\n").as_bytes(), |f, bytes| f.write_all(bytes))
-            .with_context(|| format!("writing {}", p.display()))
+        // The record is the sole history of what spm installed, so a failed
+        // write (e.g. a full disk) must leave the previous one intact.
+        crate::jsonfile::save_atomic(&p, &record)
     }
 }
 
@@ -451,45 +447,11 @@ fn skills_dir_identity(scope: &Scope, target: &str) -> Result<Option<DirId>> {
     dir_id(&vendor.skills_dir(scope)?)
 }
 
-/// Replace `path` with `bytes` all at once: they are `write`n to a fresh
-/// temporary file beside it, which is renamed over `path` only once complete.
-/// The record is the sole history of what spm installed, so a failed write
-/// (e.g. a full disk) must leave the previous one intact.
-fn replace_atomically(
-    path: &Path,
-    bytes: &[u8],
-    write: impl FnOnce(&mut std::fs::File, &[u8]) -> std::io::Result<()>,
-) -> std::io::Result<()> {
-    let dir = path.parent().expect("record path has a parent");
-    let name = path.file_name().expect("record path has a file name");
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    let tmp = dir.join(format!(
-        ".{}.{}-{nanos}.tmp",
-        name.to_string_lossy(),
-        std::process::id()
-    ));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&tmp)?;
-    let res = write(&mut file, bytes)
-        .and_then(|()| file.sync_all())
-        .and_then(|()| {
-            drop(file);
-            std::fs::rename(&tmp, path)
-        });
-    if res.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    res
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ids::{dep, CommitSha, StoreKey};
+    use std::io::Write;
 
     fn scratch(name: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -586,8 +548,8 @@ mod tests {
         let path = Ownership::path(&scope).unwrap();
         let before = std::fs::read(&path).unwrap();
 
-        let err = replace_atomically(&path, b"{\"targets\":{}}\n", |f, bytes| {
-            f.write_all(&bytes[..3])?;
+        let err = crate::jsonfile::replace_with(&path, |f| {
+            f.write_all(&b"{\"targets\":{}}\n"[..3])?;
             Err(std::io::Error::other("disk full"))
         })
         .unwrap_err();

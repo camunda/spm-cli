@@ -2,7 +2,7 @@
 //! settings.local.json, Copilot's .vscode/settings.json) without clobbering keys
 //! the user set themselves, plus serde glue for spm's `--json` output.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::Serializer;
 use serde_json::{Map, Value};
 use std::path::Path;
@@ -19,11 +19,11 @@ pub fn read_object(path: &Path) -> Result<Value> {
     if !path.exists() {
         return Ok(Value::Object(Map::new()));
     }
-    let text = std::fs::read_to_string(path)?;
+    let text = crate::jsonfile::load_text(path)?;
     if text.trim().is_empty() {
         return Ok(Value::Object(Map::new()));
     }
-    serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+    crate::jsonfile::parse(&text, path)
 }
 
 /// Write `value` as pretty JSON, creating parent dirs as needed.
@@ -31,8 +31,7 @@ pub fn write(path: &Path, value: &Value) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let text = serde_json::to_string_pretty(value)?;
-    std::fs::write(path, text + "\n").with_context(|| format!("writing {}", path.display()))
+    crate::jsonfile::save(path, value)
 }
 
 /// Get (or create) a nested object field on `root`.

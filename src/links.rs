@@ -11,11 +11,13 @@
 //! running `spm link` on this machine activates a local source.
 
 use crate::ids::DepName;
+use crate::jsonfile::Staged;
 use crate::paths;
 use crate::scope::Scope;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 const FILE: &str = "links.json";
@@ -144,14 +146,9 @@ impl Links {
     }
 
     fn load_from(p: &Path) -> Result<Self> {
-        let text = match std::fs::read_to_string(p) {
-            Ok(t) => t,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
-            Err(e) => return Err(e).with_context(|| format!("reading {}", p.display())),
-        };
         // Names are joined onto vendor skill dirs (and removed from shared
         // ones); as `DepName`s, a hand-edited file's are rejected while parsing.
-        serde_json::from_str(&text).with_context(|| format!("parsing {}", p.display()))
+        crate::jsonfile::load_or_default(p)
     }
 
     /// Persist the links file, deleting it once it holds nothing.
@@ -189,14 +186,18 @@ impl Links {
                 _ => Ok(()),
             };
         }
-        let staged = self.stage(p)?;
-        publish(&staged, p)
+        // Links files are read by every spm command on the machine (see
+        // [`Links::all_recorded`]), so a concurrent reader must see either
+        // the old or the new file, never a truncated one.
+        self.stage(p)?
+            .publish()
+            .with_context(|| format!("writing {}", p.display()))
     }
 
     /// Write the complete file next to its destination (following a symlinked
     /// links file, so publishing replaces what it points at, not the link) as
-    /// a staging file that readers skip, returning `(staging, destination)`.
-    fn stage(&self, p: &Path) -> Result<(PathBuf, PathBuf)> {
+    /// a staging file that readers skip.
+    fn stage(&self, p: &Path) -> Result<Staged> {
         if let Some(parent) = p.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
@@ -206,12 +207,9 @@ impl Links {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => p.to_path_buf(),
             Err(e) => return Err(e).with_context(|| format!("resolving {}", p.display())),
         };
-        let name = dest.file_name().unwrap_or_default().to_string_lossy();
-        let staging = dest.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
-        let text = serde_json::to_string_pretty(self)?;
-        std::fs::write(&staging, text + "\n")
-            .with_context(|| format!("writing {}", staging.display()))?;
-        Ok((staging, dest))
+        let text = crate::jsonfile::to_text(self)?;
+        Staged::write(&dest, |f| f.write_all(text.as_bytes()))
+            .with_context(|| format!("writing {}", p.display()))
     }
 
     /// Every skill name materialized for a scope with this lock and these
@@ -254,17 +252,6 @@ impl Links {
             display: display.clone(),
         }))
     }
-}
-
-/// Atomically replace the destination with the staged file: links files are
-/// read by every spm command on the machine (see [`Links::all_recorded`]), so
-/// a concurrent reader must see either the old or the new file, never a
-/// truncated one.
-fn publish((staging, dest): &(PathBuf, PathBuf), p: &Path) -> Result<()> {
-    std::fs::rename(staging, dest).with_context(|| {
-        let _ = std::fs::remove_file(staging);
-        format!("writing {}", p.display())
-    })
 }
 
 /// Where machine-local state about the project at `root` lives: one file per
@@ -411,12 +398,52 @@ mod tests {
         std::fs::write(dir.join("notes.txt"), "not json").unwrap();
 
         let staged = with("new").stage(&file).unwrap();
-        assert!(staged.0.exists());
+        let staging = staged.path().to_path_buf();
+        assert!(staging.exists());
         assert_eq!(read(), ["old"], "mid-publication");
-        publish(&staged, &file).unwrap();
-        assert!(!staged.0.exists());
+        staged.publish().unwrap();
+        assert!(!staging.exists());
         assert_eq!(read(), ["new"], "published");
         std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// A links file that exists but can't be read is an error naming it, not
+    /// an empty set of links.
+    #[test]
+    fn an_unreadable_links_file_is_an_error() {
+        let root = tmp("unreadable");
+        let file = root.join(FILE);
+        std::fs::create_dir_all(&file).unwrap();
+        let err = format!("{:#}", Links::load_from(&file).unwrap_err());
+        assert!(
+            err.starts_with(&format!("reading {}", file.display())),
+            "{err}"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A save that can't replace the links file fails naming it, keeps what
+    /// was there, and leaves no staging file behind.
+    #[test]
+    fn a_failed_publication_keeps_the_old_file_and_no_staging_file() {
+        let root = tmp("unpublished");
+        let file = root.join(FILE);
+        std::fs::create_dir_all(file.join("occupied")).unwrap();
+        let mut links = Links::default();
+        links.links.insert(dep("a"), "dir".into());
+        let err = format!("{:#}", links.save_to(&file).unwrap_err());
+        assert!(
+            err.starts_with(&format!("writing {}", file.display())),
+            "{err}"
+        );
+        assert!(file.join("occupied").is_dir(), "old entry kept");
+        let leftovers: Vec<_> = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "staging file removed: {leftovers:?}");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     /// Saving through a symlinked links file updates what it points at and
