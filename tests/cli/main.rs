@@ -8,6 +8,7 @@
 #![cfg(test)]
 
 mod add;
+mod architecture;
 mod commands;
 mod common;
 mod concurrency;
@@ -29,5 +30,6 @@ mod policy;
 mod protocol;
 mod ranges;
 mod scan;
+mod source;
 mod targets;
 mod transitive;
