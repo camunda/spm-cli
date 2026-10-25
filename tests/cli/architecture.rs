@@ -8,7 +8,9 @@
 //! between top-level modules, where a module is the first path component
 //! under `src/` (`src/cli/**` is `cli`, `src/main.rs` is `main`). The result
 //! must equal [`ALLOWED_EDGES`] exactly, so a layering change is a deliberate,
-//! reviewed edit of that table, never a side effect.
+//! reviewed edit of that table, never a side effect. Crate-root globs and
+//! aliases (`use crate::*`, `use super::*` out of a top-level module,
+//! `use crate as x`, `extern crate self as x`) would hide edges, so they fail.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -109,16 +111,14 @@ const LEAVES: &[&str] = &["fsutil", "jsonfile", "pathid", "paths", "schema", "sh
 /// The only modules allowed to depend on `cli`: it is the top of the stack.
 const CLI_DEPENDENTS: &[&str] = &["main"];
 
-/// Dependency cycles tolerated today, each as the modules along it
-/// (`[a, b]` is `a -> b -> a`). This list may only shrink: a cycle that is
-/// broken must be removed (the guard fails on it as stale), and a new cycle is
-/// a layering regression to fix, not to list here.
-const KNOWN_CYCLES: &[&[&str]] = &[
-    &["manifest", "policy"],
-    &["ids", "manifest"],
-    &["plugin", "vendor"],
-    &["git", "policy"],
-];
+/// Dependency cycles tolerated today, as the module groups they bind: each
+/// group is a strongly connected component of the graph (every module in it
+/// reaches every other). This list may only shrink: a group that grows or
+/// merges with another, or a new cyclic group, fails as a layering regression
+/// to fix, and a group that splits or shrinks fails as stale until the list is
+/// shrunk to match.
+const KNOWN_CYCLIC_GROUPS: &[&[&str]] =
+    &[&["git", "ids", "manifest", "policy"], &["plugin", "vendor"]];
 
 const TABLE: &str = "tests/cli/architecture.rs";
 
@@ -154,11 +154,30 @@ fn path_sep(code: &[char], i: usize) -> Option<usize> {
     (code.get(i) == Some(&':') && code.get(i + 1) == Some(&':')).then(|| skip_ws(code, i + 2))
 }
 
+/// The name standing for a crate-root reference that hides which modules it
+/// reaches: a glob (`crate::*`) or an alias of the root (`crate as x`).
+const OPAQUE: &str = "*";
+
+/// Whether `as` follows at `i` (whitespace allowed before it).
+fn aliased_at(code: &[char], i: usize) -> bool {
+    ident_at(code, skip_ws(code, i)) == "as"
+}
+
+/// The first segment named at `i`, just after a `crate::`-rooted prefix, or
+/// [`OPAQUE`] for a glob or an aliased `self`.
+fn first_segment(code: &[char], i: usize) -> String {
+    let name = ident_at(code, i);
+    if code.get(i) == Some(&'*') || (name == "self" && aliased_at(code, i + name.len())) {
+        return OPAQUE.into();
+    }
+    name
+}
+
 /// The first segments named at `i`, just after a `crate::`-rooted prefix: one
 /// identifier, or each item of a `{a, b::c, ..}` group.
 fn first_segments(code: &[char], i: usize) -> Vec<String> {
     if code.get(i) != Some(&'{') {
-        return vec![ident_at(code, i)];
+        return vec![first_segment(code, i)];
     }
     let mut names = Vec::new();
     let (mut j, mut depth, mut item_start) = (i + 1, 0usize, true);
@@ -170,7 +189,7 @@ fn first_segments(code: &[char], i: usize) -> Vec<String> {
             ',' if depth == 0 => item_start = true,
             c if item_start && !c.is_whitespace() => {
                 item_start = false;
-                names.push(ident_at(code, j));
+                names.push(first_segment(code, j));
             }
             _ => {}
         }
@@ -232,12 +251,18 @@ fn crate_refs(src: &str, file_depth: usize) -> Vec<(String, usize)> {
                 braces.pop();
             }
             _ if segment_at(&code, i, "crate") => {
-                if let Some(rest) = path_sep(&code, i + "crate".len()) {
+                let after = i + "crate".len();
+                if let Some(rest) = path_sep(&code, after) {
                     refs.extend(
                         first_segments(&code, rest)
                             .into_iter()
                             .map(|n| (n, line(i))),
                     );
+                } else if aliased_at(&code, after)
+                    || first_segment(&code, skip_ws(&code, after)) == OPAQUE
+                {
+                    // `use crate as x;` / `extern crate self as x;`
+                    refs.push((OPAQUE.into(), line(i)));
                 }
             }
             _ if segment_at(&code, i, "super") => {
@@ -290,11 +315,16 @@ fn source_graph() -> (Graph, BTreeMap<(String, String), String>) {
         modules.contains("main") && modules.contains("cli") && modules.len() > 10,
         "scan found too few modules: {modules:?}"
     );
-    let (mut graph, mut sites) = (Graph::new(), BTreeMap::new());
+    let (mut graph, mut sites, mut opaque) = (Graph::new(), BTreeMap::new(), Vec::new());
     for file in &files {
         let (from, depth) = module_of(file.strip_prefix(&src).unwrap());
         let text = std::fs::read_to_string(file).unwrap();
+        let rel = file.strip_prefix(root).unwrap();
         for (name, line) in crate_refs(&text, depth) {
+            if name == OPAQUE {
+                opaque.push(format!("  {}:{line}", rel.display()));
+                continue;
+            }
             // Anything not a module is an item defined in `main.rs`.
             let to = if modules.contains(&name) {
                 name
@@ -305,12 +335,18 @@ fn source_graph() -> (Graph, BTreeMap<(String, String), String>) {
                 continue;
             }
             graph.entry(from.clone()).or_default().insert(to.clone());
-            let rel = file.strip_prefix(root).unwrap();
             sites
                 .entry((from.clone(), to))
                 .or_insert_with(|| format!("{}:{line}", rel.display()));
         }
     }
+    assert!(
+        opaque.is_empty(),
+        "crate-root globs or aliases hide which modules they use, so the layering \
+         guard ({TABLE}) cannot see those edges:\n{}\n\
+         Import the items by name (`use crate::module::Item;`).",
+        opaque.join("\n")
+    );
     (graph, sites)
 }
 
@@ -333,40 +369,106 @@ fn edges(graph: &Graph) -> BTreeSet<(String, String)> {
         .collect()
 }
 
-/// The edges along a listed cycle: `[a, b]` is `a -> b` and `b -> a`.
-fn cycle_edges(cycle: &[&str]) -> Vec<(String, String)> {
-    (0..cycle.len())
-        .map(|k| (cycle[k].into(), cycle[(k + 1) % cycle.len()].into()))
-        .collect()
-}
-
-/// A cycle in `graph` as the modules along it, if any.
-fn find_cycle(graph: &Graph) -> Option<Vec<String>> {
-    fn visit(
-        node: &str,
-        graph: &Graph,
-        done: &mut BTreeSet<String>,
-        path: &mut Vec<String>,
-    ) -> Option<Vec<String>> {
-        if let Some(at) = path.iter().position(|n| n == node) {
-            return Some(path[at..].to_vec());
-        }
-        if !done.insert(node.to_string()) {
-            return None;
-        }
-        path.push(node.to_string());
-        for next in graph.get(node).into_iter().flatten() {
-            if let Some(cycle) = visit(next, graph, done, path) {
-                return Some(cycle);
+/// The strongly connected components of `graph` (Tarjan), each sorted.
+fn sccs(graph: &Graph) -> Vec<BTreeSet<String>> {
+    struct Tarjan<'g> {
+        graph: &'g Graph,
+        index: BTreeMap<&'g str, usize>,
+        low: BTreeMap<&'g str, usize>,
+        stack: Vec<&'g str>,
+        on_stack: BTreeSet<&'g str>,
+        out: Vec<BTreeSet<String>>,
+    }
+    impl<'g> Tarjan<'g> {
+        fn visit(&mut self, node: &'g str) {
+            let at = self.index.len();
+            self.index.insert(node, at);
+            self.low.insert(node, at);
+            self.stack.push(node);
+            self.on_stack.insert(node);
+            for next in self.graph.get(node).into_iter().flatten() {
+                let next = next.as_str();
+                if !self.index.contains_key(next) {
+                    self.visit(next);
+                    let low = self.low[node].min(self.low[next]);
+                    self.low.insert(node, low);
+                } else if self.on_stack.contains(next) {
+                    let low = self.low[node].min(self.index[next]);
+                    self.low.insert(node, low);
+                }
+            }
+            if self.low[node] == self.index[node] {
+                let mut group = BTreeSet::new();
+                while let Some(member) = self.stack.pop() {
+                    self.on_stack.remove(member);
+                    group.insert(member.to_string());
+                    if member == node {
+                        break;
+                    }
+                }
+                self.out.push(group);
             }
         }
-        path.pop();
-        None
     }
-    let mut done = BTreeSet::new();
-    graph
-        .keys()
-        .find_map(|n| visit(n, graph, &mut done, &mut Vec::new()))
+    let mut tarjan = Tarjan {
+        graph,
+        index: BTreeMap::new(),
+        low: BTreeMap::new(),
+        stack: Vec::new(),
+        on_stack: BTreeSet::new(),
+        out: Vec::new(),
+    };
+    let nodes: BTreeSet<&str> = graph
+        .iter()
+        .flat_map(|(f, ts)| std::iter::once(f).chain(ts))
+        .map(String::as_str)
+        .collect();
+    for node in nodes {
+        if !tarjan.index.contains_key(node) {
+            tarjan.visit(node);
+        }
+    }
+    tarjan.out
+}
+
+/// Every way the cyclic groups of `graph` (its strongly connected components
+/// of two or more modules) differ from `known`.
+fn cycle_violations(graph: &Graph, known: &[&[&str]]) -> Vec<String> {
+    let known: Vec<BTreeSet<String>> = known
+        .iter()
+        .map(|g| g.iter().map(|m| m.to_string()).collect())
+        .collect();
+    let actual: Vec<BTreeSet<String>> = sccs(graph).into_iter().filter(|g| g.len() > 1).collect();
+    let mut errors = Vec::new();
+    for group in actual.iter().filter(|g| !known.contains(g)) {
+        if known.iter().any(|k| group.is_subset(k)) {
+            continue; // what is left of a split group: reported below as stale
+        }
+        let inside: Vec<_> = known.iter().filter(|k| k.is_subset(group)).collect();
+        errors.push(if inside.is_empty() {
+            format!(
+                "new dependency cycle among {group:?}, not in KNOWN_CYCLIC_GROUPS ({TABLE}).\n\
+                 Break it (move the shared code down a layer); KNOWN_CYCLIC_GROUPS may only shrink."
+            )
+        } else {
+            format!(
+                "known cyclic group(s) {inside:?} grew into the cycle {group:?} \
+                 (KNOWN_CYCLIC_GROUPS, {TABLE}).\nBreak the new dependency; \
+                 KNOWN_CYCLIC_GROUPS may only shrink."
+            )
+        });
+    }
+    for group in known.iter().filter(|k| !actual.contains(k)) {
+        if actual.iter().any(|g| group.is_subset(g)) {
+            continue; // reported above as grown
+        }
+        let now: Vec<_> = actual.iter().filter(|g| !g.is_disjoint(group)).collect();
+        errors.push(format!(
+            "KNOWN_CYCLIC_GROUPS ({TABLE}) lists {group:?}, which is no longer a cycle \
+             (cyclic groups among these modules now: {now:?}).\nShrink KNOWN_CYCLIC_GROUPS to match."
+        ));
+    }
+    errors
 }
 
 #[test]
@@ -415,28 +517,8 @@ fn module_graph_keeps_its_invariants() {
             site(from, "cli")
         );
     }
-    let all = edges(&graph);
-    let mut rest = graph.clone();
-    for cycle in KNOWN_CYCLES {
-        for (f, t) in cycle_edges(cycle) {
-            assert!(
-                all.contains(&(f.clone(), t.clone())),
-                "KNOWN_CYCLES ({TABLE}) lists {cycle:?}, but `{f} -> {t}` is gone: \
-                 the cycle is broken, remove it from KNOWN_CYCLES (it may only shrink)"
-            );
-            if let Some(tos) = rest.get_mut(&f) {
-                tos.remove(&t);
-            }
-        }
-    }
-    if let Some(cycle) = find_cycle(&rest) {
-        panic!(
-            "dependency cycle outside KNOWN_CYCLES ({TABLE}): {} -> {}\n\
-             Break it (move the shared code down a layer); KNOWN_CYCLES may only shrink.",
-            cycle.join(" -> "),
-            cycle[0]
-        );
-    }
+    let errors = cycle_violations(&graph, KNOWN_CYCLIC_GROUPS);
+    assert!(errors.is_empty(), "{}", errors.join("\n"));
 }
 
 #[test]
@@ -490,19 +572,100 @@ fn crate_refs_follows_super_only_out_of_the_top_level_module() {
     assert_eq!(names, ["three"]);
 }
 
+fn graph_of(edges: &[(&str, &str)]) -> Graph {
+    let mut g = Graph::new();
+    for (f, t) in edges {
+        g.entry(f.to_string()).or_default().insert(t.to_string());
+    }
+    g
+}
+
 #[test]
-fn find_cycle_spots_indirect_cycles() {
-    let graph = |edges: &[(&str, &str)]| {
-        let mut g = Graph::new();
-        for (f, t) in edges {
-            g.entry(f.to_string()).or_default().insert(t.to_string());
-        }
-        g
-    };
-    assert_eq!(
-        find_cycle(&graph(&[("a", "b"), ("b", "c"), ("a", "c")])),
-        None
+fn cycle_check_catches_a_known_group_that_grew() {
+    // Known `a <-> b` plus new `b -> c -> a`: the longer cycle reuses a known
+    // edge, so only the component view sees it.
+    let graph = graph_of(&[("a", "b"), ("b", "a"), ("b", "c"), ("c", "a")]);
+    let errors = cycle_violations(&graph, &[&["a", "b"]]);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(errors[0].contains("grew"), "{errors:?}");
+    // Two known groups merged by a new edge each way.
+    let graph = graph_of(&[
+        ("a", "b"),
+        ("b", "a"),
+        ("c", "d"),
+        ("d", "c"),
+        ("b", "c"),
+        ("d", "a"),
+    ]);
+    let errors = cycle_violations(&graph, &[&["a", "b"], &["c", "d"]]);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(errors[0].contains("grew"), "{errors:?}");
+}
+
+#[test]
+fn cycle_check_catches_a_new_cycle() {
+    let graph = graph_of(&[("a", "b"), ("b", "a"), ("c", "d"), ("d", "e"), ("e", "c")]);
+    let errors = cycle_violations(&graph, &[&["a", "b"]]);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(errors[0].contains("new dependency cycle"), "{errors:?}");
+}
+
+#[test]
+fn cycle_check_reports_a_split_or_broken_group_as_stale() {
+    let graph = graph_of(&[("a", "b"), ("b", "a"), ("c", "d"), ("d", "c")]);
+    assert!(cycle_violations(&graph, &[&["a", "b"], &["c", "d"]]).is_empty());
+    // `{a, b, c}` split: only `a <-> b` is left.
+    let graph = graph_of(&[("a", "b"), ("b", "a"), ("b", "c")]);
+    let errors = cycle_violations(&graph, &[&["a", "b", "c"]]);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].contains("Shrink KNOWN_CYCLIC_GROUPS"),
+        "{errors:?}"
     );
-    let cycle = find_cycle(&graph(&[("a", "b"), ("b", "c"), ("c", "a")])).unwrap();
-    assert_eq!(cycle, ["a", "b", "c"]);
+    // `{a, b}` broken entirely.
+    let errors = cycle_violations(&graph_of(&[("a", "b")]), &[&["a", "b"]]);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].contains("Shrink KNOWN_CYCLIC_GROUPS"),
+        "{errors:?}"
+    );
+}
+
+#[test]
+fn cycle_check_passes_an_acyclic_graph() {
+    let graph = graph_of(&[("a", "b"), ("b", "c"), ("a", "c")]);
+    assert!(cycle_violations(&graph, &[]).is_empty());
+}
+
+#[test]
+fn crate_refs_flags_imports_that_hide_edges() {
+    let opaque = |src: &str, depth: usize| -> Vec<String> {
+        crate_refs(src, depth)
+            .into_iter()
+            .map(|r| r.0)
+            .filter(|n| n == OPAQUE)
+            .collect()
+    };
+    for src in [
+        "use crate::*;",
+        "use crate::{alpha, *};",
+        "use crate as root;",
+        "use crate::{self as root};",
+        "use crate::self as root;",
+        "extern crate self as root;",
+    ] {
+        assert_eq!(opaque(src, 1), [OPAQUE], "{src}");
+    }
+    assert_eq!(opaque("use super::*;", 1), [OPAQUE]);
+    assert_eq!(opaque("use super::super::*;", 2), [OPAQUE]);
+    // Globs that stay inside the top-level module, or in test code, are fine.
+    for (src, depth) in [
+        ("use super::*;", 2),
+        ("mod inner { use super::*; }", 1),
+        ("#[cfg(test)]\nmod tests { use super::*; }", 1),
+        ("use crate::alpha::*;", 1),
+        ("pub(crate) use self::x::*;", 1),
+    ] {
+        assert!(opaque(src, depth).is_empty(), "{src}");
+    }
 }
