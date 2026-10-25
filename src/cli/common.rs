@@ -1,6 +1,7 @@
 //! Shared clap arg groups and small helpers used across multiple subcommands.
 
 use crate::git;
+use crate::remote::Protocol;
 use crate::scope::Scope;
 use anyhow::Result;
 use clap::Args;
@@ -113,7 +114,7 @@ pub(crate) struct TransportArgs {
     /// Contact remotes over this protocol, rewriting the URL you gave (GitHub-style
     /// `https://host/org/repo` <-> `git@host:org/repo`; other URLs are used as given).
     #[arg(long, value_enum)]
-    pub(crate) protocol: Option<git::Protocol>,
+    pub(crate) protocol: Option<Protocol>,
     /// If a remote can't be reached (network or auth failure), retry once over
     /// the other protocol and say which one worked. Off by default: switching
     /// protocols can mask a real credential problem.
