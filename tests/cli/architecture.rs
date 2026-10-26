@@ -34,7 +34,7 @@ use syn::visit::{self, Visit};
 use syn::Token;
 
 use crate::source::{
-    args, cfg_test, is_cfg_test, parse, requires_test, shipped_files, skip_test_only,
+    args, cfg_test, is_cfg_test, name, parse, requires_test, shipped_files, skip_test_only,
 };
 
 /// The allowed top-level dependency edges: the single source of truth for the
@@ -345,8 +345,7 @@ impl Refs {
                                 Ok(meta) => self.meta(&meta),
                                 Err(_) => {
                                     let first = g.stream().into_iter().next();
-                                    let doc =
-                                        matches!(&first, Some(TokenTree::Ident(i)) if i == "doc");
+                                    let doc = matches!(&first, Some(TokenTree::Ident(i)) if i.unraw() == "doc");
                                     if !doc {
                                         self.tokens(g.stream(), true);
                                     }
@@ -677,7 +676,10 @@ impl<'ast> Visit<'ast> for Refs {
 
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
         let (rules, input) = (self.rules, self.input);
-        let definition = mac.path.is_ident("macro_rules");
+        let definition = mac
+            .path
+            .get_ident()
+            .is_some_and(|i| i.unraw() == "macro_rules");
         self.rules |= definition;
         self.input = !definition;
         self.tokens(mac.tokens.clone(), false);
@@ -696,10 +698,11 @@ impl Refs {
     /// `doc` value nor (outside a macro's input) the payload of a `cfg_attr`
     /// only `test` enables.
     fn meta(&mut self, meta: &syn::Meta) {
-        if meta.path().is_ident("doc") {
+        let attr = name(meta);
+        if attr.as_deref() == Some("doc") {
             return;
         }
-        if meta.path().is_ident("cfg_attr") {
+        if attr.as_deref() == Some("cfg_attr") {
             if let Some(args) = args(meta) {
                 if self.input || !args.first().is_some_and(requires_test) {
                     args.iter().skip(1).for_each(|m| self.meta(m));
@@ -1032,6 +1035,11 @@ struct C;
 struct D;
 #[crate::beta]
 fn e() {}
+#[r#doc = "crate::ghost"]
+struct F;
+#[r#cfg_attr(test, serde(with = "crate::ghost"))]
+struct G;
+m! { #[r#doc = "crate::ghost"] struct H; }
 "#;
     let names: Vec<String> = crate_refs(src, 1).into_iter().map(|r| r.0).collect();
     assert_eq!(names, ["alpha", "beta"]);
