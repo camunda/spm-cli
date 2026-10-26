@@ -251,6 +251,82 @@ fn starts_item(code: &[char], mut i: usize) -> bool {
     }
 }
 
+/// Index of the `}` closing the block opened at `open`.
+fn block_end(code: &[char], open: usize) -> usize {
+    let (mut j, mut braces) = (open, 0usize);
+    while j < code.len() {
+        match code[j] {
+            '{' => braces += 1,
+            '}' => {
+                braces -= 1;
+                if braces == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        j += 1;
+    }
+    j
+}
+
+/// Whether the attribute run starting at `run` sits in a generic parameter
+/// list (`fn f<A, #[cfg(test)] B>`): walking back, the first unclosed bracket
+/// is a `<` hugging an identifier.
+fn in_generics(code: &[char], run: usize) -> bool {
+    let mut depth = 0usize;
+    for k in (0..run).rev() {
+        match code[k] {
+            ')' | ']' | '}' => depth += 1,
+            '(' | '[' | '{' if depth == 0 => return false,
+            '(' | '[' | '{' => depth -= 1,
+            ';' if depth == 0 => return false,
+            '<' if depth == 0 => {
+                return k > 0 && (code[k - 1].is_alphanumeric() || code[k - 1] == '_');
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Index of the last char of the test-only thing whose attribute ends at
+/// `end`: an item (ends at `;` or its block; commas and generics live in its
+/// header), a generic parameter (ends at `,` or its list's `>`), or a field,
+/// arm or parameter (ends at `,`); or just before a `}`, `)` or `]` closing
+/// the enclosing one.
+fn test_only_end(code: &[char], run: usize, end: usize) -> usize {
+    let item = starts_item(code, end);
+    let generic = !item && in_generics(code, run);
+    let (mut j, mut depth, mut angle) = (end, 0usize, 0usize);
+    while j < code.len() {
+        let (prev, next) = (j.checked_sub(1).map(|p| code[p]), code.get(j + 1).copied());
+        match code[j] {
+            '(' | '[' => depth += 1,
+            ')' | ']' if depth > 0 => depth -= 1,
+            // `<<`, `<=`, `->`, `=>` and `>=` are not generic delimiters.
+            '<' if (item || generic) && prev != Some('<') && !matches!(next, Some('<' | '=')) => {
+                angle += 1
+            }
+            '>' if (item || generic) && !matches!(prev, Some('-' | '=')) && next != Some('=') => {
+                if angle == 0 {
+                    return j - 1;
+                }
+                angle -= 1;
+            }
+            ',' if depth == 0 && angle == 0 && !item => break,
+            ';' if depth == 0 => break,
+            '}' | ')' | ']' if depth == 0 => return j - 1,
+            // Braces inside generics are a const default, not the body.
+            '{' if depth == 0 && angle > 0 => j = block_end(code, j),
+            '{' if depth == 0 => return block_end(code, j),
+            _ => {}
+        }
+        j += 1;
+    }
+    j
+}
+
 /// 1-based lines of `src` holding a lint suppression outside test code.
 fn suppressions(src: &str) -> Vec<usize> {
     let mut code = code_only(src);
@@ -278,41 +354,7 @@ fn suppressions(src: &str) -> Vec<usize> {
             i = end;
             continue;
         }
-        // An item's header may hold commas (generics, `where` bounds); a
-        // field, arm or parameter ends at its comma.
-        let item = starts_item(&code, end);
-        let (mut j, mut depth) = (end, 0usize);
-        while j < code.len() {
-            match code[j] {
-                '(' | '[' => depth += 1,
-                ')' | ']' if depth > 0 => depth -= 1,
-                ',' if depth == 0 && !item => break,
-                ';' if depth == 0 => break,
-                '}' | ')' | ']' if depth == 0 => {
-                    j -= 1;
-                    break;
-                }
-                '{' if depth == 0 => {
-                    let mut braces = 0usize;
-                    while j < code.len() {
-                        match code[j] {
-                            '{' => braces += 1,
-                            '}' => {
-                                braces -= 1;
-                                if braces == 0 {
-                                    break;
-                                }
-                            }
-                            _ => {}
-                        }
-                        j += 1;
-                    }
-                    break;
-                }
-                _ => {}
-            }
-            j += 1;
-        }
+        let j = test_only_end(&code, run, end);
         let stop = (j + 1).min(code.len());
         for c in &mut code[run..stop] {
             if *c != '\n' {
@@ -487,7 +529,9 @@ const C: &core::ffi::CStr = cr#\"a\"b\"#;
 #[allow(live)]
 fn live() {}
 fn m(x: u8) { match x { #[cfg(test)] 0 => x < 1, #[allow(arm)] _ => x > 1 }; }
+fn g<#[cfg(test)] T>() { #[allow(gen)] let _ = 0; }
+#[cfg(test)] struct H<const N: usize = { 1 + 1 }> { #[allow(c)] b: [u8; N] }
 fn n(x: u8) { match x { #[cfg(test)] r#type if r#type < 1 => true, #[allow(raw)] _ => false }; }
 ";
-    assert_eq!(suppressions(src), vec![5, 7, 8]);
+    assert_eq!(suppressions(src), vec![5, 7, 8, 10]);
 }
