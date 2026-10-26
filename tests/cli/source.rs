@@ -197,7 +197,37 @@ impl<'ast> syn::visit::Visit<'ast> for ModDecls {
         self.test = outer;
     }
 
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        let names = macro_mod_decls(mac.tokens.clone());
+        assert!(
+            names.is_empty(),
+            "`mod {};` emitted by a macro is not supported by the source guards, \
+             which cannot tell whether (or where) it ships: declare it directly",
+            names.join(";`, `mod ")
+        );
+        syn::visit::visit_macro(self, mac);
+    }
+
     skip_test_only!(except visit_item_mod);
+}
+
+/// The out-of-line module declarations (`mod x;`) in macro tokens.
+fn macro_mod_decls(tokens: proc_macro2::TokenStream) -> Vec<String> {
+    use proc_macro2::TokenTree;
+    let trees: Vec<TokenTree> = tokens.into_iter().collect();
+    let mut names = Vec::new();
+    for (k, tree) in trees.iter().enumerate() {
+        match (tree, trees.get(k + 1), trees.get(k + 2)) {
+            (TokenTree::Ident(m), Some(TokenTree::Ident(name)), Some(TokenTree::Punct(p)))
+                if m == "mod" && p.as_char() == ';' =>
+            {
+                names.push(name.unraw().to_string());
+            }
+            (TokenTree::Group(g), _, _) => names.extend(macro_mod_decls(g.stream())),
+            _ => {}
+        }
+    }
+    names
 }
 
 /// The module files of the crate rooted at `root` (`src/main.rs`) that a
