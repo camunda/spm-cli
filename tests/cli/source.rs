@@ -426,17 +426,40 @@ fn syn_sources() -> PathBuf {
             continue;
         }
         let info = std::fs::read_to_string(&path).unwrap_or_default();
-        // Each source also gets its own `path:` line.
-        for line in info.lines() {
-            let file = Path::new(line.strip_suffix(':').unwrap_or_default());
-            if file.ends_with(Path::new("src").join("lib.rs"))
-                && file.components().any(|c| c.as_os_str() == dir.as_str())
-            {
-                return file.parent().unwrap().to_path_buf();
-            }
+        if let Some(src) = crate_sources(&info, &dir) {
+            return src;
         }
     }
     panic!("no dep-info in {} names {dir}'s sources", deps.display());
+}
+
+/// The `src` directory of the crate in directory `dir` (`syn-2.0.1`) that the
+/// dep-info file `info` lists, if any. Each source has its own `path:` line,
+/// with spaces escaped as `\ `.
+fn crate_sources(info: &str, dir: &str) -> Option<PathBuf> {
+    info.lines().find_map(|line| {
+        let file = PathBuf::from(line.strip_suffix(':')?.replace("\\ ", " "));
+        let found = file.ends_with(Path::new("src").join("lib.rs"))
+            && file.components().any(|c| c.as_os_str() == dir);
+        found
+            .then(|| file.parent().map(Path::to_path_buf))
+            .flatten()
+    })
+}
+
+#[test]
+fn crate_sources_decodes_escaped_spaces() {
+    let lib = Path::new("cargo home")
+        .join("syn-2.0.1")
+        .join("src")
+        .join("lib.rs");
+    let escaped = lib.display().to_string().replace(' ', "\\ ");
+    let info = format!("out.rmeta: {escaped} other.rs\n\n{escaped}:\nother.rs:\n");
+    assert_eq!(
+        crate_sources(&info, "syn-2.0.1"),
+        lib.parent().map(Path::to_path_buf)
+    );
+    assert_eq!(crate_sources(&info, "syn-2.0.2"), None);
 }
 
 /// The structs `src` declares with a `pub attrs: Vec<Attribute>` field.
