@@ -1,21 +1,31 @@
 //! Architecture guard: the top-level module graph of `src/` is pinned.
 //!
-//! Every `crate::<module>` reference in shipped code (comments, doc links,
-//! string literals and `#[cfg(test)]` items excluded; grouped
-//! `use crate::{a, b::c}` imports, inline paths, `super::` chains climbing to
-//! the crate root and paths in attribute strings like
-//! `#[serde(with = "crate::x")]` included) becomes an edge
+//! The source is parsed with `syn`, so comments, doc links, string literals
+//! and `#[cfg(test)]` nodes (at the parser's boundaries) are never read as
+//! code. Every `crate::<module>` reference in what is left (grouped
+//! `use crate::{a, b::c}` imports, inline paths, paths in macro bodies,
+//! `super::` chains climbing to the crate root, also across `use` groups, and
+//! whole-path strings of non-doc attributes like `#[serde(with = "crate::x")]`
+//! included) becomes an edge
 //! between top-level modules, where a module is the first path component
 //! under `src/` (`src/cli/**` is `cli`, `src/main.rs` is `main`). The result
 //! must equal [`ALLOWED_EDGES`] exactly, so a layering change is a deliberate,
 //! reviewed edit of that table, never a side effect. Crate-root globs and
 //! aliases (`use crate::*`, `use super::*` out of a top-level module,
-//! `use crate as x`, `extern crate self as x`) would hide edges, so they fail.
+//! `use crate as x`, `use super as x` reaching the root,
+//! `extern crate self as x`) would hide edges, so they fail.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use crate::source::{attribute, rust_files, shipped_code};
+use proc_macro2::{TokenStream, TokenTree};
+use syn::parse::Parser;
+use syn::punctuated::Punctuated;
+use syn::spanned::Spanned;
+use syn::visit::{self, Visit};
+use syn::Token;
+
+use crate::source::{is_cfg_test, parse, rust_files, skip_test_only};
 
 /// The allowed top-level dependency edges: the single source of truth for the
 /// layering of `src/`. A module absent here depends on no other module.
@@ -124,99 +134,245 @@ const TABLE: &str = "tests/cli/architecture.rs";
 
 type Graph = BTreeMap<String, BTreeSet<String>>;
 
-fn ident_at(code: &[char], i: usize) -> String {
-    code[i.min(code.len())..]
-        .iter()
-        .take_while(|c| c.is_alphanumeric() || **c == '_')
-        .collect()
-}
-
-fn skip_ws(code: &[char], mut i: usize) -> usize {
-    while code.get(i).is_some_and(|c| c.is_whitespace()) {
-        i += 1;
-    }
-    i
-}
-
-/// Whether `word` starts at `i` as a whole path segment (not part of a longer
-/// identifier, a `$crate` macro path or a `foo::word` tail).
-fn segment_at(code: &[char], i: usize, word: &str) -> bool {
-    let before = i.checked_sub(1).map(|k| code[k]);
-    if before.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '$' || c == ':') {
-        return false;
-    }
-    ident_at(code, i) == word
-}
-
-/// The offset just past `::` at `i` (whitespace allowed around it).
-fn path_sep(code: &[char], i: usize) -> Option<usize> {
-    let i = skip_ws(code, i);
-    (code.get(i) == Some(&':') && code.get(i + 1) == Some(&':')).then(|| skip_ws(code, i + 2))
-}
-
 /// The name standing for a crate-root reference that hides which modules it
 /// reaches: a glob (`crate::*`) or an alias of the root (`crate as x`).
 const OPAQUE: &str = "*";
 
-/// Whether `as` follows at `i` (whitespace allowed before it).
-fn aliased_at(code: &[char], i: usize) -> bool {
-    ident_at(code, skip_ws(code, i)) == "as"
+/// How a path ends: a name, a renamed name (`x as y`) or a glob.
+enum Leaf {
+    Name(String),
+    Rename(String),
+    Glob,
 }
 
-/// The first segment named at `i`, just after a `crate::`-rooted prefix, or
-/// [`OPAQUE`] for a glob or an aliased `self`.
-fn first_segment(code: &[char], i: usize) -> String {
-    let name = ident_at(code, i);
-    if code.get(i) == Some(&'*') || (name == "self" && aliased_at(code, i + name.len())) {
-        return OPAQUE.into();
-    }
-    name
-}
-
-/// The first segments named at `i`, just after a `crate::`-rooted prefix: one
-/// identifier, or each item of a `{a, b::c, ..}` group.
-fn first_segments(code: &[char], i: usize) -> Vec<String> {
-    if code.get(i) != Some(&'{') {
-        return vec![first_segment(code, i)];
-    }
-    let mut names = Vec::new();
-    let (mut j, mut depth, mut item_start) = (i + 1, 0usize, true);
-    while j < code.len() {
-        match code[j] {
-            '{' => depth += 1,
-            '}' if depth == 0 => break,
-            '}' => depth -= 1,
-            ',' if depth == 0 => item_start = true,
-            c if item_start && !c.is_whitespace() => {
-                item_start = false;
-                names.push(first_segment(code, j));
-            }
-            _ => {}
+/// The crate-root name `prefix` + `leaf` reaches from a module `depth` levels
+/// below the root, if it reaches one: the segment after `crate::` or after a
+/// `super::` chain that climbs out of the top-level module, or [`OPAQUE`] for
+/// a glob or an alias of the root itself.
+fn resolve(prefix: &[String], leaf: Leaf, depth: usize) -> Option<String> {
+    let mut full = prefix.to_vec();
+    let alias = match leaf {
+        Leaf::Name(n) if n == "self" => false,
+        Leaf::Rename(n) if n == "self" => true,
+        Leaf::Name(n) => {
+            full.push(n);
+            false
         }
-        j += 1;
+        Leaf::Rename(n) => {
+            full.push(n);
+            true
+        }
+        Leaf::Glob => true,
+    };
+    let rest = if full.first().is_some_and(|s| s == "crate") {
+        &full[1..]
+    } else {
+        let climbs = full.iter().take_while(|s| *s == "super").count();
+        if climbs == 0 || climbs < depth {
+            return None;
+        }
+        &full[climbs..]
+    };
+    match rest.first() {
+        Some(name) => Some(name.clone()),
+        None if alias => Some(OPAQUE.into()),
+        None => None,
     }
-    names
 }
 
-/// Whether the `{` at `i` opens an inline `mod name { .. }`.
-fn opens_inline_mod(code: &[char], i: usize) -> bool {
-    let mut j = i;
-    while j > 0 && code[j - 1].is_whitespace() {
-        j -= 1;
+/// Collects the crate-root names a file's shipped code reaches, with the line
+/// of each. `syn` has already dropped comments, so only paths, `use` trees,
+/// tokens of macro bodies and path strings of attributes are left to read.
+struct Refs {
+    /// Module depth of the code being visited: the file's, plus one per
+    /// enclosing inline `mod`.
+    depth: usize,
+    out: Vec<(String, usize)>,
+}
+
+impl Refs {
+    fn push(&mut self, name: Option<String>, line: usize) {
+        if let Some(name) = name {
+            self.out.push((name, line));
+        }
     }
-    let name_end = j;
-    while j > 0 && (code[j - 1].is_alphanumeric() || code[j - 1] == '_') {
-        j -= 1;
+
+    fn path(&mut self, path: &syn::Path, line: Option<usize>) {
+        if path.leading_colon.is_some() {
+            return; // `::x` names an external crate
+        }
+        let mut segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        let Some(last) = segs.pop() else {
+            return;
+        };
+        let line = line.unwrap_or_else(|| path.segments[0].ident.span().start().line);
+        self.push(resolve(&segs, Leaf::Name(last), self.depth), line);
     }
-    if j == name_end {
-        return false;
+
+    fn use_tree(&mut self, tree: &syn::UseTree, prefix: &mut Vec<String>, line: usize) {
+        let resolved = match tree {
+            syn::UseTree::Path(p) => {
+                prefix.push(p.ident.to_string());
+                self.use_tree(&p.tree, prefix, line);
+                prefix.pop();
+                return;
+            }
+            syn::UseTree::Group(g) => {
+                for item in &g.items {
+                    self.use_tree(item, prefix, line);
+                }
+                return;
+            }
+            syn::UseTree::Name(n) => resolve(prefix, Leaf::Name(n.ident.to_string()), self.depth),
+            syn::UseTree::Rename(r) => {
+                resolve(prefix, Leaf::Rename(r.ident.to_string()), self.depth)
+            }
+            syn::UseTree::Glob(_) => resolve(prefix, Leaf::Glob, self.depth),
+        };
+        self.push(resolved, line);
     }
-    while j > 0 && code[j - 1].is_whitespace() {
-        j -= 1;
+
+    /// References in tokens `syn` leaves unparsed (macro bodies, attribute
+    /// arguments): `crate::`/`super::` paths not behind `$` (`$crate` is the
+    /// defining crate, whoever expands it) and, when `strings` is set, string
+    /// literals holding a whole path (`#[serde(with = "crate::x")]`) unless
+    /// they are a `doc` value.
+    fn tokens(&mut self, tokens: TokenStream, strings: bool) {
+        let trees: Vec<TokenTree> = tokens.into_iter().collect();
+        let punct = |k: usize, c: char| matches!(trees.get(k), Some(TokenTree::Punct(p)) if p.as_char() == c);
+        let ident = |k: usize| match trees.get(k) {
+            Some(TokenTree::Ident(i)) => Some(i.to_string()),
+            _ => None,
+        };
+        let sep = |k: usize| punct(k, ':') && punct(k + 1, ':');
+        let mut k = 0;
+        while k < trees.len() {
+            match &trees[k] {
+                TokenTree::Group(g) => self.tokens(g.stream(), strings),
+                TokenTree::Literal(lit) if strings => {
+                    let is_doc =
+                        k >= 2 && punct(k - 1, '=') && ident(k - 2).as_deref() == Some("doc");
+                    let path = syn::parse2::<syn::LitStr>(TokenTree::Literal(lit.clone()).into())
+                        .ok()
+                        .and_then(|s| s.parse::<syn::Path>().ok());
+                    if let Some(path) = path.filter(|_| !is_doc) {
+                        self.path(&path, Some(lit.span().start().line));
+                    }
+                }
+                TokenTree::Ident(i)
+                    if matches!(i.to_string().as_str(), "crate" | "super")
+                        && !(k > 0 && punct(k - 1, '$'))
+                        && !(k > 1 && sep(k - 2)) =>
+                {
+                    let line = i.span().start().line;
+                    let mut prefix = vec![i.to_string()];
+                    let mut j = k + 1;
+                    while sep(j) {
+                        j += 2;
+                        match (&trees.get(j), ident(j)) {
+                            (_, Some(n)) if matches!(n.as_str(), "crate" | "super" | "self") => {
+                                prefix.push(n);
+                                j += 1;
+                            }
+                            (_, Some(n)) => {
+                                let leaf = if ident(j + 1).as_deref() == Some("as") {
+                                    Leaf::Rename(n)
+                                } else {
+                                    Leaf::Name(n)
+                                };
+                                self.push(resolve(&prefix, leaf, self.depth), line);
+                                break;
+                            }
+                            (Some(TokenTree::Punct(p)), _) if p.as_char() == '*' => {
+                                self.push(resolve(&prefix, Leaf::Glob, self.depth), line);
+                                break;
+                            }
+                            (Some(TokenTree::Group(g)), _) => {
+                                let parser =
+                                    Punctuated::<syn::UseTree, Token![,]>::parse_terminated;
+                                for item in parser.parse2(g.stream()).into_iter().flatten() {
+                                    self.use_tree(&item, &mut prefix.clone(), line);
+                                }
+                                break;
+                            }
+                            _ => break,
+                        }
+                    }
+                    // `crate as x`, `super as x`, `crate self as x`.
+                    if !sep(j) {
+                        let last = prefix.pop().unwrap_or_default();
+                        let aliased = ident(j).as_deref() == Some("as")
+                            || (last == "crate"
+                                && ident(j).as_deref() == Some("self")
+                                && ident(j + 1).as_deref() == Some("as"));
+                        if aliased {
+                            self.push(resolve(&prefix, Leaf::Rename(last), self.depth), line);
+                        }
+                    }
+                    k = j.max(k + 1);
+                    continue;
+                }
+                _ => {}
+            }
+            k += 1;
+        }
     }
-    j >= 3
-        && code[j - 3..j] == ['m', 'o', 'd']
-        && (j == 3 || !(code[j - 4].is_alphanumeric() || code[j - 4] == '_'))
+}
+
+impl<'ast> Visit<'ast> for Refs {
+    fn visit_item(&mut self, item: &'ast syn::Item) {
+        if let syn::Item::ExternCrate(e) = item {
+            // `extern crate self as x;` aliases the root.
+            if e.ident == "self" && e.rename.is_some() && !e.attrs.iter().any(is_cfg_test) {
+                self.out.push((OPAQUE.into(), e.ident.span().start().line));
+            }
+        }
+        let inline_mod = matches!(item, syn::Item::Mod(m) if m.content.is_some());
+        self.depth += usize::from(inline_mod);
+        visit::visit_item(self, item);
+        self.depth -= usize::from(inline_mod);
+    }
+
+    fn visit_path(&mut self, path: &'ast syn::Path) {
+        self.path(path, None);
+        visit::visit_path(self, path);
+    }
+
+    fn visit_use_tree(&mut self, tree: &'ast syn::UseTree) {
+        let line = tree.span().start().line;
+        self.use_tree(tree, &mut Vec::new(), line);
+    }
+
+    fn visit_attribute(&mut self, attr: &'ast syn::Attribute) {
+        if attr.path().is_ident("doc") {
+            return;
+        }
+        self.visit_path(attr.path());
+        match &attr.meta {
+            syn::Meta::Path(_) => {}
+            syn::Meta::List(list) => self.tokens(list.tokens.clone(), true),
+            syn::Meta::NameValue(nv) => {
+                if let syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(lit),
+                    ..
+                }) = &nv.value
+                {
+                    self.tokens(TokenTree::Literal(lit.token()).into(), true);
+                }
+                self.visit_expr(&nv.value);
+            }
+        }
+    }
+
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        self.tokens(mac.tokens.clone(), false);
+        visit::visit_macro(self, mac);
+    }
+
+    /// `pub(crate)`/`pub(in crate::x)` restrict visibility; they use nothing.
+    fn visit_visibility(&mut self, _: &'ast syn::Visibility) {}
+
+    skip_test_only!();
 }
 
 /// The crate-root names a file's shipped code reaches: every `crate::<name>`
@@ -224,69 +380,15 @@ fn opens_inline_mod(code: &[char], i: usize) -> bool {
 /// `file_depth` is the file's module depth (`src/x.rs` and `src/x/mod.rs` are
 /// 1, `src/x/y.rs` is 2, `src/main.rs` is 0).
 fn crate_refs(src: &str, file_depth: usize) -> Vec<(String, usize)> {
-    let mut code = shipped_code(src);
-    // Paths in attribute strings (`#[serde(with = "crate::x::y")]`) are real
-    // dependencies: restore the literals of every non-doc attribute.
-    let original: Vec<char> = src.chars().collect();
-    let mut i = 0;
-    while i < code.len() {
-        match attribute(&code, i) {
-            Some((body, end)) => {
-                if !body.starts_with("doc") {
-                    code[i..end].copy_from_slice(&original[i..end]);
-                }
-                i = end;
-            }
-            None => i += 1,
-        }
-    }
-    let line = |i: usize| code[..i].iter().filter(|&&c| c == '\n').count() + 1;
-    let mut braces: Vec<bool> = Vec::new();
-    let mut refs = Vec::new();
-    let mut i = 0;
-    while i < code.len() {
-        match code[i] {
-            '{' => braces.push(opens_inline_mod(&code, i)),
-            '}' => {
-                braces.pop();
-            }
-            _ if segment_at(&code, i, "crate") => {
-                let after = i + "crate".len();
-                if let Some(rest) = path_sep(&code, after) {
-                    refs.extend(
-                        first_segments(&code, rest)
-                            .into_iter()
-                            .map(|n| (n, line(i))),
-                    );
-                } else if aliased_at(&code, after)
-                    || first_segment(&code, skip_ws(&code, after)) == OPAQUE
-                {
-                    // `use crate as x;` / `extern crate self as x;`
-                    refs.push((OPAQUE.into(), line(i)));
-                }
-            }
-            _ if segment_at(&code, i, "super") => {
-                let depth = file_depth + braces.iter().filter(|&&m| m).count();
-                let (mut j, mut climbs) = (i, 0);
-                while ident_at(&code, j) == "super" {
-                    let Some(next) = path_sep(&code, j + "super".len()) else {
-                        break;
-                    };
-                    climbs += 1;
-                    j = next;
-                }
-                if climbs > 0 && climbs >= depth {
-                    refs.extend(first_segments(&code, j).into_iter().map(|n| (n, line(i))));
-                }
-                i = j.max(i + 1);
-                continue;
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    refs.retain(|(n, _)| !n.is_empty() && !matches!(n.as_str(), "self" | "super" | "crate"));
-    refs
+    let mut refs = Refs {
+        depth: file_depth,
+        out: Vec::new(),
+    };
+    refs.visit_file(&parse(src));
+    let mut out = refs.out;
+    out.sort_by_key(|r| r.1);
+    out.dedup();
+    out
 }
 
 /// The top-level module `rel` (relative to `src/`) belongs to, and its depth.
@@ -529,6 +631,7 @@ use crate :: delta;
 fn f() { let _ = crate::epsilon::call(1); crate::zeta!(); }
 pub(crate) fn g() {}
 #[serde(serialize_with = \"crate::eta::serialize\")]
+struct S;
 ";
     let names: Vec<String> = crate_refs(src, 1).into_iter().map(|r| r.0).collect();
     assert_eq!(
@@ -536,6 +639,53 @@ pub(crate) fn g() {}
         ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta"]
     );
     assert_eq!(crate_refs(src, 1)[4].1, 3, "references carry their line");
+}
+
+#[test]
+fn crate_refs_reads_attributes_without_their_comments_or_docs() {
+    let src = r#"
+#[derive(/* crate::ghost */ Debug)]
+struct A;
+#[cfg_attr(unix, doc = "crate::ghost")]
+fn b() {}
+#[thiserror(error = "crate::ghost failed")]
+struct C;
+#[cfg_attr(unix, serde(with = "crate::alpha"))]
+struct D;
+#[crate::beta]
+fn e() {}
+"#;
+    let names: Vec<String> = crate_refs(src, 1).into_iter().map(|r| r.0).collect();
+    assert_eq!(names, ["alpha", "beta"]);
+}
+
+/// Literals `syn` lexes (raw C strings with an embedded quote) never hide or
+/// invent code, and `cfg(test)` nodes end at the parser's boundaries.
+#[test]
+fn crate_refs_bounds_literals_and_test_code_by_syntax() {
+    for src in [
+        "const C: &core::ffi::CStr = cr#\"a\"b\"#; fn f() { crate::alpha::run(); }",
+        "fn f<#[cfg(test)] T>() { crate::alpha::run(); }",
+        "fn f(#[cfg(test)] x: u8) { crate::alpha::run(); }",
+    ] {
+        let names: Vec<String> = crate_refs(src, 1).into_iter().map(|r| r.0).collect();
+        assert_eq!(names, ["alpha"], "{src}");
+    }
+    let src = "#[cfg(test)] fn f<A, B>() { crate::alpha::run(); }";
+    assert!(crate_refs(src, 1).is_empty(), "{src}");
+}
+
+#[test]
+fn crate_refs_carries_relative_depth_through_groups() {
+    let names =
+        |src: &str| -> Vec<String> { crate_refs(src, 2).into_iter().map(|r| r.0).collect() };
+    assert_eq!(names("use super::{super::alpha};"), ["alpha"]);
+    assert_eq!(
+        names("use super::{super::{alpha, beta::X}};"),
+        ["alpha", "beta"]
+    );
+    assert_eq!(names("use super::{super::*};"), [OPAQUE]);
+    assert!(names("use super::{sibling, inner::X};").is_empty());
 }
 
 #[test]
@@ -653,11 +803,18 @@ fn crate_refs_flags_imports_that_hide_edges() {
         "use crate::{self as root};",
         "use crate::self as root;",
         "extern crate self as root;",
+        "macro_rules! m { () => { use crate as root; }; }",
     ] {
         assert_eq!(opaque(src, 1), [OPAQUE], "{src}");
     }
     assert_eq!(opaque("use super::*;", 1), [OPAQUE]);
     assert_eq!(opaque("use super::super::*;", 2), [OPAQUE]);
+    // Aliasing the root through `super` hides edges just as `crate as` does.
+    let aliased = "use super as root;\nfn f() { root::cli::run(); }";
+    assert_eq!(opaque(aliased, 1), [OPAQUE]);
+    assert_eq!(opaque("use super::super as root;", 2), [OPAQUE]);
+    assert_eq!(opaque("use super::{super as root};", 2), [OPAQUE]);
+    assert!(opaque("use super as parent;", 2).is_empty());
     // Globs that stay inside the top-level module, or in test code, are fine.
     for (src, depth) in [
         ("use super::*;", 2),

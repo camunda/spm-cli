@@ -1,269 +1,154 @@
-//! Source scanning shared by the guards that read `src/` (lint policy,
-//! layout, architecture): a comment/literal-blind, test-code-blind view of a
-//! Rust file, so every guard judges exactly the code that ships.
+//! Source parsing shared by the guards that read `src/` (lint policy,
+//! layout, architecture): files are parsed with `syn`, so comments and
+//! literals are never code, and nodes gated by a `cfg` that requires `test`
+//! are skipped whole at the parser's boundaries (fields, arms, parameters,
+//! generics), so every guard judges exactly the code that ships.
 
 use std::path::{Path, PathBuf};
 
-/// `src` with every comment and string/char literal blanked to spaces
-/// (newlines kept, so offsets still map to the same lines).
-fn code_only(src: &str) -> Vec<char> {
-    let s: Vec<char> = src.chars().collect();
-    let mut out = s.clone();
-    let blank = |out: &mut Vec<char>, from: usize, to: usize| {
-        for c in &mut out[from..to.min(s.len())] {
-            if *c != '\n' {
-                *c = ' ';
-            }
+use syn::ext::IdentExt;
+use syn::punctuated::Punctuated;
+use syn::{Attribute, Meta, Token};
+
+/// The attribute's name, without a raw-identifier prefix (`r#allow`).
+pub fn name(meta: &Meta) -> Option<String> {
+    meta.path().get_ident().map(|i| i.unraw().to_string())
+}
+
+/// The comma-separated arguments of a list attribute, or `None` if they don't
+/// parse as meta items.
+pub fn args(meta: &Meta) -> Option<Vec<Meta>> {
+    match meta {
+        Meta::List(list) => list
+            .parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
+            .ok()
+            .map(|p| p.into_iter().collect()),
+        _ => Some(Vec::new()),
+    }
+}
+
+fn nested(meta: &Meta) -> Vec<Meta> {
+    args(meta).unwrap_or_default()
+}
+
+/// Whether `pred` (a `cfg` predicate) can only hold when `test` does.
+pub fn requires_test(pred: &Meta) -> bool {
+    match name(pred).as_deref() {
+        Some("test") => matches!(pred, Meta::Path(_)),
+        Some("all") => nested(pred).iter().any(requires_test),
+        Some("any") => {
+            let preds = nested(pred);
+            !preds.is_empty() && preds.iter().all(requires_test)
+        }
+        _ => false,
+    }
+}
+
+/// Whether `attr` is a `cfg` that enables its node only under test.
+pub fn is_cfg_test(attr: &Attribute) -> bool {
+    let meta = &attr.meta;
+    name(meta).as_deref() == Some("cfg") && nested(meta).first().is_some_and(requires_test)
+}
+
+/// Implements, inside an `impl Visit<'ast>`, every visit method of a node
+/// that carries attributes so that a node gated on a `cfg` requiring `test`
+/// is skipped whole and anything else is walked as usual.
+macro_rules! skip_test_only {
+    () => {
+        $crate::source::skip_test_only! {
+            visit_file(syn::File) via visit_file;
+            visit_item_const(syn::ItemConst) via visit_item_const;
+            visit_item_enum(syn::ItemEnum) via visit_item_enum;
+            visit_item_extern_crate(syn::ItemExternCrate) via visit_item_extern_crate;
+            visit_item_fn(syn::ItemFn) via visit_item_fn;
+            visit_item_foreign_mod(syn::ItemForeignMod) via visit_item_foreign_mod;
+            visit_item_impl(syn::ItemImpl) via visit_item_impl;
+            visit_item_macro(syn::ItemMacro) via visit_item_macro;
+            visit_item_mod(syn::ItemMod) via visit_item_mod;
+            visit_item_static(syn::ItemStatic) via visit_item_static;
+            visit_item_struct(syn::ItemStruct) via visit_item_struct;
+            visit_item_trait(syn::ItemTrait) via visit_item_trait;
+            visit_item_trait_alias(syn::ItemTraitAlias) via visit_item_trait_alias;
+            visit_item_type(syn::ItemType) via visit_item_type;
+            visit_item_union(syn::ItemUnion) via visit_item_union;
+            visit_item_use(syn::ItemUse) via visit_item_use;
+            visit_foreign_item_fn(syn::ForeignItemFn) via visit_foreign_item_fn;
+            visit_foreign_item_static(syn::ForeignItemStatic) via visit_foreign_item_static;
+            visit_foreign_item_type(syn::ForeignItemType) via visit_foreign_item_type;
+            visit_foreign_item_macro(syn::ForeignItemMacro) via visit_foreign_item_macro;
+            visit_trait_item_const(syn::TraitItemConst) via visit_trait_item_const;
+            visit_trait_item_fn(syn::TraitItemFn) via visit_trait_item_fn;
+            visit_trait_item_type(syn::TraitItemType) via visit_trait_item_type;
+            visit_trait_item_macro(syn::TraitItemMacro) via visit_trait_item_macro;
+            visit_impl_item_const(syn::ImplItemConst) via visit_impl_item_const;
+            visit_impl_item_fn(syn::ImplItemFn) via visit_impl_item_fn;
+            visit_impl_item_type(syn::ImplItemType) via visit_impl_item_type;
+            visit_impl_item_macro(syn::ImplItemMacro) via visit_impl_item_macro;
+            visit_field(syn::Field) via visit_field;
+            visit_variant(syn::Variant) via visit_variant;
+            visit_arm(syn::Arm) via visit_arm;
+            visit_field_value(syn::FieldValue) via visit_field_value;
+            visit_local(syn::Local) via visit_local;
+            visit_type_param(syn::TypeParam) via visit_type_param;
+            visit_const_param(syn::ConstParam) via visit_const_param;
+            visit_lifetime_param(syn::LifetimeParam) via visit_lifetime_param;
+            visit_receiver(syn::Receiver) via visit_receiver;
+            visit_pat_type(syn::PatType) via visit_pat_type;
+            visit_expr_array(syn::ExprArray) via visit_expr_array;
+            visit_expr_assign(syn::ExprAssign) via visit_expr_assign;
+            visit_expr_async(syn::ExprAsync) via visit_expr_async;
+            visit_expr_await(syn::ExprAwait) via visit_expr_await;
+            visit_expr_binary(syn::ExprBinary) via visit_expr_binary;
+            visit_expr_block(syn::ExprBlock) via visit_expr_block;
+            visit_expr_break(syn::ExprBreak) via visit_expr_break;
+            visit_expr_call(syn::ExprCall) via visit_expr_call;
+            visit_expr_cast(syn::ExprCast) via visit_expr_cast;
+            visit_expr_closure(syn::ExprClosure) via visit_expr_closure;
+            visit_expr_const(syn::ExprConst) via visit_expr_const;
+            visit_expr_continue(syn::ExprContinue) via visit_expr_continue;
+            visit_expr_field(syn::ExprField) via visit_expr_field;
+            visit_expr_for_loop(syn::ExprForLoop) via visit_expr_for_loop;
+            visit_expr_group(syn::ExprGroup) via visit_expr_group;
+            visit_expr_if(syn::ExprIf) via visit_expr_if;
+            visit_expr_index(syn::ExprIndex) via visit_expr_index;
+            visit_expr_infer(syn::ExprInfer) via visit_expr_infer;
+            visit_expr_let(syn::ExprLet) via visit_expr_let;
+            visit_expr_lit(syn::ExprLit) via visit_expr_lit;
+            visit_expr_loop(syn::ExprLoop) via visit_expr_loop;
+            visit_expr_macro(syn::ExprMacro) via visit_expr_macro;
+            visit_expr_match(syn::ExprMatch) via visit_expr_match;
+            visit_expr_method_call(syn::ExprMethodCall) via visit_expr_method_call;
+            visit_expr_paren(syn::ExprParen) via visit_expr_paren;
+            visit_expr_path(syn::ExprPath) via visit_expr_path;
+            visit_expr_range(syn::ExprRange) via visit_expr_range;
+            visit_expr_raw_addr(syn::ExprRawAddr) via visit_expr_raw_addr;
+            visit_expr_reference(syn::ExprReference) via visit_expr_reference;
+            visit_expr_repeat(syn::ExprRepeat) via visit_expr_repeat;
+            visit_expr_return(syn::ExprReturn) via visit_expr_return;
+            visit_expr_struct(syn::ExprStruct) via visit_expr_struct;
+            visit_expr_try(syn::ExprTry) via visit_expr_try;
+            visit_expr_try_block(syn::ExprTryBlock) via visit_expr_try_block;
+            visit_expr_tuple(syn::ExprTuple) via visit_expr_tuple;
+            visit_expr_unary(syn::ExprUnary) via visit_expr_unary;
+            visit_expr_unsafe(syn::ExprUnsafe) via visit_expr_unsafe;
+            visit_expr_while(syn::ExprWhile) via visit_expr_while;
+            visit_expr_yield(syn::ExprYield) via visit_expr_yield;
+            visit_stmt_macro(syn::StmtMacro) via visit_stmt_macro;
         }
     };
-    let ident = |c: char| c.is_alphanumeric() || c == '_';
-    let mut i = 0;
-    while i < s.len() {
-        let at = |k: usize| s.get(i + k).copied();
-        if at(0) == Some('/') && at(1) == Some('/') {
-            let end = s[i..]
-                .iter()
-                .position(|&c| c == '\n')
-                .map_or(s.len(), |p| i + p);
-            blank(&mut out, i, end);
-            i = end;
-        } else if at(0) == Some('/') && at(1) == Some('*') {
-            // Block comments nest in Rust.
-            let (mut depth, mut j) = (0usize, i);
-            while j < s.len() {
-                if s[j] == '/' && s.get(j + 1) == Some(&'*') {
-                    depth += 1;
-                    j += 2;
-                } else if s[j] == '*' && s.get(j + 1) == Some(&'/') {
-                    depth -= 1;
-                    j += 2;
-                    if depth == 0 {
-                        break;
-                    }
-                } else {
-                    j += 1;
-                }
+    ($($method:ident($node:ty) via $walk:ident;)*) => {
+        $(fn $method(&mut self, node: &'ast $node) {
+            if !node.attrs.iter().any($crate::source::is_cfg_test) {
+                syn::visit::$walk(self, node);
             }
-            blank(&mut out, i, j);
-            i = j;
-        } else if (at(0) == Some('r') || (at(0) == Some('b') && at(1) == Some('r')))
-            && (i == 0 || !ident(s[i - 1]))
-            && {
-                let r = if at(0) == Some('b') { i + 1 } else { i };
-                let hashes = s[r + 1..].iter().take_while(|&&c| c == '#').count();
-                s.get(r + 1 + hashes) == Some(&'"')
-            }
-        {
-            let r = if at(0) == Some('b') { i + 1 } else { i };
-            let hashes = s[r + 1..].iter().take_while(|&&c| c == '#').count();
-            let mut j = r + 2 + hashes;
-            while j < s.len() {
-                if s[j] == '"'
-                    && s[j + 1..]
-                        .iter()
-                        .take(hashes)
-                        .filter(|&&c| c == '#')
-                        .count()
-                        == hashes
-                {
-                    j += 1 + hashes;
-                    break;
-                }
-                j += 1;
-            }
-            blank(&mut out, i, j);
-            i = j;
-        } else if at(0) == Some('"') {
-            let mut j = i + 1;
-            while j < s.len() && s[j] != '"' {
-                j += if s[j] == '\\' { 2 } else { 1 };
-            }
-            blank(&mut out, i, j + 1);
-            i = j + 1;
-        } else if at(0) == Some('\'') && (at(1) == Some('\\') || at(2) == Some('\'')) {
-            // A char literal (a lifetime `'a` has no closing quote).
-            let mut j = i + 1;
-            while j < s.len() && s[j] != '\'' {
-                j += if s[j] == '\\' { 2 } else { 1 };
-            }
-            blank(&mut out, i, j + 1);
-            i = j + 1;
-        } else {
-            i += 1;
-        }
-    }
-    out
-}
-
-/// An attribute starting at `i` (`#[..]` or `#![..]`): its body with all
-/// whitespace and raw-identifier prefixes (`r#allow` is `allow`) removed, and
-/// the offset just past its closing `]`.
-pub fn attribute(code: &[char], i: usize) -> Option<(String, usize)> {
-    let skip_ws = |mut j: usize| {
-        while code.get(j).is_some_and(|c| c.is_whitespace()) {
-            j += 1;
-        }
-        j
+        })*
     };
-    if code.get(i) != Some(&'#') {
-        return None;
-    }
-    let mut j = skip_ws(i + 1);
-    if code.get(j) == Some(&'!') {
-        j = skip_ws(j + 1);
-    }
-    if code.get(j) != Some(&'[') {
-        return None;
-    }
-    let (start, mut depth) = (j + 1, 0usize);
-    while j < code.len() {
-        match code[j] {
-            '[' => depth += 1,
-            ']' => {
-                depth -= 1;
-                if depth == 0 {
-                    let body: Vec<char> = code[start..j]
-                        .iter()
-                        .copied()
-                        .filter(|c| !c.is_whitespace())
-                        .collect();
-                    return Some((unraw(&body), j + 1));
-                }
-            }
-            _ => {}
-        }
-        j += 1;
-    }
-    None
 }
+pub(crate) use skip_test_only;
 
-/// `body` with every raw-identifier prefix dropped: `r#` starting an
-/// identifier (literals are already blanked, so no raw string remains).
-fn unraw(body: &[char]) -> String {
-    let ident = |c: char| c.is_alphanumeric() || c == '_';
-    let mut out = String::with_capacity(body.len());
-    let mut k = 0;
-    while k < body.len() {
-        let raw =
-            body[k] == 'r' && body.get(k + 1) == Some(&'#') && (k == 0 || !ident(body[k - 1]));
-        if raw {
-            k += 2;
-        } else {
-            out.push(body[k]);
-            k += 1;
-        }
-    }
-    out
-}
-
-/// Whether a compacted attribute body is a `cfg` that enables its item only
-/// under test: exactly `cfg(test)`, or `cfg(all(..))` with `test` as a direct
-/// argument. `any(..)`/`not(..)` (and anything else) can ship, so they are not.
-fn is_cfg_test(body: &str) -> bool {
-    let Some(pred) = body.strip_prefix("cfg(").and_then(|p| p.strip_suffix(')')) else {
-        return false;
-    };
-    if pred == "test" {
-        return true;
-    }
-    let Some(args) = pred.strip_prefix("all(").and_then(|p| p.strip_suffix(')')) else {
-        return false;
-    };
-    let (mut depth, mut start) = (0usize, 0usize);
-    for (k, c) in args.char_indices() {
-        match c {
-            '(' => depth += 1,
-            ')' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                if &args[start..k] == "test" {
-                    return true;
-                }
-                start = k + 1;
-            }
-            _ => {}
-        }
-    }
-    &args[start..] == "test"
-}
-
-/// Whether the attribute starting at `i` is an inner one (`#![..]`), which
-/// applies to its enclosing module rather than the next item.
-fn is_inner(code: &[char], i: usize) -> bool {
-    code[i + 1..]
-        .iter()
-        .find(|c| !c.is_whitespace())
-        .is_some_and(|&c| c == '!')
-}
-
-/// `src` as it ships: [`code_only`], with every `#[cfg(test)]` item (its
-/// whole attribute list, whatever the order, signature and body) blanked too.
-/// Offsets still map to the same lines.
-pub fn shipped_code(src: &str) -> Vec<char> {
-    let mut code = code_only(src);
-    // Blank every `#[cfg(test)]` item: its attributes, signature and body. An
-    // item ends at a top-level `;`, `,` (a field/arm/variant/parameter) or
-    // `{..}` block, or just before a `}`, `)` or `]` closing the enclosing one.
-    let mut i = 0;
-    // Start of the run of attributes the one at `i` belongs to, and the end of
-    // the previous attribute in it (only whitespace may separate two).
-    let (mut run, mut last_end) = (0usize, None::<usize>);
-    while i < code.len() {
-        let Some((body, end)) = attribute(&code, i) else {
-            i += 1;
-            continue;
-        };
-        let inner = is_inner(&code, i);
-        let joined = last_end.is_some_and(|e| code[e..i].iter().all(|c| c.is_whitespace()));
-        if inner || !joined {
-            run = i;
-        }
-        // An inner attribute applies to its module, not to the next item.
-        last_end = (!inner).then_some(end);
-        if !is_cfg_test(&body) {
-            i = end;
-            continue;
-        }
-        let (mut j, mut depth) = (end, 0usize);
-        while j < code.len() {
-            match code[j] {
-                '(' | '[' => depth += 1,
-                ')' | ']' if depth > 0 => depth -= 1,
-                ';' | ',' if depth == 0 => break,
-                '}' | ')' | ']' if depth == 0 => {
-                    j -= 1;
-                    break;
-                }
-                '{' if depth == 0 => {
-                    let mut braces = 0usize;
-                    while j < code.len() {
-                        match code[j] {
-                            '{' => braces += 1,
-                            '}' => {
-                                braces -= 1;
-                                if braces == 0 {
-                                    break;
-                                }
-                            }
-                            _ => {}
-                        }
-                        j += 1;
-                    }
-                    break;
-                }
-                _ => {}
-            }
-            j += 1;
-        }
-        let stop = (j + 1).min(code.len());
-        for c in &mut code[run..stop] {
-            if *c != '\n' {
-                *c = ' ';
-            }
-        }
-        i = stop;
-        last_end = None;
-    }
-    code
+/// Parses a `src/` file, failing the guard on a syntax `syn` cannot read.
+pub fn parse(src: &str) -> syn::File {
+    syn::parse_file(src).unwrap_or_else(|e| panic!("cannot parse source: {e}"))
 }
 
 /// Every `.rs` file under `dir`, recursively.
