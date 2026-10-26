@@ -162,9 +162,19 @@ fn is_cfg_test(body: &str) -> bool {
     &args[start..] == "test"
 }
 
+/// Whether the attribute starting at `i` is an inner one (`#![..]`), which
+/// applies to its enclosing module rather than the next item.
+fn is_inner(code: &[char], i: usize) -> bool {
+    code[i + 1..]
+        .iter()
+        .find(|c| !c.is_whitespace())
+        .is_some_and(|&c| c == '!')
+}
+
 /// `src` as it ships: [`code_only`], with every `#[cfg(test)]` item (its
-/// attributes, signature and body) blanked too. Offsets still map to the same
-/// lines.
+/// attributes, signature and body) blanked too, and everything after a
+/// `#![cfg(test)]` up to the end of its module (a whole test-only file).
+/// Offsets still map to the same lines.
 pub fn shipped_code(src: &str) -> Vec<char> {
     let mut code = code_only(src);
     // Blank every `#[cfg(test)]` item: its attributes, signature and body. An
@@ -180,9 +190,17 @@ pub fn shipped_code(src: &str) -> Vec<char> {
             i = end;
             continue;
         }
+        let inner = is_inner(&code, i);
         let (mut j, mut depth) = (end, 0usize);
         while j < code.len() {
             match code[j] {
+                '{' | '(' | '[' if inner => depth += 1,
+                '}' | ')' | ']' if inner && depth > 0 => depth -= 1,
+                '}' if inner => {
+                    j -= 1;
+                    break;
+                }
+                _ if inner => {}
                 '(' | '[' => depth += 1,
                 ')' | ']' => depth = depth.saturating_sub(1),
                 ';' | ',' if depth == 0 => break,

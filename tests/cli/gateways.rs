@@ -6,8 +6,8 @@
 //! reason. An allow-listed file that no longer uses the primitive fails too
 //! (stale entry), so the lists can only shrink.
 //!
-//! Only shipped code counts: comments, string literals and `#[cfg(test)]`
-//! items (which legitimately spawn `git`/`mkfifo` or write fixtures) are
+//! Only shipped code counts: comments, string literals, `#[cfg(test)]`
+//! items and `#![cfg(test)]` files (which legitimately spawn `git`/`mkfifo` or write fixtures) are
 //! ignored, through the shared [`shipped_code`] view.
 
 use std::path::Path;
@@ -353,6 +353,17 @@ mod tests {
     assert_eq!(occurrences(src, "fs::write"), vec![7]);
     assert_eq!(occurrences(src, "OpenOptions"), vec![9]);
     assert_eq!(occurrences(src, "try_lock"), Vec::<usize>::new());
+}
+
+/// A whole test-only file (`#![cfg(test)]`, declared `mod x;`) ships nothing,
+/// however many items follow the attribute.
+#[test]
+fn occurrences_skips_a_test_only_file() {
+    let src = "//! Fixtures.\n#![cfg(test)]\nuse std::fs;\nfn a() { fs::read_dir(p); }\nfn b() { std::fs::write(p, x); }\n";
+    assert_eq!(occurrences(src, "read_dir"), Vec::<usize>::new());
+    assert_eq!(occurrences(src, "fs::write"), Vec::<usize>::new());
+    let shipped = "#![cfg(not(test))]\nfn b() { std::fs::write(p, x); }\n";
+    assert_eq!(occurrences(shipped, "fs::write"), vec![2]);
 }
 
 #[test]

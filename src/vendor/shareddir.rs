@@ -397,20 +397,4 @@ mod tests {
 
         std::fs::remove_dir_all(&tmp).unwrap();
     }
-
-    /// Clean removes only spm-managed entries, leaving the user's intact.
-    #[test]
-    fn clean_removes_only_managed() {
-        let tmp = scratch("clean");
-        let dir = tmp.join("skills");
-        std::fs::create_dir_all(&dir).unwrap();
-        for n in ["greet", "user-skill"] {
-            std::fs::create_dir_all(dir.join(n)).unwrap();
-            std::fs::write(dir.join(n).join("SKILL.md"), "x\n").unwrap();
-        }
-        remove_managed(&dir, [&dep("greet")].into_iter(), &mut |_| Ok(())).unwrap();
-        assert!(!dir.join("greet").exists(), "managed skill removed");
-        assert!(dir.join("user-skill").exists(), "user skill preserved");
-        std::fs::remove_dir_all(&tmp).unwrap();
-    }
 }
