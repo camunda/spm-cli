@@ -11,14 +11,17 @@
 //! (tests legitimately spawn `git`/`mkfifo` or write fixtures) are ignored,
 //! through the shared [`skip_test_only`] visitor. Anything the visitor does not
 //! prove test-only (a macro body, an attribute argument) counts as shipped, so
-//! a gap can only over-report.
+//! a gap can only over-report. Imports and aliases are read structurally,
+//! inside macro bodies too, and any rename or glob of a guarded module or
+//! type is rejected outright.
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 use std::str::FromStr;
 
-use proc_macro2::{Delimiter, Ident, Span, TokenStream, TokenTree};
+use proc_macro2::{Delimiter, Group, Ident, Span, TokenStream, TokenTree};
 use syn::ext::IdentExt;
+use syn::parse::Parser;
 use syn::visit::{self, Visit};
 
 use crate::source::{is_cfg_test, parse, shipped_files, skip_test_only};
@@ -30,7 +33,9 @@ struct Guard {
     name: &'static str,
     /// Where new call sites should go instead.
     gateway: &'static str,
-    /// Token sequences (`Command::new`, `.lock(`) that reach the primitive.
+    /// Token sequences (`Command::new`, `.lock(`) that reach the primitive. A
+    /// qualified path (`<File>::create`, `<File as Ext>::lock`) reads as its
+    /// type (`File::create`), so it matches too.
     patterns: &'static [&'static str],
     /// Items an import (`use std::fs::{read, write};`, grouped or not) brings
     /// into scope as a bare name no pattern can see.
@@ -120,7 +125,7 @@ const GUARDS: &[Guard] = &[
             "lock_shared",
             "unlock",
             "TryLockError",
-            "File::lock(",
+            "File::lock",
         ],
         imports: &[],
         opaque: &[],
@@ -254,6 +259,39 @@ fn flatten(tokens: TokenStream, out: &mut Vec<Token>) {
     }
 }
 
+/// `tokens` with each qualified path's brackets dropped: `<File>::create`
+/// and `<File as Ext>::lock` read as `File::create` and `File::lock`. Only a
+/// plain path (identifiers and `::`) is unwrapped; `<Vec<u8>>::new` stays.
+fn unqualify(tokens: Vec<Token>) -> Vec<Token> {
+    let text = |j: usize| tokens.get(j).map_or("", |t| t.text.as_str());
+    let path_end = |from: usize| {
+        (from..tokens.len())
+            .find(|&j| !(tokens[j].ident.is_some() && text(j) != "as" || text(j) == ":"))
+            .unwrap_or(tokens.len())
+    };
+    let mut drop = vec![false; tokens.len()];
+    for open in 0..tokens.len() {
+        if text(open) != "<" {
+            continue;
+        }
+        let ty = path_end(open + 1);
+        let close = if text(ty) == "as" {
+            path_end(ty + 1)
+        } else {
+            ty
+        };
+        if ty > open + 1 && text(close) == ">" && text(close + 1) == ":" && text(close + 2) == ":" {
+            drop[open] = true;
+            drop[ty..=close].iter_mut().for_each(|d| *d = true);
+        }
+    }
+    tokens
+        .into_iter()
+        .zip(drop)
+        .filter_map(|(t, d)| (!d).then_some(t))
+        .collect()
+}
+
 /// `pattern` as [`Token`] texts: identifiers whole, anything else one
 /// character at a time, whitespace dropped.
 fn pattern_tokens(pattern: &str) -> Vec<String> {
@@ -339,6 +377,42 @@ impl Shipped {
     }
 }
 
+impl Shipped {
+    /// Records the bindings of a macro body: the items or statements it
+    /// holds, or else those of each delimited group in it (a `macro_rules!`
+    /// arm's body), so `use std::fs::write;` inside a macro is no blind spot.
+    fn bind_tokens(&mut self, tokens: TokenStream) {
+        if let Ok(file) = syn::parse2::<syn::File>(tokens.clone()) {
+            self.visit_file(&file);
+        } else if let Ok(stmts) = syn::Block::parse_within.parse2(tokens.clone()) {
+            stmts.iter().for_each(|s| self.visit_stmt(s));
+        } else {
+            for tree in tokens {
+                if let TokenTree::Group(g) = tree {
+                    self.bind_tokens(g.stream());
+                }
+            }
+        }
+    }
+}
+
+/// `tokens` without `macro_rules!` sigils, so `$crate::fs` and `write($p)`
+/// parse as the paths and expressions they expand to.
+fn without_dollars(tokens: TokenStream) -> TokenStream {
+    tokens
+        .into_iter()
+        .filter(|t| !matches!(t, TokenTree::Punct(p) if p.as_char() == '$'))
+        .map(|t| match t {
+            TokenTree::Group(g) => {
+                let mut out = Group::new(g.delimiter(), without_dollars(g.stream()));
+                out.set_span(g.span());
+                TokenTree::Group(out)
+            }
+            t => t,
+        })
+        .collect()
+}
+
 impl<'ast> Visit<'ast> for Shipped {
     fn visit_ident(&mut self, i: &'ast Ident) {
         self.idents.visit_ident(i);
@@ -346,6 +420,7 @@ impl<'ast> Visit<'ast> for Shipped {
 
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
         self.idents.add_tokens(mac.tokens.clone());
+        self.bind_tokens(without_dollars(mac.tokens.clone()));
         visit::visit_macro(self, mac);
     }
 
@@ -423,6 +498,7 @@ impl Source {
         let mut tokens = Vec::new();
         let stream = TokenStream::from_str(src).unwrap_or_else(|e| panic!("cannot lex: {e}"));
         flatten(stream, &mut tokens);
+        let tokens = unqualify(tokens);
         Source {
             tokens,
             test_only: all.0.difference(&shipped.idents.0).copied().collect(),
@@ -767,12 +843,83 @@ fn spawn_guard_rejects_aliases_and_globs() {
 }
 
 #[test]
-fn lock_guard_sees_the_function_call_form() {
+fn lock_guard_sees_calls_references_and_qualified_paths() {
     assert_eq!(
         flagged(
             "OS file locks",
-            &[("src/f.rs", "fn f(h: &File) { File::lock(h); }")]
+            &[
+                ("src/call.rs", "fn f(h: &File) { File::lock(h); }"),
+                (
+                    "src/reference.rs",
+                    "fn f(h: &File) { let take = std::fs::File::lock; take(h); }",
+                ),
+                ("src/qualified.rs", "fn f(h: &File) { <File>::lock(h); }"),
+                ("src/trait.rs", "fn f(h: &File) { <File as Ext>::lock(h); }"),
+                (
+                    "src/fine.rs",
+                    "fn f(m: &Mutex<File>) { let _ = <Vec<u8>>::new(); }"
+                ),
+            ]
         ),
-        vec!["src/f.rs:1 uses `File::lock(`"]
+        vec![
+            "src/call.rs:1 uses `File::lock`",
+            "src/reference.rs:1 uses `File::lock`",
+            "src/qualified.rs:1 uses `File::lock`",
+            "src/trait.rs:1 uses `File::lock`",
+        ]
+    );
+}
+
+#[test]
+fn write_and_spawn_guards_see_qualified_paths() {
+    let files = [
+        (
+            "src/create.rs",
+            "use std::fs::File;\nfn f() { <File>::create(p); }",
+        ),
+        (
+            "src/spawn.rs",
+            "fn f() { <std::process::Command>::new(g); }",
+        ),
+    ];
+    assert_eq!(
+        flagged("file writes", &files),
+        vec!["src/create.rs:2 uses `File::create`"]
+    );
+    assert_eq!(
+        flagged("process spawning", &files),
+        vec![
+            "src/spawn.rs:1 uses `Command::new`",
+            "src/spawn.rs:1 uses `process::Command`",
+        ]
+    );
+}
+
+#[test]
+fn guards_see_bindings_inside_macro_bodies() {
+    assert_eq!(
+        flagged(
+            "file writes",
+            &[
+                (
+                    "src/call.rs",
+                    "fn f() { run!({ use std::fs::{write}; write(\"ai.json\", \"{}\"); }); }",
+                ),
+                (
+                    "src/rules.rs",
+                    "macro_rules! put {\n    ($p:expr) => {{\n        use $crate::x::fs as disk;\n        disk::write($p, \"\")\n    }};\n}",
+                ),
+                (
+                    "src/items.rs",
+                    "items! { type Out = std::fs::File; }",
+                ),
+                ("src/fine.rs", "fn f() { println!(\"{}\", x); }"),
+            ],
+        ),
+        vec![
+            "src/call.rs:1 uses `fs::write`",
+            "src/rules.rs:3 uses `fs as disk`",
+            "src/items.rs:1 uses `fs::File as Out`",
+        ]
     );
 }
