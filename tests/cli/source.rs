@@ -198,6 +198,17 @@ impl<'ast> syn::visit::Visit<'ast> for ModDecls {
     }
 
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        let included = mac
+            .path
+            .segments
+            .last()
+            .is_some_and(|s| s.ident == "include")
+            || emits_include(mac.tokens.clone());
+        assert!(
+            !included,
+            "`include!` is not supported by the source guards, which cannot \
+             tell which module owns the included code: declare it as a module"
+        );
         let found = macro_mod_decls(mac.tokens.clone());
         assert!(
             found.is_empty(),
@@ -209,6 +220,20 @@ impl<'ast> syn::visit::Visit<'ast> for ModDecls {
     }
 
     skip_test_only!(except visit_item_mod);
+}
+
+/// Whether macro tokens invoke `include!` (at any nesting).
+fn emits_include(tokens: proc_macro2::TokenStream) -> bool {
+    use proc_macro2::TokenTree;
+    let trees: Vec<TokenTree> = tokens.into_iter().collect();
+    trees.iter().enumerate().any(|(k, tree)| match tree {
+        TokenTree::Ident(i) => {
+            i == "include"
+                && matches!(trees.get(k + 1), Some(TokenTree::Punct(p)) if p.as_char() == '!')
+        }
+        TokenTree::Group(g) => emits_include(g.stream()),
+        _ => false,
+    })
 }
 
 /// The module declarations in macro tokens other than an inline module with a
