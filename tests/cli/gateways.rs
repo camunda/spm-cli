@@ -21,7 +21,7 @@ use proc_macro2::{Delimiter, Ident, Span, TokenStream, TokenTree};
 use syn::ext::IdentExt;
 use syn::visit::{self, Visit};
 
-use crate::source::{parse, shipped_files, skip_test_only};
+use crate::source::{is_cfg_test, parse, shipped_files, skip_test_only};
 
 /// One gateway: what reaches the primitive, and the only files (relative to
 /// the crate root, `/`-separated) that may use it, each with the reason it is
@@ -35,6 +35,11 @@ struct Guard {
     /// Items an import (`use std::fs::{read, write};`, grouped or not) brings
     /// into scope as a bare name no pattern can see.
     imports: &'static [&'static str],
+    /// Modules and types the patterns name, which must not be renamed
+    /// (`use std::fs as disk;`, `use std::fs::File as Out;`, `type Out =
+    /// File;`) or glob-imported from (`use std::fs::{self, *};`): either would
+    /// reach the primitive under a name the patterns cannot see.
+    opaque: &'static [&'static str],
     allowed: &'static [(&'static str, &'static str)],
 }
 
@@ -46,6 +51,7 @@ const GUARDS: &[Guard] = &[
         // a constant this scan cannot follow, and spm runs nothing but `git`.
         patterns: &["Command::new", "process::Command", "CommandExt"],
         imports: &["process::Command"],
+        opaque: &["process", "process::Command"],
         allowed: &[(
             "src/git/command.rs",
             "the git gateway: hardened env, failure capture, option-injection guard",
@@ -65,6 +71,14 @@ const GUARDS: &[Guard] = &[
             "OpenOptions",
         ],
         imports: &["fs::write", "fs::copy", "fs::rename"],
+        opaque: &[
+            "fs",
+            "fs::File",
+            "fs::OpenOptions",
+            "fs::write",
+            "fs::copy",
+            "fs::rename",
+        ],
         allowed: &[
             (
                 "src/jsonfile.rs",
@@ -109,6 +123,7 @@ const GUARDS: &[Guard] = &[
             "File::lock(",
         ],
         imports: &[],
+        opaque: &[],
         allowed: &[(
             "src/cli/session.rs",
             "the private `StateLock` behind every command's state lock",
@@ -121,6 +136,7 @@ const GUARDS: &[Guard] = &[
         gateway: "`ScopeSession` (src/cli/session.rs) for file locks",
         patterns: &[".lock("],
         imports: &[],
+        opaque: &[],
         allowed: &[
             (
                 "src/cli/session.rs",
@@ -139,6 +155,7 @@ const GUARDS: &[Guard] = &[
         gateway: "`fsutil::walk_tree` (src/fsutil.rs) for recursive traversal",
         patterns: &["read_dir"],
         imports: &[],
+        opaque: &[],
         allowed: &[
             (
                 "src/fsutil.rs",
@@ -283,13 +300,26 @@ impl<'ast> Visit<'ast> for Idents {
     }
 }
 
-/// A shipped `use` leaf importing a name: the path it names, and its line.
+/// What a shipped `use` leaf or `type` alias brings into scope.
+#[derive(Debug, PartialEq)]
+enum Bind {
+    /// `use a::b;`
+    Name,
+    /// `use a::b as c;`, `type c = a::b;`
+    Alias(String),
+    /// `use a::b::*;`
+    Glob,
+}
+
+/// A shipped binding: the path it names (`self` resolved to its module),
+/// how, and its line.
 struct Binding {
     path: Vec<String>,
+    bind: Bind,
     line: usize,
 }
 
-/// The identifiers and plain imports of shipped code: `#[cfg(test)]` nodes are
+/// The identifiers and bindings of shipped code: `#[cfg(test)]` nodes are
 /// skipped whole.
 #[derive(Default)]
 struct Shipped {
@@ -299,11 +329,13 @@ struct Shipped {
 }
 
 impl Shipped {
-    fn bind(&mut self, last: &Ident) {
+    fn bind(&mut self, last: &Ident, bind: Bind, line: usize) {
         let mut path = self.prefix.clone();
-        path.push(last.unraw().to_string());
-        let line = last.span().start().line;
-        self.bindings.push(Binding { path, line });
+        let name = last.unraw().to_string();
+        if name != "self" {
+            path.push(name);
+        }
+        self.bindings.push(Binding { path, bind, line });
     }
 }
 
@@ -315,6 +347,26 @@ impl<'ast> Visit<'ast> for Shipped {
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
         self.idents.add_tokens(mac.tokens.clone());
         visit::visit_macro(self, mac);
+    }
+
+    fn visit_item(&mut self, item: &'ast syn::Item) {
+        if let syn::Item::Type(t) = item {
+            if let syn::Type::Path(p) = &*t.ty {
+                if !t.attrs.iter().any(is_cfg_test) && p.qself.is_none() {
+                    self.bindings.push(Binding {
+                        path: p
+                            .path
+                            .segments
+                            .iter()
+                            .map(|s| s.ident.unraw().to_string())
+                            .collect(),
+                        bind: Bind::Alias(t.ident.unraw().to_string()),
+                        line: t.ident.span().start().line,
+                    });
+                }
+            }
+        }
+        visit::visit_item(self, item);
     }
 
     // Reached only through a shipped `use` (`visit_item_use` skips test ones),
@@ -329,13 +381,19 @@ impl<'ast> Visit<'ast> for Shipped {
             }
             syn::UseTree::Name(n) => {
                 self.visit_ident(&n.ident);
-                self.bind(&n.ident);
+                self.bind(&n.ident, Bind::Name, n.ident.span().start().line);
             }
             syn::UseTree::Rename(r) => {
                 self.visit_ident(&r.ident);
                 self.visit_ident(&r.rename);
+                let alias = Bind::Alias(r.rename.unraw().to_string());
+                self.bind(&r.ident, alias, r.ident.span().start().line);
             }
-            syn::UseTree::Glob(_) => {}
+            syn::UseTree::Glob(g) => self.bindings.push(Binding {
+                path: self.prefix.clone(),
+                bind: Bind::Glob,
+                line: g.star_token.spans[0].start().line,
+            }),
             syn::UseTree::Group(g) => {
                 for tree in &g.items {
                     self.visit_use_tree(tree);
@@ -387,15 +445,36 @@ impl Source {
             .collect()
     }
 
-    /// `(line, item)` for each shipped import of one of `guard`'s `imports`.
+    /// `(line, label)` for each shipped binding `guard` rejects.
     fn bindings(&self, guard: &Guard) -> Vec<(usize, String)> {
+        let names = |list: &[&str], path: &[String]| -> Option<String> {
+            list.iter()
+                .find(|item| {
+                    let item: Vec<&str> = item.split("::").collect();
+                    let n = item.len().min(path.len());
+                    n > 0 && path[path.len() - n..] == item[item.len() - n..]
+                })
+                .map(|item| (*item).to_string())
+        };
         let mut out = Vec::new();
         for b in &self.bindings {
-            let item = guard.imports.iter().find(|item| {
-                let item: Vec<&str> = item.split("::").collect();
-                b.path.len() >= item.len() && b.path[b.path.len() - item.len()..] == item
-            });
-            out.extend(item.map(|i| (b.line, (*i).to_string())));
+            let label = match &b.bind {
+                // A plain import must name the item fully (`fs::write`): a
+                // lone `write` is not proof it comes from `fs`.
+                Bind::Name => guard
+                    .imports
+                    .iter()
+                    .find(|item| {
+                        let item: Vec<&str> = item.split("::").collect();
+                        b.path.len() >= item.len() && b.path[b.path.len() - item.len()..] == item
+                    })
+                    .map(|item| (*item).to_string()),
+                Bind::Alias(alias) => {
+                    names(guard.opaque, &b.path).map(|item| format!("{item} as {alias}"))
+                }
+                Bind::Glob => names(guard.opaque, &b.path).map(|item| format!("{item}::*")),
+            };
+            out.extend(label.map(|l| (b.line, l)));
         }
         out
     }
@@ -542,6 +621,7 @@ fn violations_flags_new_sites_and_stale_entries() {
         gateway: "the gateway",
         patterns: &["Command::new"],
         imports: &[],
+        opaque: &[],
         allowed: &[
             ("src/gate.rs", "the gateway"),
             ("src/stale.rs", "used to spawn"),
@@ -622,6 +702,66 @@ fn write_guard_sees_grouped_imports_and_create_new() {
             "src/moves.rs:1 uses `fs::copy`",
             "src/moves.rs:1 uses `fs::rename`",
             "src/glob.rs:1 uses `fs::*`",
+        ]
+    );
+}
+
+#[test]
+fn write_guard_rejects_aliases_and_globs() {
+    assert_eq!(
+        flagged(
+            "file writes",
+            &[
+                ("src/module.rs", "use std::{fs as disk};\nfn f() { disk::write(p, t); }"),
+                ("src/self.rs", "use std::fs::{self as disk};"),
+                ("src/item.rs", "use std::fs::{read, write as put};"),
+                (
+                    "src/type.rs",
+                    "use std::fs::File as Output;\nfn f() { Output::create(p); }",
+                ),
+                ("src/typedef.rs", "type Output = std::fs::File;"),
+                ("src/short.rs", "use std::fs::File;\ntype Output = File;"),
+                ("src/group.rs", "use std::fs::{self, *};\nfn f() { write(p, t); }"),
+                (
+                    "src/tests.rs",
+                    "#[cfg(test)]\nmod t { use std::fs::{self as disk, *}; type O = std::fs::File; }",
+                ),
+            ],
+        ),
+        vec![
+            "src/module.rs:1 uses `fs as disk`",
+            "src/self.rs:1 uses `fs as disk`",
+            "src/item.rs:1 uses `fs::write as put`",
+            "src/type.rs:1 uses `fs::File as Output`",
+            "src/typedef.rs:1 uses `fs::File as Output`",
+            "src/short.rs:2 uses `fs::File as Output`",
+            "src/group.rs:1 uses `fs::*`",
+        ]
+    );
+}
+
+#[test]
+fn spawn_guard_rejects_aliases_and_globs() {
+    assert_eq!(
+        flagged(
+            "process spawning",
+            &[
+                (
+                    "src/alias.rs",
+                    "use std::process::Command as Run;\nfn f() { Run::new(g); }"
+                ),
+                ("src/module.rs", "use std::process as proc;"),
+                ("src/glob.rs", "use std::process::{self, *};"),
+                ("src/grouped.rs", "use std::process::{Command, Stdio};"),
+                ("src/fine.rs", "use std::process::{ExitCode, Stdio};"),
+            ],
+        ),
+        vec![
+            "src/alias.rs:1 uses `process::Command`",
+            "src/alias.rs:1 uses `process::Command as Run`",
+            "src/module.rs:1 uses `process as proc`",
+            "src/glob.rs:1 uses `process::*`",
+            "src/grouped.rs:1 uses `process::Command`",
         ]
     );
 }
