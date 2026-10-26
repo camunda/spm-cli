@@ -1,5 +1,5 @@
-//! Fixture helpers shared by the scanner's unit tests.
 #![cfg(test)]
+//! Fixture helpers shared by the scanner's unit tests.
 
 use std::path::{Path, PathBuf};
 

@@ -432,7 +432,7 @@ pub(super) fn judge_transitive(
 /// colliding with a directly-declared dependency is a hard error (the
 /// synthesized names are hash-suffixed to make this astronomically unlikely).
 /// `skills` and `plugins` share one flat dependency-name namespace (enforced
-/// at manifest load, see `manifest.rs`), so the name must be free in *both*
+/// at manifest load, see `manifest/load.rs`), so the name must be free in *both*
 /// lock maps — a transitive skill colliding with a root plugin would write
 /// the same name into both maps and make `list`/`update <name>` ambiguous.
 pub(super) fn fold_transitive(
