@@ -220,6 +220,9 @@ struct Refs {
     /// Inside a `macro_rules!` body, whose relative paths resolve wherever
     /// the macro is invoked, not where it is defined.
     rules: bool,
+    /// Inside a macro's input, which the macro may transform at will (drop a
+    /// `#[cfg(test)]` and emit the item it gated): no attribute gates there.
+    input: bool,
 }
 
 impl Refs {
@@ -328,7 +331,7 @@ impl Refs {
                                 // group; `#[cfg(test)]` the item it starts,
                                 // if what follows parses as one (anything
                                 // else, e.g. a generic parameter, is read).
-                                Ok(meta) if cfg_test(&meta) => {
+                                Ok(meta) if cfg_test(&meta) && !self.input => {
                                     if inner {
                                         k = trees.len();
                                     } else if let Some(rest) = item_rest(&trees[hash..]) {
@@ -348,6 +351,12 @@ impl Refs {
                             continue;
                         }
                     }
+                }
+                // A macro invocation's input: see `input`.
+                TokenTree::Group(g) if k >= 2 && punct(k - 1, '!') && ident(k - 2).is_some() => {
+                    let outer = std::mem::replace(&mut self.input, true);
+                    self.tokens(g.stream(), strings);
+                    self.input = outer;
                 }
                 TokenTree::Group(g) => self.tokens(g.stream(), strings),
                 TokenTree::Literal(lit) if strings => {
@@ -633,10 +642,12 @@ impl<'ast> Visit<'ast> for Refs {
     }
 
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
-        let outer = self.rules;
-        self.rules |= mac.path.is_ident("macro_rules");
+        let (rules, input) = (self.rules, self.input);
+        let definition = mac.path.is_ident("macro_rules");
+        self.rules |= definition;
+        self.input = !definition;
         self.tokens(mac.tokens.clone(), false);
-        self.rules = outer;
+        (self.rules, self.input) = (rules, input);
         visit::visit_macro(self, mac);
     }
 
@@ -648,14 +659,15 @@ impl<'ast> Visit<'ast> for Refs {
 
 impl Refs {
     /// An attribute's references: its path and arguments, but neither a
-    /// `doc` value nor the payload of a `cfg_attr` only `test` enables.
+    /// `doc` value nor (outside a macro's input) the payload of a `cfg_attr`
+    /// only `test` enables.
     fn meta(&mut self, meta: &syn::Meta) {
         if meta.path().is_ident("doc") {
             return;
         }
         if meta.path().is_ident("cfg_attr") {
             if let Some(args) = args(meta) {
-                if !args.first().is_some_and(requires_test) {
+                if self.input || !args.first().is_some_and(requires_test) {
                     args.iter().skip(1).for_each(|m| self.meta(m));
                 }
                 return;
@@ -689,6 +701,7 @@ fn crate_refs(src: &str, file_depth: usize) -> Vec<(String, usize)> {
         out: Vec::new(),
         root_mods: Vec::new(),
         rules: false,
+        input: false,
     };
     refs.visit_file(&parse(src));
     assert!(
@@ -1419,10 +1432,20 @@ macro_rules! t { () => {
     struct T;
     fn u() { crate::beta::x() }
 }; }
-m! { #![cfg(test)] use crate::ghost::Y; }
 "#;
     let names: Vec<String> = crate_refs(src, 1).into_iter().map(|r| r.0).collect();
     assert_eq!(names, ["alpha", "beta"]);
+    // A macro's input gates nothing: the macro may drop the attribute and
+    // emit what it gated, at the top level or nested in a definition.
+    let src = r#"
+macro_rules! emit { (#[cfg(test)] $item:item) => { $item }; }
+emit! { #[cfg(test)] fn live() { crate::alpha::run(); } }
+m! { #![cfg(test)] use crate::beta::Y; }
+n! { #[cfg_attr(test, serde(with = "crate::gamma"))] struct S; }
+macro_rules! wrap { () => { emit! { #[cfg(test)] fn live() { crate::delta::run(); } } }; }
+"#;
+    let names: Vec<String> = crate_refs(src, 1).into_iter().map(|r| r.0).collect();
+    assert_eq!(names, ["alpha", "beta", "gamma", "delta"]);
     // A test-only node that is not a whole item (a generic parameter) gates
     // only itself: what follows is read.
     let src = "macro_rules! m { () => { fn f<#[cfg(test)] T>() { crate::cli::run(); } }; }";
