@@ -14,8 +14,11 @@
 //! field is covered without editing this file.
 
 use super::*;
+use anyhow::Result;
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 /// Expected rejections only the model makes, by case group: semantic rules the
 /// schema does not express. Every case of a listed group must diverge exactly
