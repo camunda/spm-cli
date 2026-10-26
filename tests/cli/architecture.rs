@@ -191,6 +191,9 @@ struct Refs {
     /// enclosing inline `mod`.
     depth: usize,
     out: Vec<(String, usize)>,
+    /// Shipped inline modules at the crate root (`mod x { .. }` in
+    /// `main.rs`): top-level modules the file-based module map cannot see.
+    root_mods: Vec<String>,
 }
 
 impl Refs {
@@ -198,6 +201,14 @@ impl Refs {
         if let Some(name) = name {
             self.out.push((name, line));
         }
+    }
+
+    /// A path out of `prefix` the guard cannot read (a macro fragment like
+    /// `crate::$module` or `crate::{a, $($more),*}`): [`OPAQUE`] if `prefix`
+    /// reaches the crate root, since it may name any module.
+    fn unresolved(&mut self, prefix: &[String], line: usize) {
+        let opaque = resolve(prefix, Leaf::Glob, self.depth).map(|_| OPAQUE.to_string());
+        self.push(opaque, line);
     }
 
     fn path(&mut self, path: &syn::Path, line: Option<usize>) {
@@ -301,12 +312,20 @@ impl Refs {
                             (Some(TokenTree::Group(g)), _) => {
                                 let parser =
                                     Punctuated::<syn::UseTree, Token![,]>::parse_terminated;
-                                for item in parser.parse2(g.stream()).into_iter().flatten() {
-                                    self.use_tree(&item, &mut prefix.clone(), line);
+                                match parser.parse2(g.stream()) {
+                                    Ok(items) => {
+                                        for item in items {
+                                            self.use_tree(&item, &mut prefix.clone(), line);
+                                        }
+                                    }
+                                    Err(_) => self.unresolved(&prefix, line),
                                 }
                                 break;
                             }
-                            _ => break,
+                            _ => {
+                                self.unresolved(&prefix, line);
+                                break;
+                            }
                         }
                     }
                     // `crate as x`, `super as x`, `crate self as x`.
@@ -339,6 +358,11 @@ impl<'ast> Visit<'ast> for Refs {
             }
         }
         let inline_mod = matches!(item, syn::Item::Mod(m) if m.content.is_some());
+        if let syn::Item::Mod(m) = item {
+            if inline_mod && self.depth == 0 && !m.attrs.iter().any(is_cfg_test) {
+                self.root_mods.push(m.ident.unraw().to_string());
+            }
+        }
         self.depth += usize::from(inline_mod);
         visit::visit_item(self, item);
         self.depth -= usize::from(inline_mod);
@@ -394,8 +418,16 @@ fn crate_refs(src: &str, file_depth: usize) -> Vec<(String, usize)> {
     let mut refs = Refs {
         depth: file_depth,
         out: Vec::new(),
+        root_mods: Vec::new(),
     };
     refs.visit_file(&parse(src));
+    assert!(
+        refs.root_mods.is_empty(),
+        "inline modules at the crate root ({:?}) are top-level modules the layering \
+         guard ({TABLE}) cannot see, since it maps modules from files.\n\
+         Move each into its own file (`mod x;` + `src/x.rs`).",
+        refs.root_mods
+    );
     let mut out = refs.out;
     out.sort_by_key(|r| r.1);
     out.dedup();
@@ -781,6 +813,37 @@ fn module_of_counts_only_the_crate_root_main_as_its_directory() {
     assert_eq!(module_of(Path::new("foo/main.rs")), ("foo".into(), 2));
     assert_eq!(module_of(Path::new("foo/mod.rs")), ("foo".into(), 1));
     assert_eq!(module_of(Path::new("foo/bar.rs")), ("foo".into(), 2));
+}
+
+/// Macro fragments that may name any module through the crate root
+/// (`crate::$module`, `crate::{a, $($more),*}`) hide edges, so they fail;
+/// fragments that stay inside the module are fine.
+#[test]
+fn crate_refs_flags_macro_paths_it_cannot_read() {
+    for src in [
+        "macro_rules! m { ($m:ident) => { crate::$m::run() }; }",
+        "macro_rules! m { ($($x:ident),*) => { use crate::{alpha, $($x),*}; }; }",
+        "macro_rules! m { ($m:ident) => { super::$m::run() }; }",
+    ] {
+        let names: Vec<String> = crate_refs(src, 1).into_iter().map(|r| r.0).collect();
+        assert!(names.contains(&OPAQUE.to_string()), "{src}: {names:?}");
+    }
+    let src = "macro_rules! m { ($m:ident) => { super::$m::run() }; }";
+    assert!(crate_refs(src, 2).is_empty(), "{src}");
+}
+
+/// Top-level inline modules in `main.rs` would hide their edges behind
+/// `main`, so they fail; test-only ones, and inline modules deeper down, are
+/// fine.
+#[test]
+fn crate_refs_rejects_inline_modules_at_the_crate_root() {
+    let src = "mod alpha { pub fn f() { crate::beta::f(); } }\n\
+               mod beta { pub fn f() { crate::alpha::f(); } }\n";
+    let err = std::panic::catch_unwind(|| crate_refs(src, 0)).expect_err(src);
+    let msg = err.downcast_ref::<String>().cloned().unwrap_or_default();
+    assert!(msg.contains("\"alpha\", \"beta\""), "{msg}");
+    crate_refs("#[cfg(test)]\nmod tests { use crate::alpha::X; }\n", 0);
+    crate_refs("mod inner { use crate::alpha::X; }\n", 1);
 }
 
 #[test]
