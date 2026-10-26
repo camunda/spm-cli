@@ -74,4 +74,63 @@ mod tests {
         assert_eq!(operands(["--all"]), "-- --all");
         assert_eq!(operands(["a b", "-x"]), "-- 'a b' -x");
     }
+
+    /// The words a POSIX `sh` gets when it evaluates `script` after a
+    /// function `f` that prints each of its arguments NUL-terminated.
+    #[cfg(unix)]
+    fn sh_words(script: &str) -> Vec<String> {
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("f() {{ printf '%s\\0' \"$@\"; }}\n{script}"))
+            // A directory with files in it, so a stray glob would expand.
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "sh failed on {script:?}: {out:?}");
+        let mut words: Vec<String> = String::from_utf8(out.stdout)
+            .unwrap()
+            .split('\0')
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(words.pop().as_deref(), Some(""), "NUL-terminated output");
+        words
+    }
+
+    /// A word a suggested command may interpolate: any text but NUL (no
+    /// process argument can hold one), weighted towards short words mixing
+    /// the characters left bare with ones a shell treats specially.
+    #[cfg(unix)]
+    fn word() -> impl proptest::strategy::Strategy<Value = String> {
+        use proptest::prelude::*;
+        prop_oneof![
+            "[-_./:a-z0-9~=+@,%*?#$]{0,4}",
+            "[*?A-Za-z.]{1,3}",
+            "[-'\"\\\\$`!*?\\[\\]{}();&|<>~# \t\n@,%=+a-z.:/]{0,12}",
+            any::<String>().prop_map(|s| s.replace('\0', "")),
+        ]
+    }
+
+    #[cfg(unix)]
+    proptest::proptest! {
+        #![proptest_config(crate::proptest_config(64))]
+
+        /// Each `arg` reaches the shell as exactly the original word.
+        #[test]
+        fn arg_round_trips_through_sh(words in proptest::collection::vec(word(), 1..5)) {
+            let line: Vec<_> = words.iter().map(|w| arg(w)).collect();
+            proptest::prop_assert_eq!(sh_words(&format!("f {}", line.join(" "))), words);
+        }
+
+        /// `operands` yields the original words, after the `--` that ends a
+        /// command's options exactly when one of them looks like an option.
+        #[test]
+        fn operands_round_trip_through_sh(words in proptest::collection::vec(word(), 1..5)) {
+            let mut expected = words.clone();
+            if words.iter().any(|w| w.starts_with('-')) {
+                expected.insert(0, "--".into());
+            }
+            let line = operands(words.iter().map(String::as_str));
+            proptest::prop_assert_eq!(sh_words(&format!("f {line}")), expected);
+        }
+    }
 }

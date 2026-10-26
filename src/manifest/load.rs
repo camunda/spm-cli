@@ -147,4 +147,123 @@ mod tests {
             assert!(format!("{err:#}").contains(needle), "{json}: {err:#}");
         }
     }
+
+    mod props {
+        use super::*;
+        use crate::manifest::testutil::{dep_name, edited, Scratch};
+        use crate::manifest::{DependencyManifest, SkillSpec};
+        use proptest::prelude::*;
+        use std::collections::BTreeMap;
+
+        fn spec() -> impl Strategy<Value = SkillSpec> {
+            #[derive(Debug, Clone)]
+            enum Selector {
+                Tag(String),
+                Branch(String),
+                Commit(String),
+                Range(&'static str),
+            }
+            let selector = prop_oneof![
+                ".{1,8}".prop_map(Selector::Tag),
+                ".{1,8}".prop_map(Selector::Branch),
+                "[0-9a-fA-F]{40}".prop_map(Selector::Commit),
+                prop::sample::select(&["^1.2", "~1.4.0", ">=1.2, <2", "1.2", "*"][..])
+                    .prop_map(Selector::Range),
+            ];
+            let path = prop::option::of("[a-z][a-z.]{0,3}(/[a-z]{1,4}){0,2}");
+            (".{1,16}", selector, path).prop_map(|(git, selector, path)| {
+                let mut spec = SkillSpec {
+                    git,
+                    tag: None,
+                    branch: None,
+                    commit: None,
+                    range: None,
+                    path,
+                };
+                match selector {
+                    Selector::Tag(t) => spec.tag = Some(t),
+                    Selector::Branch(b) => spec.branch = Some(b),
+                    Selector::Commit(c) => spec.commit = Some(c),
+                    Selector::Range(r) => spec.range = Some(r.into()),
+                }
+                spec
+            })
+        }
+
+        /// A manifest the schema and the model both accept.
+        fn manifest() -> impl Strategy<Value = Manifest> {
+            let targets =
+                prop::sample::subsequence(crate::schema::targets().unwrap(), 1..=3).prop_shuffle();
+            let sources = prop::option::of(prop::sample::subsequence(
+                vec![
+                    "github.com/org/repo".to_string(),
+                    "github.com/org/*".into(),
+                    "gitlab.com/*".into(),
+                    "file://*".into(),
+                ],
+                0..=2,
+            ));
+            let deps = prop::collection::btree_map(dep_name(), (any::<bool>(), spec()), 0..4);
+            (
+                prop::option::of(".{0,8}"),
+                targets,
+                any::<bool>(),
+                sources,
+                deps,
+            )
+                .prop_map(
+                    |(schema, targets, resolve_transitive, allowed_sources, deps)| {
+                        let (plugins, skills) = deps
+                            .into_iter()
+                            .partition::<BTreeMap<_, _>, _>(|(_, (p, _))| *p);
+                        let strip = |m: BTreeMap<_, (bool, SkillSpec)>| {
+                            m.into_iter().map(|(n, (_, s))| (n, s)).collect()
+                        };
+                        Manifest {
+                            schema,
+                            targets,
+                            resolve_transitive,
+                            allowed_sources,
+                            skills: strip(skills),
+                            plugins: strip(plugins),
+                        }
+                    },
+                )
+        }
+
+        /// Parse `text`; an accepted manifest saves to a text that parses
+        /// back to the same text.
+        fn parse(text: &str) -> Option<String> {
+            let p = Path::new("ai.json");
+            let saved = Manifest::parse(text, p).ok()?.to_text().unwrap();
+            let again = Manifest::parse(&saved, p).unwrap().to_text().unwrap();
+            assert_eq!(again, saved);
+            Some(saved)
+        }
+
+        proptest! {
+            #![proptest_config(crate::proptest_config(128))]
+
+            /// Every manifest spm can write parses back unchanged.
+            #[test]
+            fn saved_manifests_parse_back(m in manifest()) {
+                let text = m.to_text().unwrap();
+                prop_assert_eq!(parse(&text), Some(text));
+            }
+
+            /// A hand-edited `ai.json`, or a dependency's nested one, is an
+            /// error or a manifest, never a panic; an accepted root manifest
+            /// round-trips.
+            #[test]
+            fn edited_manifests_parse_or_fail_cleanly(
+                text in manifest().prop_flat_map(|m| edited(m.to_text().unwrap())),
+            ) {
+                parse(&text);
+                let dir = Scratch::new();
+                let file = dir.0.join(MANIFEST_FILE);
+                std::fs::write(&file, &text).unwrap();
+                let _ = DependencyManifest::load_file(&file);
+            }
+        }
+    }
 }
