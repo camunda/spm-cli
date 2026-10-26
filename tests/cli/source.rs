@@ -198,6 +198,10 @@ impl<'ast> syn::visit::Visit<'ast> for ModDecls {
     }
 
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        // Test-only code ships nothing, whatever it generates.
+        if self.test {
+            return syn::visit::visit_macro(self, mac);
+        }
         let included = mac
             .path
             .segments

@@ -194,6 +194,9 @@ struct Refs {
     /// Shipped inline modules at the crate root (`mod x { .. }` in
     /// `main.rs`): top-level modules the file-based module map cannot see.
     root_mods: Vec<String>,
+    /// Inside a `macro_rules!` body, whose relative paths resolve wherever
+    /// the macro is invoked, not where it is defined.
+    rules: bool,
 }
 
 impl Refs {
@@ -311,6 +314,15 @@ impl Refs {
                             continue;
                         }
                     }
+                }
+                // `super::`/`self::` in a `macro_rules!` body: its depth is
+                // the invocation's, which may be any module.
+                TokenTree::Ident(i)
+                    if self.rules
+                        && (i == "super" || (i == "self" && sep(k + 1)))
+                        && !(k > 1 && sep(k - 2)) =>
+                {
+                    self.out.push((OPAQUE.into(), i.span().start().line));
                 }
                 TokenTree::Ident(i)
                     if matches!(i.to_string().as_str(), "crate" | "super")
@@ -450,7 +462,10 @@ impl<'ast> Visit<'ast> for Refs {
     }
 
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        let outer = self.rules;
+        self.rules |= mac.path.is_ident("macro_rules");
         self.tokens(mac.tokens.clone(), false);
+        self.rules = outer;
         visit::visit_macro(self, mac);
     }
 
@@ -469,6 +484,7 @@ fn crate_refs(src: &str, file_depth: usize) -> Vec<(String, usize)> {
         depth: file_depth,
         out: Vec::new(),
         root_mods: Vec::new(),
+        rules: false,
     };
     refs.visit_file(&parse(src));
     assert!(
@@ -548,9 +564,11 @@ fn graph_of_crate(root: &Path) -> (Graph, BTreeMap<(String, String), String>) {
     }
     assert!(
         opaque.is_empty(),
-        "crate-root globs or aliases hide which modules they use, so the layering \
-         guard ({TABLE}) cannot see those edges:\n{}\n\
-         Import the items by name (`use crate::module::Item;`).",
+        "crate-root globs, aliases and paths the guard cannot resolve (macro \
+         fragments, `super::`/`self::` in `macro_rules!` bodies) hide which modules \
+         they use, so the layering guard ({TABLE}) cannot see those edges:\n{}\n\
+         Name the items by absolute path (`use crate::module::Item;`, \
+         `$crate::module::Item` in a macro).",
         opaque.join("\n")
     );
     (graph, sites)
@@ -808,7 +826,13 @@ fn graph_skips_files_only_test_code_declares() {
         std::fs::write(path, text).unwrap();
     };
     write("main.rs", "mod alpha;\nmod beta;\nmod gamma;\n");
-    write("alpha.rs", "mod inner;\n#[cfg(test)]\nmod tests;\n");
+    // Test-only code may generate modules however it likes.
+    write(
+        "alpha.rs",
+        "mod inner;\n#[cfg(test)]\nmod tests;\n#[cfg(test)]\nmod cases {\n\
+         macro_rules! cases { ($name:ident) => { mod $name { use super::super::*; } }; }\n\
+         cases!(one);\n}\n",
+    );
     write("alpha/inner.rs", "use crate::beta::B;\n");
     write("alpha/tests.rs", "use crate::gamma::G;\nmod deeper;\n");
     write("alpha/tests/deeper.rs", "use crate::gamma::G;\n");
@@ -823,6 +847,36 @@ fn graph_skips_files_only_test_code_declares() {
     write("beta/nested/leaf.rs", "use crate::gamma::G;\n");
     let (graph, _) = graph_of_crate(&root);
     assert_eq!(graph, graph_of(&[("alpha", "beta"), ("beta", "gamma")]));
+}
+
+/// `super::` in a `macro_rules!` body resolves where the macro is invoked:
+/// defined in `git/repository.rs` (where `super::cli` stays inside `git`) but
+/// invoked from `policy`, it reaches the top-level `cli`. Such a path fails the
+/// guard instead of hiding the `policy -> cli` edge.
+#[test]
+fn graph_rejects_relative_paths_in_macro_definitions() {
+    let sb = crate::common::Sandbox::new();
+    let root = sb.root.join("crate");
+    let write = |rel: &str, text: &str| {
+        let path = root.join("src").join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write("main.rs", "mod cli;\nmod git;\nmod policy;\n");
+    write("cli.rs", "pub fn run() {}\n");
+    write(
+        "git.rs",
+        "mod repository;\npub(crate) use repository::run_cli;\n",
+    );
+    write(
+        "git/repository.rs",
+        "macro_rules! run_cli { () => {\n    super::cli::run()\n}; }\n\
+         pub(crate) use run_cli;\n",
+    );
+    write("policy.rs", "fn go() { crate::git::run_cli!(); }\n");
+    let err = std::panic::catch_unwind(|| graph_of_crate(&root)).expect_err("hidden edge");
+    let msg = err.downcast_ref::<String>().cloned().unwrap_or_default();
+    assert!(msg.contains("src/git/repository.rs:2"), "{msg}");
 }
 
 /// A file the module walk cannot classify as shipped or test-only fails the
@@ -917,11 +971,23 @@ fn crate_refs_flags_macro_paths_it_cannot_read() {
         let names: Vec<String> = crate_refs(src, 1).into_iter().map(|r| r.0).collect();
         assert!(names.contains(&OPAQUE.to_string()), "{src}: {names:?}");
     }
-    let src = "macro_rules! m { ($($x:ident),*) => { use super::{super::{$($x),*}}; }; }";
+    // In an invocation the tokens resolve where they are: an unreadable group
+    // fails only if a `super` inside it may climb out of the top-level module.
+    let src = "m! { use super::{super::{a b}}; }";
     let names: Vec<String> = crate_refs(src, 2).into_iter().map(|r| r.0).collect();
     assert_eq!(names, [OPAQUE], "{src}");
-    let src = "macro_rules! m { ($m:ident) => { super::$m::run() }; }";
-    assert!(crate_refs(src, 2).is_empty(), "{src}");
+    assert!(crate_refs("m! { use super::{a b}; }", 2).is_empty());
+    // A `macro_rules!` body resolves where the macro is invoked, which may be
+    // any module: its relative paths fail at any depth.
+    for src in [
+        "macro_rules! m { () => { super::x::run() }; }",
+        "macro_rules! m { () => { self::x::run() }; }",
+        "macro_rules! m { () => { use super::{x}; }; }",
+    ] {
+        let names: Vec<String> = crate_refs(src, 3).into_iter().map(|r| r.0).collect();
+        assert_eq!(names, [OPAQUE], "{src}");
+    }
+    assert!(crate_refs("macro_rules! m { ($s:expr) => { self.0 + $s }; }", 1).is_empty());
 }
 
 /// Top-level inline modules in `main.rs` would hide their edges behind
@@ -1113,10 +1179,7 @@ fn crate_refs_flags_imports_that_hide_edges() {
         ("#[cfg(test)]\nmod tests { use super::*; }", 1),
         ("use crate::alpha::*;", 1),
         ("pub(crate) use self::x::*;", 1),
-        (
-            "macro_rules! m { () => { mod inner { use super::*; } }; }",
-            1,
-        ),
+        ("m! { mod inner { use super::*; } }", 1),
     ] {
         assert!(opaque(src, depth).is_empty(), "{src}");
     }
