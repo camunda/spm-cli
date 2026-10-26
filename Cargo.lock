@@ -943,10 +943,12 @@ dependencies = [
  "directories",
  "jsonschema",
  "libc",
+ "proc-macro2",
  "semver",
  "serde",
  "serde-saphyr",
  "serde_json",
+ "syn 2.0.119",
  "windows-sys 0.61.2",
  "yaml-rust2",
 ]

@@ -1,388 +1,174 @@
 //! Lint policy guard: shipped code in `src/` never silences a lint. Warnings
 //! are fixed, not suppressed (AGENTS.md "Always-green policy"), so any
 //! `#[allow(..)]`, `#![allow(..)]`, `#[expect(..)]` or a `cfg_attr` wrapping
-//! one fails here with its `file:line`. Test code (`#[cfg(test)]` items) and
-//! comments/string literals are not shipped and are ignored.
+//! one fails here with its `file:line`.
+//!
+//! The source is parsed with `syn`, not scanned: a node gated by a `cfg` that
+//! requires `test` is skipped whole (so field, arm, parameter and generic
+//! boundaries are the parser's, not ours), and anything the guard doesn't
+//! recognise as test-only counts as shipped, so a gap can only over-report.
 
 use std::path::{Path, PathBuf};
 
-/// `src` with every comment and string/char literal blanked to spaces
-/// (newlines kept, so offsets still map to the same lines).
-fn code_only(src: &str) -> Vec<char> {
-    let s: Vec<char> = src.chars().collect();
-    let mut out = s.clone();
-    let blank = |out: &mut Vec<char>, from: usize, to: usize| {
-        for c in &mut out[from..to.min(s.len())] {
-            if *c != '\n' {
-                *c = ' ';
-            }
-        }
-    };
-    let ident = |c: char| c.is_alphanumeric() || c == '_';
-    let mut i = 0;
-    while i < s.len() {
-        let at = |k: usize| s.get(i + k).copied();
-        if at(0) == Some('/') && at(1) == Some('/') {
-            let end = s[i..]
-                .iter()
-                .position(|&c| c == '\n')
-                .map_or(s.len(), |p| i + p);
-            blank(&mut out, i, end);
-            i = end;
-        } else if at(0) == Some('/') && at(1) == Some('*') {
-            // Block comments nest in Rust.
-            let (mut depth, mut j) = (0usize, i);
-            while j < s.len() {
-                if s[j] == '/' && s.get(j + 1) == Some(&'*') {
-                    depth += 1;
-                    j += 2;
-                } else if s[j] == '*' && s.get(j + 1) == Some(&'/') {
-                    depth -= 1;
-                    j += 2;
-                    if depth == 0 {
-                        break;
-                    }
-                } else {
-                    j += 1;
-                }
-            }
-            blank(&mut out, i, j);
-            i = j;
-        } else if (at(0) == Some('r') || (matches!(at(0), Some('b' | 'c')) && at(1) == Some('r')))
-            && (i == 0 || !ident(s[i - 1]))
-            && {
-                let r = if at(0) == Some('r') { i } else { i + 1 };
-                let hashes = s[r + 1..].iter().take_while(|&&c| c == '#').count();
-                s.get(r + 1 + hashes) == Some(&'"')
-            }
-        {
-            let r = if at(0) == Some('r') { i } else { i + 1 };
-            let hashes = s[r + 1..].iter().take_while(|&&c| c == '#').count();
-            let mut j = r + 2 + hashes;
-            while j < s.len() {
-                if s[j] == '"'
-                    && s[j + 1..]
-                        .iter()
-                        .take(hashes)
-                        .filter(|&&c| c == '#')
-                        .count()
-                        == hashes
-                {
-                    j += 1 + hashes;
-                    break;
-                }
-                j += 1;
-            }
-            blank(&mut out, i, j);
-            i = j;
-        } else if at(0) == Some('"') {
-            let mut j = i + 1;
-            while j < s.len() && s[j] != '"' {
-                j += if s[j] == '\\' { 2 } else { 1 };
-            }
-            blank(&mut out, i, j + 1);
-            i = j + 1;
-        } else if at(0) == Some('\'') && (at(1) == Some('\\') || at(2) == Some('\'')) {
-            // A char literal (a lifetime `'a` has no closing quote).
-            let mut j = i + 1;
-            while j < s.len() && s[j] != '\'' {
-                j += if s[j] == '\\' { 2 } else { 1 };
-            }
-            blank(&mut out, i, j + 1);
-            i = j + 1;
-        } else {
-            i += 1;
-        }
-    }
-    out
+use proc_macro2::{TokenStream, TokenTree};
+use syn::ext::IdentExt;
+use syn::punctuated::Punctuated;
+use syn::visit::{self, Visit};
+use syn::{Attribute, Meta, Token};
+
+fn is_lint_level(meta: &Meta) -> bool {
+    meta.path().get_ident().is_some_and(|i| {
+        let name = i.unraw().to_string();
+        name == "allow" || name == "expect"
+    })
 }
 
-/// An attribute starting at `i` (`#[..]` or `#![..]`): its body with all
-/// whitespace and raw-identifier prefixes (`r#allow` is `allow`) removed, and
-/// the offset just past its closing `]`.
-fn attribute(code: &[char], i: usize) -> Option<(String, usize)> {
-    let skip_ws = |mut j: usize| {
-        while code.get(j).is_some_and(|c| c.is_whitespace()) {
-            j += 1;
-        }
-        j
-    };
-    if code.get(i) != Some(&'#') {
-        return None;
+fn nested(meta: &Meta) -> Vec<Meta> {
+    match meta {
+        Meta::List(list) => list
+            .parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
+            .map(|p| p.into_iter().collect())
+            .unwrap_or_default(),
+        _ => Vec::new(),
     }
-    let mut j = skip_ws(i + 1);
-    if code.get(j) == Some(&'!') {
-        j = skip_ws(j + 1);
-    }
-    if code.get(j) != Some(&'[') {
-        return None;
-    }
-    let (start, mut depth) = (j + 1, 0usize);
-    while j < code.len() {
-        match code[j] {
-            '[' => depth += 1,
-            ']' => {
-                depth -= 1;
-                if depth == 0 {
-                    let body: Vec<char> = code[start..j]
-                        .iter()
-                        .copied()
-                        .filter(|c| !c.is_whitespace())
-                        .collect();
-                    return Some((unraw(&body), j + 1));
-                }
-            }
-            _ => {}
-        }
-        j += 1;
-    }
-    None
 }
 
-/// `body` with every raw-identifier prefix dropped: `r#` starting an
-/// identifier (literals are already blanked, so no raw string remains).
-fn unraw(body: &[char]) -> String {
-    let ident = |c: char| c.is_alphanumeric() || c == '_';
-    let mut out = String::with_capacity(body.len());
-    let mut k = 0;
-    while k < body.len() {
-        let raw =
-            body[k] == 'r' && body.get(k + 1) == Some(&'#') && (k == 0 || !ident(body[k - 1]));
-        if raw {
-            k += 2;
-        } else {
-            out.push(body[k]);
-            k += 1;
+/// Whether `pred` (a `cfg` predicate) can only hold when `test` does.
+fn requires_test(pred: &Meta) -> bool {
+    let name = pred.path().get_ident().map(|i| i.unraw().to_string());
+    match name.as_deref() {
+        Some("test") => matches!(pred, Meta::Path(_)),
+        Some("all") => nested(pred).iter().any(requires_test),
+        Some("any") => {
+            let preds = nested(pred);
+            !preds.is_empty() && preds.iter().all(requires_test)
         }
+        _ => false,
     }
-    out
 }
 
-/// Whether a compacted attribute body is a `cfg` that enables its item only
-/// under test: exactly `cfg(test)`, or `cfg(all(..))` with `test` as a direct
-/// argument. `any(..)`/`not(..)` (and anything else) can ship, so they are not.
-fn is_cfg_test(body: &str) -> bool {
-    let Some(pred) = body.strip_prefix("cfg(").and_then(|p| p.strip_suffix(')')) else {
-        return false;
-    };
-    if pred == "test" {
+fn is_cfg_test(attr: &Attribute) -> bool {
+    let meta = &attr.meta;
+    meta.path().is_ident("cfg") && nested(meta).first().is_some_and(requires_test)
+}
+
+/// Whether `meta` is a lint-level attribute, or a `cfg_attr` (that can apply
+/// in a shipped build) wrapping one.
+fn suppresses(meta: &Meta) -> bool {
+    if is_lint_level(meta) {
         return true;
     }
-    let Some(args) = pred.strip_prefix("all(").and_then(|p| p.strip_suffix(')')) else {
+    if !meta.path().is_ident("cfg_attr") {
         return false;
-    };
-    let (mut depth, mut start) = (0usize, 0usize);
-    for (k, c) in args.char_indices() {
-        match c {
-            '(' => depth += 1,
-            ')' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                if &args[start..k] == "test" {
-                    return true;
-                }
-                start = k + 1;
-            }
-            _ => {}
-        }
     }
-    &args[start..] == "test"
+    let args = nested(meta);
+    let shipped = args.first().is_some_and(|p| !requires_test(p));
+    shipped && args.iter().skip(1).any(suppresses)
 }
 
-/// Whether the attribute starting at `i` is an inner one (`#![..]`), which
-/// applies to its enclosing module rather than the next item.
-fn is_inner(code: &[char], i: usize) -> bool {
-    code[i + 1..]
-        .iter()
-        .find(|c| !c.is_whitespace())
-        .is_some_and(|&c| c == '!')
-}
-
-/// Whether a compacted attribute body silences a lint.
-fn suppresses(body: &str) -> bool {
-    let lint_level = |b: &str| b.starts_with("allow(") || b.starts_with("expect(");
-    lint_level(body)
-        || (body.starts_with("cfg_attr(")
-            && (body.contains(",allow(") || body.contains(",expect(")))
-}
-
-/// Whether the thing starting at `i` is an item: after any further attributes,
-/// visibility and modifiers comes an item keyword (a raw identifier such as
-/// `r#type` is not one).
-fn starts_item(code: &[char], mut i: usize) -> bool {
-    loop {
-        while code.get(i).is_some_and(|c| c.is_whitespace()) {
-            i += 1;
-        }
-        if let Some((_, end)) = attribute(code, i) {
-            i = end;
-            continue;
-        }
-        let start = i;
-        while code
-            .get(i)
-            .is_some_and(|&c| c.is_alphanumeric() || c == '_' || (c == '#' && i > start))
-        {
-            i += 1;
-        }
-        let word: String = code[start..i].iter().collect();
-        match word.as_str() {
-            "pub" => {
-                while code.get(i).is_some_and(|c| c.is_whitespace()) {
-                    i += 1;
-                }
-                if code.get(i) == Some(&'(') {
-                    while code.get(i).is_some_and(|&c| c != ')') {
-                        i += 1;
+/// Lines of lint suppressions in `tokens`, which syn leaves unparsed (macro
+/// bodies): any `#[allow(..)]`-shaped attribute counts.
+fn token_suppressions(tokens: TokenStream, lines: &mut Vec<usize>) {
+    let trees: Vec<TokenTree> = tokens.into_iter().collect();
+    for (k, tree) in trees.iter().enumerate() {
+        match tree {
+            TokenTree::Punct(p) if p.as_char() == '#' => {
+                let bracket = trees[k + 1..].iter().find(|t| match t {
+                    TokenTree::Punct(p) => p.as_char() != '!',
+                    _ => true,
+                });
+                if let Some(TokenTree::Group(g)) = bracket {
+                    let body = g.stream();
+                    if let Ok(meta) = syn::parse2::<Meta>(body) {
+                        if suppresses(&meta) {
+                            lines.push(p.span().start().line);
+                        }
                     }
-                    i += 1;
                 }
             }
-            "async" | "unsafe" | "default" | "safe" | "extern" => {}
-            "fn" | "impl" | "struct" | "enum" | "trait" | "type" | "union" | "mod" | "const"
-            | "static" | "use" | "macro_rules" => return true,
-            _ => {
-                if code.get(i) == Some(&'"') {
-                    i += 1;
-                    continue;
-                }
-                return false;
-            }
+            TokenTree::Group(g) => token_suppressions(g.stream(), lines),
+            _ => {}
         }
     }
 }
 
-/// Index of the `}` closing the block opened at `open`.
-fn block_end(code: &[char], open: usize) -> usize {
-    let (mut j, mut braces) = (open, 0usize);
-    while j < code.len() {
-        match code[j] {
-            '{' => braces += 1,
-            '}' => {
-                braces -= 1;
-                if braces == 0 {
-                    break;
-                }
-            }
-            _ => {}
-        }
-        j += 1;
-    }
-    j
+#[derive(Default)]
+struct Guard {
+    lines: Vec<usize>,
 }
 
-/// Whether the attribute run starting at `run` sits in a generic parameter
-/// list (`fn f<A, #[cfg(test)] B>`): walking back, the first unclosed bracket
-/// is a `<` hugging an identifier.
-fn in_generics(code: &[char], run: usize) -> bool {
-    let mut depth = 0usize;
-    for k in (0..run).rev() {
-        match code[k] {
-            ')' | ']' | '}' => depth += 1,
-            '(' | '[' | '{' if depth == 0 => return false,
-            '(' | '[' | '{' => depth -= 1,
-            ';' if depth == 0 => return false,
-            '<' if depth == 0 => {
-                return k > 0 && (code[k - 1].is_alphanumeric() || code[k - 1] == '_');
+macro_rules! skip_test_only {
+    ($($method:ident($node:ty) via $walk:ident;)*) => {
+        $(fn $method(&mut self, node: &'ast $node) {
+            if !node.attrs.iter().any(is_cfg_test) {
+                visit::$walk(self, node);
             }
-            _ => {}
-        }
-    }
-    false
+        })*
+    };
 }
 
-/// Index of the last char of the test-only thing whose attribute ends at
-/// `end`: an item (ends at `;` or its block; commas and generics live in its
-/// header), a generic parameter (ends at `,` or its list's `>`), or a field,
-/// arm or parameter (ends at `,`); or just before a `}`, `)` or `]` closing
-/// the enclosing one.
-fn test_only_end(code: &[char], run: usize, end: usize) -> usize {
-    // `const` opens an item, but also a const generic parameter.
-    let generic = in_generics(code, run);
-    let item = !generic && starts_item(code, end);
-    let (mut j, mut depth, mut angle, mut arm) = (end, 0usize, 0usize, false);
-    while j < code.len() {
-        let (prev, next) = (j.checked_sub(1).map(|p| code[p]), code.get(j + 1).copied());
-        match code[j] {
-            '(' | '[' => depth += 1,
-            ')' | ']' if depth > 0 => depth -= 1,
-            // `<<`, `<=`, `->`, `=>` and `>=` are not generic delimiters.
-            '<' if (item || generic) && prev != Some('<') && !matches!(next, Some('<' | '=')) => {
-                angle += 1
-            }
-            '>' if (item || generic) && !matches!(prev, Some('-' | '=')) && next != Some('=') => {
-                if angle == 0 {
-                    return j - 1;
-                }
-                angle -= 1;
-            }
-            '=' if next == Some('>') && depth == 0 => arm = true,
-            ',' if depth == 0 && angle == 0 && !item => break,
-            ';' if depth == 0 => break,
-            '}' | ')' | ']' if depth == 0 => return j - 1,
-            // Braces inside generics are a const default, not the body.
-            // Braces in an arm's pattern or a field value don't end it; those
-            // after `=>` are its body.
-            '{' if depth == 0 && (item || generic) && angle == 0 => return block_end(code, j),
-            '{' if depth == 0 && arm => return block_end(code, j),
-            '{' if depth == 0 => j = block_end(code, j),
-            _ => {}
+impl<'ast> Visit<'ast> for Guard {
+    fn visit_attribute(&mut self, attr: &'ast Attribute) {
+        if suppresses(&attr.meta) {
+            self.lines.push(attr.pound_token.spans[0].start().line);
         }
-        j += 1;
     }
-    j
+
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        token_suppressions(mac.tokens.clone(), &mut self.lines);
+        visit::visit_macro(self, mac);
+    }
+
+    skip_test_only! {
+        visit_file(syn::File) via visit_file;
+        visit_item_const(syn::ItemConst) via visit_item_const;
+        visit_item_enum(syn::ItemEnum) via visit_item_enum;
+        visit_item_extern_crate(syn::ItemExternCrate) via visit_item_extern_crate;
+        visit_item_fn(syn::ItemFn) via visit_item_fn;
+        visit_item_foreign_mod(syn::ItemForeignMod) via visit_item_foreign_mod;
+        visit_item_impl(syn::ItemImpl) via visit_item_impl;
+        visit_item_macro(syn::ItemMacro) via visit_item_macro;
+        visit_item_mod(syn::ItemMod) via visit_item_mod;
+        visit_item_static(syn::ItemStatic) via visit_item_static;
+        visit_item_struct(syn::ItemStruct) via visit_item_struct;
+        visit_item_trait(syn::ItemTrait) via visit_item_trait;
+        visit_item_trait_alias(syn::ItemTraitAlias) via visit_item_trait_alias;
+        visit_item_type(syn::ItemType) via visit_item_type;
+        visit_item_union(syn::ItemUnion) via visit_item_union;
+        visit_item_use(syn::ItemUse) via visit_item_use;
+        visit_foreign_item_fn(syn::ForeignItemFn) via visit_foreign_item_fn;
+        visit_foreign_item_static(syn::ForeignItemStatic) via visit_foreign_item_static;
+        visit_foreign_item_type(syn::ForeignItemType) via visit_foreign_item_type;
+        visit_foreign_item_macro(syn::ForeignItemMacro) via visit_foreign_item_macro;
+        visit_trait_item_const(syn::TraitItemConst) via visit_trait_item_const;
+        visit_trait_item_fn(syn::TraitItemFn) via visit_trait_item_fn;
+        visit_trait_item_type(syn::TraitItemType) via visit_trait_item_type;
+        visit_trait_item_macro(syn::TraitItemMacro) via visit_trait_item_macro;
+        visit_impl_item_const(syn::ImplItemConst) via visit_impl_item_const;
+        visit_impl_item_fn(syn::ImplItemFn) via visit_impl_item_fn;
+        visit_impl_item_type(syn::ImplItemType) via visit_impl_item_type;
+        visit_impl_item_macro(syn::ImplItemMacro) via visit_impl_item_macro;
+        visit_field(syn::Field) via visit_field;
+        visit_variant(syn::Variant) via visit_variant;
+        visit_arm(syn::Arm) via visit_arm;
+        visit_field_value(syn::FieldValue) via visit_field_value;
+        visit_local(syn::Local) via visit_local;
+        visit_type_param(syn::TypeParam) via visit_type_param;
+        visit_const_param(syn::ConstParam) via visit_const_param;
+        visit_lifetime_param(syn::LifetimeParam) via visit_lifetime_param;
+        visit_receiver(syn::Receiver) via visit_receiver;
+        visit_pat_type(syn::PatType) via visit_pat_type;
+    }
 }
 
 /// 1-based lines of `src` holding a lint suppression outside test code.
 fn suppressions(src: &str) -> Vec<usize> {
-    let mut code = code_only(src);
-    // Blank every `#[cfg(test)]` item: its whole attribute list (whatever the
-    // order), signature and body. An item ends at a top-level `;`, `,` (a
-    // field/arm/variant/parameter) or `{..}` block, or just before a `}`, `)`
-    // or `]` closing the enclosing one.
-    let mut i = 0;
-    // Start of the run of attributes the one at `i` belongs to, and the end of
-    // the previous attribute in it (only whitespace may separate two).
-    let (mut run, mut last_end) = (0usize, None::<usize>);
-    while i < code.len() {
-        let Some((body, end)) = attribute(&code, i) else {
-            i += 1;
-            continue;
-        };
-        let inner = is_inner(&code, i);
-        let joined = last_end.is_some_and(|e| code[e..i].iter().all(|c| c.is_whitespace()));
-        if inner || !joined {
-            run = i;
-        }
-        // An inner attribute applies to its module, not to the next item.
-        last_end = (!inner).then_some(end);
-        if !is_cfg_test(&body) {
-            i = end;
-            continue;
-        }
-        let j = test_only_end(&code, run, end);
-        let stop = (j + 1).min(code.len());
-        for c in &mut code[run..stop] {
-            if *c != '\n' {
-                *c = ' ';
-            }
-        }
-        i = stop;
-        last_end = None;
-    }
-    let mut lines = Vec::new();
-    let mut i = 0;
-    while i < code.len() {
-        match attribute(&code, i) {
-            Some((body, end)) => {
-                if suppresses(&body) {
-                    lines.push(code[..i].iter().filter(|&&c| c == '\n').count() + 1);
-                }
-                i = end;
-            }
-            None => i += 1,
-        }
-    }
-    lines
+    let file = syn::parse_file(src).unwrap_or_else(|e| panic!("cannot parse source: {e}"));
+    let mut guard = Guard::default();
+    guard.visit_file(&file);
+    guard.lines.sort_unstable();
+    guard.lines.dedup();
+    guard.lines
 }
 
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -423,122 +209,58 @@ fn src_never_suppresses_lints() {
 #[test]
 fn suppressions_flags_every_attribute_form() {
     let src = "\
-fn a() {}
-#[allow(dead_code)]
-fn b() {}
-#![allow(clippy::all)]
-# [ allow ( unused ) ]
-#[expect(dead_code)]
-#[cfg_attr(feature = \"x\", allow(unused))]
-#[cfg(not(test))]
-mod live { #[allow(unused)] fn c() {} }
-#[cfg(any(test, unix))]
-mod m { #[allow(x)] fn f() {} }
-struct T { #[cfg(test)] a: u8, #[allow(dead_code)] b: u8 }
-struct U { a: u8, #[cfg(test)] b: u8 }
-#[allow(after_field)]
-fn d(x: u8) { match x { #[cfg(test)] 0 => {} #[allow(unused)] _ => {} } }
-#[derive(Debug)]
-struct S;
+#[allow(dead_code)] fn a() {}
+#[expect(dead_code)] fn b() {}
+#[r#allow(dead_code)] fn c() {}
+#[cfg_attr(unix, allow(dead_code))] fn d() {}
+#[cfg_attr(unix, cfg_attr(unix, expect(dead_code)))] fn e() {}
+mod live { #![allow(unused)] }
+fn f(x: u8) { #[allow(unused)] let _y = x; }
+macro_rules! m { () => { #[allow(unused)] fn g() {} }; }
 ";
-    assert_eq!(suppressions(src), vec![2, 4, 5, 6, 7, 9, 11, 12, 14, 15]);
+    assert_eq!(suppressions(src), vec![1, 2, 3, 4, 5, 6, 7, 8]);
 }
 
+/// Items, fields, arms, parameters, generics and modules gated on a predicate
+/// that requires `test` are exempt, whatever their shape or attribute order;
+/// anything else (`any(test, unix)`, `not(test)`) ships.
 #[test]
-fn suppressions_ignores_test_code_comments_and_literals() {
-    let src = r####"
-// #[allow(dead_code)]
-/* #[allow(dead_code)] /* nested */ #[allow(x)] */
-/// docs: #[allow(dead_code)]
-const S: &str = "#[allow(dead_code)] \" #[allow(x)]";
-const R: &str = r#"#[allow(dead_code)]"#;
-const C: char = '"';
-fn lifetime<'a>(x: &'a str) -> &'a str { x }
-#[cfg(test)]
-mod tests {
-    #[allow(dead_code)]
-    fn helper() { let _ = [0u8; 2]; }
-}
-#[cfg(test)]
-#[allow(dead_code)]
-fn test_only() {}
-#[cfg(all(test, unix))]
-mod unix_tests { #[allow(x)] fn h() {} }
-#[cfg(test)] mod inline_tests { #[allow(x)] fn g() { let _ = (1, 2); } }
-#[allow(after_tests)]
-fn live() {}
-"####;
-    assert_eq!(suppressions(src), vec![20]);
-}
-
-/// Raw identifiers name the same attribute: `r#allow` silences a lint too.
-#[test]
-fn suppressions_flags_raw_identifier_attributes() {
+fn suppressions_exempt_exactly_test_only_code() {
     let src = "\
-#[r#allow(dead_code)]
-fn a() {}
-#[cfg_attr(not(test), r#allow(dead_code))]
-fn b() {}
-#[r#expect(unused)]
-fn c() {}
+#[allow(a)] #[cfg(test)] fn t1() {}
+#[cfg(all(test, not(windows)))] mod t2 { #[allow(b)] fn f() {} #[allow(c)] fn g() {} }
+mod t3 { #![cfg(test)] #[allow(d)] fn f() {} #[allow(e)] fn g() {} }
+#[cfg(test)] fn t4<A, B>() where A: Copy, B: Copy { #[allow(f)] let _ = 0; }
+#[cfg(test)] struct T5<const N: usize = { 1 + 1 }> { #[allow(g)] b: [u8; N] }
+#[cfg_attr(test, allow(h))] fn t6() {}
+#[cfg(test)] macro_rules! t7 { () => { #[allow(i)] fn x() {} }; }
+#[cfg(any(test, unix))] #[allow(live1)] fn l1() {}
+#[cfg(not(test))] #[allow(live2)] fn l2() {}
+struct S { #[cfg(test)] flag: bool }
+#[allow(live3)] fn l3() {}
+fn g<#[cfg(test)] T>() { #[allow(live4)] let _ = 0; }
+pub fn k<#[cfg(test)] const N: usize, #[allow(live5)] t>() {}
+fn p(#[cfg(test)] _x: u8) { #[allow(live6)] let _ = 0; }
+fn e(x: u8) {
+    match x {
+        #[cfg(test)] 0 if x < 1 => { #[allow(j)] let _ = x; }
+        #[cfg(test)] r#type if r#type < 1 => true,
+        #[allow(live7)] _ => {}
+    }
+}
 ";
-    assert_eq!(suppressions(src), vec![1, 3, 5]);
+    assert_eq!(suppressions(src), vec![8, 9, 11, 12, 13, 14, 19]);
 }
 
-/// A test-only parameter ends at the `)` closing the parameter list; the
-/// function body after it ships.
 #[test]
-fn suppressions_stops_a_test_only_item_at_its_enclosing_delimiter() {
+fn suppressions_ignores_comments_and_literals() {
     let src = "\
-fn f(#[cfg(test)] _x: u8) {
-    #[allow(unused_variables)]
-    let x = 1;
-}
-fn g(a: [u8; 1], #[cfg(test)] _y: u8) -> u8 { #[allow(x)] let _ = 0; a[0] }
-";
-    assert_eq!(suppressions(src), vec![2, 5]);
-}
-
-/// The test-code exemption covers an item's whole attribute list, whatever
-/// the order of its attributes.
-#[test]
-fn suppressions_ignores_attributes_before_a_test_only_cfg() {
-    let src = "\
-#[allow(dead_code)]
-#[cfg(test)]
-fn helper() {}
-#[allow(dead_code)] /// docs
-#[derive(Debug)] #[cfg(test)] struct T;
-struct S { #[allow(dead_code)] #[cfg(test)] a: u8, b: u8 }
-#[allow(after)]
-fn live() {}
-#[allow(before_live)]
-fn live2() {}
-#[cfg(test)]
-fn t() {}
-#![allow(inner)]
-#[cfg(test)] mod m {}
-";
-    assert_eq!(suppressions(src), vec![7, 9, 13]);
-}
-
-/// A comma inside a generic parameter list does not end a test-only item, and
-/// a raw C string does not derail the literal scanner.
-#[test]
-fn suppressions_handles_generics_and_raw_c_strings() {
-    let src = "\
-#[cfg(test)] pub(crate) async fn w<A, B>() where A: Copy, B: Copy { #[allow(w)] let _ = 0; }
-#[cfg(test)] fn helper<A, B>(_a: A, _b: B) -> Vec<(A, B)> { #[allow(x)] let _ = 0; vec![] }
-#[cfg(test)] fn ret() -> Result<u8, u8> { #[allow(y)] Ok(0) }
+// #[allow(a)]
+/* #[allow(b)] /* nested */ */
+const S: &str = \"#[allow(c)]\";
+const R: &str = r#\"#[allow(d)]\"#;
 const C: &core::ffi::CStr = cr#\"a\"b\"#;
-#[allow(live)]
-fn live() {}
-fn m(x: u8) { match x { #[cfg(test)] 0 => x < 1, #[allow(arm)] _ => x > 1 }; }
-fn g<#[cfg(test)] T>() { #[allow(gen)] let _ = 0; }
-#[cfg(test)] struct H<const N: usize = { 1 + 1 }> { #[allow(c)] b: [u8; N] }
-pub fn k<#[cfg(test)] const N: usize, #[allow(kk)] t>() {}
-fn e(x: E) { match x { #[cfg(test)] E::D { v } => { #[allow(body)] let _ = v; } #[allow(next)] _ => {} } }
-fn n(x: u8) { match x { #[cfg(test)] r#type if r#type < 1 => true, #[allow(raw)] _ => false }; }
+#[allow(live)] fn f() {}
 ";
-    assert_eq!(suppressions(src), vec![5, 7, 8, 10, 11, 12]);
+    assert_eq!(suppressions(src), vec![6]);
 }
