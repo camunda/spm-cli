@@ -333,26 +333,67 @@ make install PREFIX=~/.local  # or a custom prefix
 
 ## Commands
 
+<!-- cli-overview:start — generated from the CLI's own help by tests/cli/docs_drift.rs; regenerate with `SPM_BLESS=1 cargo test cli_overview` -->
 ```bash
-spm init [--target amp|claude|cline|codex|copilot|cursor|gemini|windsurf ...] [-g]  # scaffold ai.json (repeatable / comma-separated)
-spm add <git> [--tag|--branch|--commit <v>|--version "<range>"] \  # add + install a skill (no selector = default branch; github.com/owner/repo@ref also works)
-        [--path <subdir>] [--name <local-name>] [--all] [--force] [--lock-only] [-g]  # --all: add every skill under --path
-        [--plugin]                                 # --plugin: add a full plugin (see "Full plugins")
-spm target add [vendor ...] [-g]                   # add target vendor(s); no arg = pick interactively
-spm target remove <vendor ...> [-g]               # drop target vendor(s) + clean their output; alias: rm
-spm remove <name> [--plugin] [-g]                  # drop a skill (or a plugin with --plugin); alias: rm
-spm update [name] [--lock-only] [-g]               # re-resolve branches/tags to latest; --lock-only: write ai.lock only
-spm link <name> <dir> [-g]                         # develop a declared skill/plugin from a local dir (machine-local override)
-spm unlink <name>|--all [-g]                       # drop link override(s), restore the locked version
-spm install [-g] [--locked]                        # rebuild from ai.lock (after clone); alias: i; --locked fails if ai.lock is out of sync (CI)
-spm list [-g] [--json]                             # show skills + pinned commits; alias: ls
-spm status [-g] [--json]                           # check skills are materialized in this checkout
-spm outdated [name] [-g] [--json] [--exit-code]    # report newer upstream versions (read-only)
-spm doctor [-g] [--online] [--json]                # diagnose setup problems, with a fix per check (read-only)
-spm clean [-g]                                     # remove generated vendor config
-spm prune [--yes]                                  # wipe the global fetch cache ($SPM_HOME/store, default ~/.spm/store)
-spm scan [path] [--within <dir>] [--json]          # scan skill content for suspicious patterns (default: .)
+# Create a new ai.json in the current directory
+spm init [--target <amp|claude|cline|codex|copilot|cursor|gemini|windsurf>] \
+    [-g]
+
+# Add a skill dependency and install it
+spm add <GIT> [--tag <TAG>] [--branch <BRANCH>] [--commit <COMMIT>] \
+    [--version <RANGE>] [--path <PATH>] [--name <NAME>] [--all] [--plugin] \
+    [--force] [--lock-only] [-g] [--protocol <ssh|https>] \
+    [--protocol-fallback]
+
+# Add target vendors to ai.json and materialize skills for them
+spm target add [amp|claude|cline|codex|copilot|cursor|gemini|windsurf]... [-g] \
+    [--protocol <ssh|https>] [--protocol-fallback]
+
+# Remove target vendors from ai.json and clean their output (alias: rm)
+spm target remove <amp|claude|cline|codex|copilot|cursor|gemini|windsurf>... \
+    [-g]
+
+# Remove a skill (or, with --plugin, a plugin) dependency (alias: rm)
+spm remove <NAME> [--plugin] [-g] [--protocol <ssh|https>] \
+    [--protocol-fallback]
+
+# Develop a declared skill or plugin from a local directory
+spm link <NAME> <DIR> [-g] [--protocol <ssh|https>] [--protocol-fallback]
+
+# Drop a `spm link` override and re-materialize the locked version
+spm unlink [NAME] [--all] [-g] [--protocol <ssh|https>] [--protocol-fallback]
+
+# Re-resolve branches/tags to latest commits (skills and plugins)
+spm update [NAME] [--lock-only] [-g] [--protocol <ssh|https>] \
+    [--protocol-fallback]
+
+# Fetch + materialize everything from ai.lock (use after cloning) (alias: i)
+spm install [--locked] [-g] [--protocol <ssh|https>] [--protocol-fallback]
+
+# List declared skills and plugins with their locked commits (alias: ls)
+spm list [-g] [--json]
+
+# Show which declared skills and plugins are materialized in this checkout
+spm status [-g] [--json]
+
+# Report locked skills and plugins with newer upstream versions
+spm outdated [NAME] [--exit-code] [-g] [--json] [--protocol <ssh|https>] \
+    [--protocol-fallback]
+
+# Diagnose common setup problems, with a fix for each
+spm doctor [--online] [-g] [--json] [--protocol <ssh|https>] \
+    [--protocol-fallback]
+
+# Remove all generated vendor config for this project
+spm clean [-g]
+
+# Remove everything from the global store (fetch cache)
+spm prune [--yes]
+
+# Scan skill content for suspicious patterns
+spm scan [PATH] [--within <DIR>] [--json]
 ```
+<!-- cli-overview:end -->
 
 Four commands have short aliases that behave identically, including `-g`:
 `spm i` (`install`), `spm rm` (`remove`), `spm ls` (`list`) and `spm target rm`

@@ -19,7 +19,7 @@ mod verdict;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use common::{JsonArg, ScopeArg, TransportArgs, VersionArg};
+use common::{JsonArg, ScopeArg, TargetParser, TransportArgs, VersionArg};
 use std::path::Path;
 
 #[derive(Parser)]
@@ -31,11 +31,13 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Create a new ai.json in the current directory (or, with --global, under
-    /// $SPM_HOME to manage skills shared across every project).
+    /// Create a new ai.json in the current directory.
+    ///
+    /// With --global, create it under $SPM_HOME instead, to manage skills
+    /// shared across every project.
     Init {
-        /// Target vendor(s): amp, claude, cline, codex, copilot, cursor, gemini and/or windsurf. Repeatable or comma-separated.
-        #[arg(long = "target", value_delimiter = ',', default_value = "claude")]
+        /// Target vendor(s). Repeatable or comma-separated.
+        #[arg(long = "target", value_delimiter = ',', default_value = "claude", value_parser = TargetParser)]
         targets: Vec<String>,
         #[command(flatten)]
         scope: ScopeArg,
@@ -97,12 +99,13 @@ enum Command {
         #[command(flatten)]
         transport: TransportArgs,
     },
-    /// Develop a declared skill or plugin from a local directory: materialize
-    /// its current content (uncommitted edits included) instead of the locked
-    /// commit. The override is machine-local, kept under `$SPM_HOME` and never
-    /// in the checkout (`links/<project>-<hash>.json`, or `links.json` with -g)
-    /// — ai.json and ai.lock are not modified.
-    /// Re-run `spm install` to pick up further edits.
+    /// Develop a declared skill or plugin from a local directory.
+    ///
+    /// Materializes its current content (uncommitted edits included) instead of
+    /// the locked commit. The override is machine-local, kept under `$SPM_HOME`
+    /// and never in the checkout (`links/<project>-<hash>.json`, or `links.json`
+    /// with -g) — ai.json and ai.lock are not modified. Re-run `spm install` to
+    /// pick up further edits.
     Link {
         /// Name of the skill or plugin, as declared in ai.json.
         name: String,
@@ -171,10 +174,11 @@ enum Command {
         #[command(flatten)]
         output: JsonArg,
     },
-    /// Report locked skills and plugins with newer upstream versions (moved
-    /// branches, newer semver tags, re-pointed tags). Read-only: never writes
-    /// ai.json/ai.lock, fetches into the store or touches vendor dirs. Exits
-    /// non-zero if a remote could not be checked.
+    /// Report locked skills and plugins with newer upstream versions.
+    ///
+    /// Covers moved branches, newer semver tags and re-pointed tags. Read-only:
+    /// never writes ai.json/ai.lock, fetches into the store or touches vendor
+    /// dirs. Exits non-zero if a remote could not be checked.
     Outdated {
         /// Skill or plugin to check; omit to check all.
         name: Option<String>,
@@ -188,11 +192,13 @@ enum Command {
         #[command(flatten)]
         transport: TransportArgs,
     },
-    /// Diagnose common setup problems: git, ai.json/ai.lock, the store,
-    /// source policy, links, what is installed in each target, .gitignore and
-    /// SKILL.md frontmatter. Each check prints ok/warn/error with a fix. Read-only:
-    /// never writes ai.json/ai.lock, the store or any target. Offline unless
-    /// `--online`. Exits non-zero only if a check is an error.
+    /// Diagnose common setup problems, with a fix for each.
+    ///
+    /// Checks git, ai.json/ai.lock, the store, source policy, links, what is
+    /// installed in each target, .gitignore and SKILL.md frontmatter. Each check
+    /// prints ok/warn/error with a fix. Read-only: never writes ai.json/ai.lock,
+    /// the store or any target. Offline unless `--online`. Exits non-zero only if
+    /// a check is an error.
     Doctor {
         /// Also check that every remote can be reached (`git ls-remote`).
         #[arg(long)]
@@ -209,18 +215,21 @@ enum Command {
         #[command(flatten)]
         scope: ScopeArg,
     },
-    /// Remove everything from the global store (fetch cache). Frees disk by
-    /// deleting every cached repo@commit; they re-fetch on demand on the next
-    /// `install`. Prompts for confirmation unless `--yes` is given.
+    /// Remove everything from the global store (fetch cache).
+    ///
+    /// Frees disk by deleting every cached repo@commit; they re-fetch on demand
+    /// on the next `install`. Prompts for confirmation unless `--yes` is given.
     Prune {
         /// Skip the confirmation prompt (for scripts/CI).
         #[arg(long)]
         yes: bool,
     },
-    /// Scan skill content for suspicious patterns (prompt injection, secret
-    /// exfiltration, encoded payloads, auto-run hooks, …). Exits non-zero if any
-    /// blocking (high/critical) finding is present. The same scan runs
-    /// automatically as a pre-materialize gate on add/install/update.
+    /// Scan skill content for suspicious patterns.
+    ///
+    /// Flags prompt injection, secret exfiltration, encoded payloads, auto-run
+    /// hooks and more. Exits non-zero if any blocking (high/critical) finding is
+    /// present. The same scan runs automatically as a pre-materialize gate on
+    /// add/install/update.
     Scan {
         /// Path to scan — a file or directory (defaults to the current directory).
         #[arg(default_value = ".")]
@@ -238,27 +247,28 @@ enum Command {
 
 #[derive(Subcommand)]
 enum TargetCommand {
-    /// Add one or more target vendors to ai.json (and materialize skills for
-    /// them). With no vendor given, pick interactively from the vendors not yet
+    /// Add target vendors to ai.json and materialize skills for them.
+    ///
+    /// With no vendor given, pick interactively from the vendors not yet
     /// configured.
     Add {
-        /// Vendor(s) to add: amp, claude, cline, codex, copilot, cursor, gemini and/or
-        /// windsurf. Repeatable or comma-separated. Omit to choose interactively.
-        #[arg(value_delimiter = ',')]
+        /// Vendor(s) to add. Repeatable or comma-separated. Omit to choose
+        /// interactively.
+        #[arg(value_delimiter = ',', value_parser = TargetParser)]
         vendors: Vec<String>,
         #[command(flatten)]
         scope: ScopeArg,
         #[command(flatten)]
         transport: TransportArgs,
     },
-    /// Remove one or more target vendors from ai.json and clean what spm
-    /// materialized for them (leaving your own skills untouched). Refuses to
-    /// remove the last target — use `spm clean` for that.
+    /// Remove target vendors from ai.json and clean their output.
+    ///
+    /// Cleans what spm materialized for them (leaving your own skills
+    /// untouched). Refuses to remove the last target — use `spm clean` for that.
     #[command(visible_alias = "rm")]
     Remove {
-        /// Vendor(s) to remove: amp, claude, cline, codex, copilot, cursor, gemini
-        /// and/or windsurf. Repeatable or comma-separated.
-        #[arg(value_delimiter = ',', required = true)]
+        /// Vendor(s) to remove. Repeatable or comma-separated.
+        #[arg(value_delimiter = ',', required = true, value_parser = TargetParser)]
         vendors: Vec<String>,
         #[command(flatten)]
         scope: ScopeArg,
