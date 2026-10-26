@@ -385,7 +385,7 @@ impl Refs {
                     }
                 }
                 // `use ..;` a macro emits: read like a parsed one if it
-                // parses (a `$` fragment in it is read token by token).
+                // parses.
                 TokenTree::Ident(i) if i == "use" => {
                     let end = (k + 1..trees.len()).find(|&e| punct(e, ';'));
                     let tree = end.and_then(|e| {
@@ -396,6 +396,14 @@ impl Refs {
                         self.macro_use(&tree, i.span().start().line);
                         k = e + 1;
                         continue;
+                    }
+                    // In a `macro_rules!` body, an import of a fragment
+                    // (`use $m as dep;`) may name any module; one rooted at
+                    // `crate`/`$crate` is read token by token.
+                    let rooted = ident(k + 1).as_deref() == Some("crate")
+                        || (punct(k + 1, '$') && ident(k + 2).as_deref() == Some("crate"));
+                    if self.rules && !rooted {
+                        self.out.push((OPAQUE.into(), i.span().start().line));
                     }
                 }
                 // `pub(crate)`/`pub(in crate::x)` restrict visibility; they
@@ -1326,8 +1334,16 @@ fn crate_refs_flags_macro_paths_it_cannot_read() {
         assert_eq!(names, [OPAQUE], "{src}");
     }
     for src in [
+        "macro_rules! m { ($m:ident) => { use $m as dep; dep::run(); }; }",
+        "macro_rules! m { ($m:ident) => { use {$m, alpha}; }; }",
+    ] {
+        let names: Vec<String> = crate_refs(src, 1).into_iter().map(|r| r.0).collect();
+        assert!(names.contains(&OPAQUE.to_string()), "{src}: {names:?}");
+    }
+    for src in [
         "macro_rules! m { () => { $crate::alpha::run() }; }",
         "m! { pub(crate) fn f() {} pub(in crate::alpha) fn g() {} }",
+        "macro_rules! m { ($($x:ident),*) => { use $crate::alpha::{$($x),*}; }; }",
     ] {
         let names: Vec<String> = crate_refs(src, 1).into_iter().map(|r| r.0).collect();
         assert!(!names.contains(&OPAQUE.to_string()), "{src}: {names:?}");
