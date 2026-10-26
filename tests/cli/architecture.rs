@@ -255,10 +255,10 @@ impl Refs {
     }
 
     /// References in tokens `syn` leaves unparsed (macro bodies, attribute
-    /// arguments): `crate::`/`super::` paths not behind `$` (`$crate` is the
-    /// defining crate, whoever expands it) and, when `strings` is set, string
-    /// literals holding a whole path (`#[serde(with = "crate::x")]`) unless
-    /// they are a `doc` value.
+    /// arguments): `crate::`/`super::` paths (`$crate::` too: a macro defined
+    /// in `src/` names this crate) and, inside attributes (`strings` set, or a
+    /// `#[..]` within a macro body), string literals holding a whole path
+    /// (`#[serde(with = "crate::x")]`) unless they are a `doc` value.
     fn tokens(&mut self, tokens: TokenStream, strings: bool) {
         let trees: Vec<TokenTree> = tokens.into_iter().collect();
         let punct = |k: usize, c: char| matches!(trees.get(k), Some(TokenTree::Punct(p)) if p.as_char() == c);
@@ -270,6 +270,21 @@ impl Refs {
         let mut k = 0;
         while k < trees.len() {
             match &trees[k] {
+                // An attribute a macro emits: read like a parsed one.
+                TokenTree::Punct(p) if p.as_char() == '#' => {
+                    let j = k + 1 + usize::from(punct(k + 1, '!'));
+                    if let Some(TokenTree::Group(g)) = trees.get(j) {
+                        if g.delimiter() == Delimiter::Bracket {
+                            let first = g.stream().into_iter().next();
+                            let doc = matches!(&first, Some(TokenTree::Ident(i)) if i == "doc");
+                            if !doc {
+                                self.tokens(g.stream(), true);
+                            }
+                            k = j + 1;
+                            continue;
+                        }
+                    }
+                }
                 TokenTree::Group(g) => self.tokens(g.stream(), strings),
                 TokenTree::Literal(lit) if strings => {
                     let is_doc =
@@ -292,7 +307,6 @@ impl Refs {
                 }
                 TokenTree::Ident(i)
                     if matches!(i.to_string().as_str(), "crate" | "super")
-                        && !(k > 0 && punct(k - 1, '$'))
                         && !(k > 1 && sep(k - 2)) =>
                 {
                     let line = i.span().start().line;
@@ -868,6 +882,28 @@ fn crate_refs_rejects_inline_modules_at_the_crate_root() {
     crate_refs("mod inner { use crate::alpha::X; }\n", 1);
 }
 
+/// Macros defined in `src/` name this crate through `$crate`, and the
+/// attributes they emit carry path strings like parsed ones; their other
+/// string arguments and docs stay prose.
+#[test]
+fn crate_refs_reads_macro_crate_paths_and_attributes() {
+    let src = r##"
+macro_rules! m { () => { $crate::alpha::run() }; }
+macro_rules! s { () => {
+    struct S {
+        #[serde(serialize_with = "crate::beta::serialize")]
+        a: u8,
+        #[doc = "crate::ghost"]
+        b: u8,
+    }
+    #![cfg_attr(unix, doc = "crate::ghost")]
+    fn f() { println!("crate::ghost"); g("crate::ghost"); }
+}; }
+"##;
+    let names: Vec<String> = crate_refs(src, 1).into_iter().map(|r| r.0).collect();
+    assert_eq!(names, ["alpha", "beta"]);
+}
+
 #[test]
 fn crate_refs_carries_relative_depth_through_groups() {
     let names =
@@ -889,7 +925,6 @@ fn crate_refs_ignores_docs_literals_macros_and_test_code() {
 // crate::comment
 /* crate::block */
 const S: &str = "crate::string";
-macro_rules! m { () => { $crate::macro_path() } }
 #[cfg(test)]
 mod tests {
     use crate::test_only;
