@@ -17,6 +17,13 @@ error: in ai.json: ai.json does not match schema:
 Because validation is embedded, you get the same result offline and in CI — there
 is no separate validation step to wire up.
 
+spm's own manifest model enforces the same shape on top of the schema (and is
+kept in step with it by a parity test), plus the rules a schema can't express:
+dependency names must be valid directory names and unique across `skills` and
+`plugins`, a `version` must be a valid semver requirement, a `path` must stay
+inside the repository, and each `allowedSources` entry must be a valid
+[source pattern](/guide/source-policy).
+
 ## Editor integration
 
 Add a `$schema` reference to your `ai.json` for autocompletion and inline
