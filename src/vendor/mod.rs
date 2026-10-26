@@ -220,7 +220,8 @@ pub fn remove_paths(paths: &[PathBuf]) -> Result<()> {
 /// the `for_target` dispatch, the CLI's interactive target picker, and the
 /// "supported targets" error text — so those never drift apart. Kept in sync with
 /// the `targets` enum in `schema/ai.schema.json` by
-/// [`all_targets_match_schema_enum`](tests::all_targets_match_schema_enum).
+/// [`all_targets_match_schema_enum`](tests::all_targets_match_schema_enum), and
+/// with the targets table in `docs/guide/targets.md` by the CLI docs-drift tests.
 pub const ALL_TARGETS: &[&str] = &[
     "amp", "claude", "cline", "codex", "copilot", "cursor", "gemini", "windsurf",
 ];
@@ -382,17 +383,9 @@ mod tests {
     /// set of targets.
     #[test]
     fn all_targets_match_schema_enum() {
-        let schema: serde_json::Value =
-            serde_json::from_str(crate::schema::SOURCE).expect("schema is valid JSON");
-        let enum_vals = schema["properties"]["targets"]["items"]["enum"]
-            .as_array()
-            .expect("targets.items.enum must be an array");
-        let schema_targets: Vec<&str> = enum_vals
-            .iter()
-            .map(|v| v.as_str().expect("enum entries are strings"))
-            .collect();
         assert_eq!(
-            schema_targets, ALL_TARGETS,
+            crate::schema::targets().unwrap(),
+            ALL_TARGETS,
             "schema targets enum must match ALL_TARGETS (order included)"
         );
     }

@@ -40,7 +40,10 @@ reviewable by your team — exactly like `targets`.
 
 A dependency's own `ai.json` is parsed with a deliberately **lenient** shape:
 
-- Only its `skills` map is read.
+- Only its `skills` map is read. Each entry is checked like a root one: the
+  same spec fields (an unknown key or an explicit `null` is rejected), non-empty
+  strings, a full 40-character `commit`, a contained `path`, and exactly one
+  valid version selector.
 - `targets` is **not required** (transitive skills always inherit *your* root
   targets — see below) and is ignored if present.
 - `plugins` are **ignored** in v1 — a full plugin (agents, hooks, MCP servers,

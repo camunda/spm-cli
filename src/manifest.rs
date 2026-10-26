@@ -48,9 +48,21 @@ impl std::fmt::Display for DependencyKind {
     }
 }
 
-/// The user-authored, VCS-committed declaration file (`ai.json`).
+/// The user-authored, VCS-committed declaration file (`ai.json`). Its shape
+/// mirrors `schema/ai.schema.json` field for field — unknown keys and explicit
+/// `null`s are rejected here too — which the `schema_parity` tests guard.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Manifest {
+    /// Optional editor hint pointing at the schema; kept so saving the
+    /// manifest preserves it.
+    #[serde(
+        rename = "$schema",
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
+    pub schema: Option<String>,
     /// Target vendors, e.g. `["claude", "copilot"]`.
     pub targets: Vec<String>,
     /// Opt-in gate for transitive dependency resolution. When `true`, spm reads
@@ -72,7 +84,8 @@ pub struct Manifest {
     #[serde(
         default,
         rename = "allowedSources",
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
     )]
     pub allowed_sources: Option<Vec<String>>,
     #[serde(default, deserialize_with = "deserialize_unique_skills")]
@@ -87,6 +100,46 @@ pub struct Manifest {
         deserialize_with = "deserialize_unique_plugins"
     )]
     pub plugins: BTreeMap<DepName, SkillSpec>,
+}
+
+/// Deserialize an optional field that, when present, must hold a value. Serde
+/// reads an explicit `null` into an `Option` as absent, a value the schema
+/// rejects; with `#[serde(default)]` a missing field is still `None`.
+fn present<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(d).map(Some)
+}
+
+/// Deserialize a `T` from a JSON object only. A derived struct impl also
+/// accepts a positional array (`["url", "v1"]`), a shape the schema does not
+/// have.
+struct ObjectOnly<T>(T);
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for ObjectOnly<T> {
+    fn deserialize<D>(d: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::{value::MapAccessDeserializer, MapAccess, Visitor};
+        struct ObjectVisitor<T>(std::marker::PhantomData<T>);
+        impl<'de, T: Deserialize<'de>> Visitor<'de> for ObjectVisitor<T> {
+            type Value = T;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a JSON object")
+            }
+            fn visit_map<M>(self, map: M) -> Result<T, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                T::deserialize(MapAccessDeserializer::new(map))
+            }
+        }
+        d.deserialize_map(ObjectVisitor(std::marker::PhantomData))
+            .map(ObjectOnly)
+    }
 }
 
 /// Deserialize the `skills` map while rejecting duplicate names. A plain
@@ -133,7 +186,9 @@ where
         {
             let kind = self.0;
             let mut out = BTreeMap::new();
-            while let Some((name, spec)) = map.next_entry::<DepName, SkillSpec>()? {
+            while let Some((name, ObjectOnly(spec))) =
+                map.next_entry::<DepName, ObjectOnly<SkillSpec>>()?
+            {
                 if out.contains_key(&name) {
                     return Err(de::Error::custom(format!(
                         "duplicate {kind} name `{name}` in the `{kind}s` map; \
@@ -152,20 +207,42 @@ where
 /// A single skill dependency. Exactly one of tag/branch/commit/version selects
 /// the version.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SkillSpec {
     pub git: String,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "present"
+    )]
     pub tag: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "present"
+    )]
     pub branch: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "present"
+    )]
     pub commit: Option<String>,
     /// A semver requirement (`^1.2`, `~1.4`, `>=1.2, <2`) resolved to the
     /// highest matching semver tag. Written as `version` in `ai.json`.
-    #[serde(rename = "version", skip_serializing_if = "Option::is_none", default)]
+    #[serde(
+        rename = "version",
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "present"
+    )]
     pub range: Option<String>,
     /// Optional subdirectory inside the repo (monorepo of skills).
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        default,
+        deserialize_with = "present"
+    )]
     pub path: Option<String>,
 }
 
@@ -189,6 +266,31 @@ impl SkillSpec {
                 self.git
             ),
         }
+    }
+
+    /// Check every field the way the schema's `skill` definition does (plus
+    /// the semantic `path`/`version` rules) and return the version selector.
+    /// Shared by root and nested manifests: a nested one skips the schema, so
+    /// these checks are all that stand between it and git and the store path.
+    pub fn validate(&self) -> Result<Version> {
+        for (field, value) in [
+            ("git", Some(&self.git)),
+            ("tag", self.tag.as_ref()),
+            ("branch", self.branch.as_ref()),
+            ("path", self.path.as_ref()),
+        ] {
+            if value.is_some_and(|v| v.is_empty()) {
+                bail!("`{field}` must be non-empty");
+            }
+        }
+        if let Some(sub) = &self.path {
+            validate_subpath(sub)?;
+        }
+        // The commit is appended to a store path (see `validate_commit_selector`).
+        if let Some(commit) = &self.commit {
+            validate_commit_selector(commit)?;
+        }
+        self.version()
     }
 }
 
@@ -300,23 +402,40 @@ impl Manifest {
         let value: serde_json::Value =
             serde_json::from_str(text).with_context(|| format!("parsing {}", p.display()))?;
         crate::schema::validate(&value).with_context(|| format!("in {}", p.display()))?;
-        // Deserialize from the raw text (not `value`): the intermediate
-        // `serde_json::Value` above has already collapsed any duplicate object
-        // keys, so duplicate skill names are only detectable by streaming the
-        // original bytes through `deserialize_unique_skills`.
-        let manifest: Self =
+        Self::from_model(text, p)
+    }
+
+    /// The model half of [`Manifest::parse`]: deserialize `text` into the
+    /// serde model and run its semantic checks, without the JSON schema. Kept
+    /// separate so the schema-parity test can hold the two layers against each
+    /// other; everything else goes through `parse`, which runs both.
+    fn from_model(text: &str, p: &Path) -> Result<Self> {
+        // Deserialize from the raw text, not a parsed `serde_json::Value`: a
+        // `Value` has already collapsed any duplicate object keys, so duplicate
+        // skill names are only detectable by streaming the original bytes
+        // through `deserialize_unique_skills`.
+        let ObjectOnly(manifest): ObjectOnly<Self> =
             serde_json::from_str(text).with_context(|| format!("parsing {}", p.display()))?;
+        if manifest.targets.is_empty() {
+            bail!("`targets` in {} must list at least one vendor", p.display());
+        }
+        let supported = crate::schema::targets()?;
+        if let Some(target) = manifest.targets.iter().find(|t| !supported.contains(t)) {
+            bail!(
+                "unknown target `{target}` in {} (supported: {})",
+                p.display(),
+                supported.join(", ")
+            );
+        }
+        ensure_unique(&manifest.targets, "targets", p)?;
         if let Some(patterns) = &manifest.allowed_sources {
+            ensure_unique(patterns, "allowedSources", p)?;
             crate::policy::validate_patterns(patterns)
                 .with_context(|| format!("`allowedSources` in {}", p.display()))?;
         }
         for (kind, name, spec) in manifest.dependencies() {
-            spec.version()
+            spec.validate()
                 .with_context(|| format!("{kind} `{name}` in {}", p.display()))?;
-            if let Some(sub) = &spec.path {
-                validate_subpath(sub)
-                    .with_context(|| format!("{kind} `{name}` in {}", p.display()))?;
-            }
             // `skills` and `plugins` share one flat namespace of dependency
             // names (both end up materialized side by side, and commands like
             // `update <name>`/`remove <name>` look a name up across both), so
@@ -390,6 +509,15 @@ impl Manifest {
     }
 }
 
+/// Reject a repeated entry in the `field` list of the manifest at `p`.
+fn ensure_unique(items: &[String], field: &str, p: &Path) -> Result<()> {
+    let mut seen = std::collections::BTreeSet::new();
+    if let Some(dup) = items.iter().find(|i| !seen.insert(i.as_str())) {
+        bail!("`{field}` in {} lists `{dup}` more than once", p.display());
+    }
+    Ok(())
+}
+
 /// A dependency's own `ai.json`, parsed with a deliberately lenient shape.
 ///
 /// A skill repo consumed as a transitive dependency may ship an `ai.json` whose
@@ -447,60 +575,22 @@ impl DependencyManifest {
         }
         // Deserialize from the raw text (not `value`) so duplicate skill keys in
         // the nested manifest are still rejected, exactly as `Manifest::load` does.
-        let dep: Self = serde_json::from_str(&text)
+        let ObjectOnly(dep): ObjectOnly<Self> = serde_json::from_str(&text)
             .with_context(|| format!("parsing nested {}", p.display()))?;
+        // The same field checks the root schema and model apply (non-empty
+        // strings, a contained `path`, a full-SHA `commit`, exactly one valid
+        // selector): a nested manifest skips the schema, so without them a
+        // malformed spec would only fail deep in git or reach the store path.
         for (name, spec) in &dep.skills {
-            // The root schema constrains these fields to a non-empty string
-            // (`minLength: 1`); a nested manifest bypasses the schema, so an
-            // empty `git`/`tag`/`branch`/`path` would otherwise slip through and
-            // only surface later as a confusing failure deep in git (e.g.
-            // `branch: ""` → `refs/heads/` rejected by `git ls-remote`) or a
-            // silent repo-root pin (empty `path`). Mirror the schema here so a
-            // malformed nested manifest fails fast with a local error.
-            if spec.git.is_empty() {
-                bail!(
-                    "skill `{name}` in nested {}: `git` must be non-empty",
-                    p.display()
-                );
-            }
-            if spec.tag.as_deref() == Some("") {
-                bail!(
-                    "skill `{name}` in nested {}: `tag` must be non-empty",
-                    p.display()
-                );
-            }
-            if spec.branch.as_deref() == Some("") {
-                bail!(
-                    "skill `{name}` in nested {}: `branch` must be non-empty",
-                    p.display()
-                );
-            }
-            if let Some(sub) = &spec.path {
-                if sub.is_empty() {
-                    bail!(
-                        "skill `{name}` in nested {}: `path` must be non-empty",
-                        p.display()
-                    );
-                }
-                validate_subpath(sub)
-                    .with_context(|| format!("skill `{name}` in nested {}", p.display()))?;
-            }
-            // The root schema constrains `commit` to a full hex SHA; nested
-            // manifests skip the schema, so enforce it here before the value can
-            // reach `resolver::resolve`/`StoreKey::derive` and become part of a store
-            // path (see `validate_commit_selector`).
-            if let Some(commit) = &spec.commit {
-                validate_commit_selector(commit)
-                    .with_context(|| format!("skill `{name}` in nested {}", p.display()))?;
-            }
-            // Exactly one selector, and a `version` that parses as a semver
-            // requirement — the schema's `oneOf` for the root manifest.
-            spec.version()
+            spec.validate()
                 .with_context(|| format!("skill `{name}` in nested {}", p.display()))?;
         }
         Ok(dep)
     }
 }
+
+#[cfg(test)]
+mod schema_parity;
 
 #[cfg(test)]
 mod tests {

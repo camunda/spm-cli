@@ -154,6 +154,9 @@ Add a `$schema` reference so your editor validates and autocompletes `ai.json`:
 { "$schema": "./schema/ai.schema.json", "targets": ["claude"], "skills": {} }
 ```
 
+Commands that rewrite `ai.json` (`spm add`, `spm remove`, `spm target`, …) keep
+the reference.
+
 ## Pulling in many skills at once
 
 Instead of naming skills one by one, point `--path` at a container and pass

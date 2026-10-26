@@ -28,6 +28,7 @@ pub(super) fn init(scope: &Scope, targets: Vec<String>) -> Result<()> {
         return Ok(());
     }
     let manifest = Manifest {
+        schema: None,
         targets,
         resolve_transitive: false,
         allowed_sources: None,
