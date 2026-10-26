@@ -296,9 +296,10 @@ fn in_generics(code: &[char], run: usize) -> bool {
 /// arm or parameter (ends at `,`); or just before a `}`, `)` or `]` closing
 /// the enclosing one.
 fn test_only_end(code: &[char], run: usize, end: usize) -> usize {
-    let item = starts_item(code, end);
-    let generic = !item && in_generics(code, run);
-    let (mut j, mut depth, mut angle) = (end, 0usize, 0usize);
+    // `const` opens an item, but also a const generic parameter.
+    let generic = in_generics(code, run);
+    let item = !generic && starts_item(code, end);
+    let (mut j, mut depth, mut angle, mut arm) = (end, 0usize, 0usize, false);
     while j < code.len() {
         let (prev, next) = (j.checked_sub(1).map(|p| code[p]), code.get(j + 1).copied());
         match code[j] {
@@ -314,12 +315,16 @@ fn test_only_end(code: &[char], run: usize, end: usize) -> usize {
                 }
                 angle -= 1;
             }
+            '=' if next == Some('>') && depth == 0 => arm = true,
             ',' if depth == 0 && angle == 0 && !item => break,
             ';' if depth == 0 => break,
             '}' | ')' | ']' if depth == 0 => return j - 1,
             // Braces inside generics are a const default, not the body.
-            '{' if depth == 0 && angle > 0 => j = block_end(code, j),
-            '{' if depth == 0 => return block_end(code, j),
+            // Braces in an arm's pattern or a field value don't end it; those
+            // after `=>` are its body.
+            '{' if depth == 0 && (item || generic) && angle == 0 => return block_end(code, j),
+            '{' if depth == 0 && arm => return block_end(code, j),
+            '{' if depth == 0 => j = block_end(code, j),
             _ => {}
         }
         j += 1;
@@ -531,7 +536,9 @@ fn live() {}
 fn m(x: u8) { match x { #[cfg(test)] 0 => x < 1, #[allow(arm)] _ => x > 1 }; }
 fn g<#[cfg(test)] T>() { #[allow(gen)] let _ = 0; }
 #[cfg(test)] struct H<const N: usize = { 1 + 1 }> { #[allow(c)] b: [u8; N] }
+pub fn k<#[cfg(test)] const N: usize, #[allow(kk)] t>() {}
+fn e(x: E) { match x { #[cfg(test)] E::D { v } => { #[allow(body)] let _ = v; } #[allow(next)] _ => {} } }
 fn n(x: u8) { match x { #[cfg(test)] r#type if r#type < 1 => true, #[allow(raw)] _ => false }; }
 ";
-    assert_eq!(suppressions(src), vec![5, 7, 8, 10]);
+    assert_eq!(suppressions(src), vec![5, 7, 8, 10, 11, 12]);
 }
