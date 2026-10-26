@@ -1,8 +1,10 @@
 //! Architecture guard: the top-level module graph of `src/` is pinned.
 //!
-//! The source is parsed with `syn`, so comments, doc links, string literals
-//! and `#[cfg(test)]` nodes (at the parser's boundaries) are never read as
-//! code. Every `crate::<module>` reference in what is left (grouped
+//! Only module files a non-test build compiles are read (a file behind
+//! `#[cfg(test)] mod tests;` is not), and they are parsed with `syn`, so
+//! comments, doc links, string literals and `#[cfg(test)]` nodes (at the
+//! parser's boundaries) are never read as code; raw identifiers are read as
+//! their names. Every `crate::<module>` reference in what is left (grouped
 //! `use crate::{a, b::c}` imports, inline paths, paths in macro bodies,
 //! `super::` chains climbing to the crate root, also across `use` groups, and
 //! whole-path strings of non-doc attributes like `#[serde(with = "crate::x")]`
@@ -19,13 +21,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use proc_macro2::{TokenStream, TokenTree};
+use syn::ext::IdentExt;
 use syn::parse::Parser;
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::Token;
 
-use crate::source::{is_cfg_test, parse, rust_files, skip_test_only};
+use crate::source::{is_cfg_test, parse, shipped_files, skip_test_only};
 
 /// The allowed top-level dependency edges: the single source of truth for the
 /// layering of `src/`. A module absent here depends on no other module.
@@ -201,7 +204,11 @@ impl Refs {
         if path.leading_colon.is_some() {
             return; // `::x` names an external crate
         }
-        let mut segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        let mut segs: Vec<String> = path
+            .segments
+            .iter()
+            .map(|s| s.ident.unraw().to_string())
+            .collect();
         let Some(last) = segs.pop() else {
             return;
         };
@@ -212,7 +219,7 @@ impl Refs {
     fn use_tree(&mut self, tree: &syn::UseTree, prefix: &mut Vec<String>, line: usize) {
         let resolved = match tree {
             syn::UseTree::Path(p) => {
-                prefix.push(p.ident.to_string());
+                prefix.push(p.ident.unraw().to_string());
                 self.use_tree(&p.tree, prefix, line);
                 prefix.pop();
                 return;
@@ -223,10 +230,14 @@ impl Refs {
                 }
                 return;
             }
-            syn::UseTree::Name(n) => resolve(prefix, Leaf::Name(n.ident.to_string()), self.depth),
-            syn::UseTree::Rename(r) => {
-                resolve(prefix, Leaf::Rename(r.ident.to_string()), self.depth)
+            syn::UseTree::Name(n) => {
+                resolve(prefix, Leaf::Name(n.ident.unraw().to_string()), self.depth)
             }
+            syn::UseTree::Rename(r) => resolve(
+                prefix,
+                Leaf::Rename(r.ident.unraw().to_string()),
+                self.depth,
+            ),
             syn::UseTree::Glob(_) => resolve(prefix, Leaf::Glob, self.depth),
         };
         self.push(resolved, line);
@@ -241,7 +252,7 @@ impl Refs {
         let trees: Vec<TokenTree> = tokens.into_iter().collect();
         let punct = |k: usize, c: char| matches!(trees.get(k), Some(TokenTree::Punct(p)) if p.as_char() == c);
         let ident = |k: usize| match trees.get(k) {
-            Some(TokenTree::Ident(i)) => Some(i.to_string()),
+            Some(TokenTree::Ident(i)) => Some(i.unraw().to_string()),
             _ => None,
         };
         let sep = |k: usize| punct(k, ':') && punct(k + 1, ':');
@@ -406,10 +417,7 @@ fn module_of(rel: &Path) -> (String, usize) {
 fn source_graph() -> (Graph, BTreeMap<(String, String), String>) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let src = root.join("src");
-    let mut files = Vec::new();
-    rust_files(&src, &mut files);
-    files.sort();
-    let modules: BTreeSet<String> = files
+    let modules: BTreeSet<String> = shipped_files(&src.join("main.rs"))
         .iter()
         .map(|f| module_of(f.strip_prefix(&src).unwrap()).0)
         .collect();
@@ -417,6 +425,18 @@ fn source_graph() -> (Graph, BTreeMap<(String, String), String>) {
         modules.contains("main") && modules.contains("cli") && modules.len() > 10,
         "scan found too few modules: {modules:?}"
     );
+    graph_of_crate(root)
+}
+
+/// The graph of the crate at `root` (its `src/main.rs` and the module files a
+/// non-test build compiles), with the first `file:line` of every edge.
+fn graph_of_crate(root: &Path) -> (Graph, BTreeMap<(String, String), String>) {
+    let src = root.join("src");
+    let files = shipped_files(&src.join("main.rs"));
+    let modules: BTreeSet<String> = files
+        .iter()
+        .map(|f| module_of(f.strip_prefix(&src).unwrap()).0)
+        .collect();
     let (mut graph, mut sites, mut opaque) = (Graph::new(), BTreeMap::new(), Vec::new());
     for file in &files {
         let (from, depth) = module_of(file.strip_prefix(&src).unwrap());
@@ -673,6 +693,47 @@ fn crate_refs_bounds_literals_and_test_code_by_syntax() {
     }
     let src = "#[cfg(test)] fn f<A, B>() { crate::alpha::run(); }";
     assert!(crate_refs(src, 1).is_empty(), "{src}");
+}
+
+#[test]
+fn crate_refs_reads_raw_identifiers_as_their_names() {
+    let src = "\
+use crate::r#alpha::Thing;
+use crate::{r#beta, gamma::r#type};
+fn f() { crate::r#delta::run(); }
+macro_rules! m { () => { crate::r#epsilon::run() }; }
+#[serde(with = \"crate::r#zeta\")]
+struct S;
+";
+    let names: Vec<String> = crate_refs(src, 1).into_iter().map(|r| r.0).collect();
+    assert_eq!(
+        names,
+        ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"]
+    );
+}
+
+/// Only files a non-test build compiles count: a module declared behind
+/// `#[cfg(test)]` (and everything below it) or not declared at all is skipped.
+#[test]
+fn graph_skips_files_only_test_code_declares() {
+    let sb = crate::common::Sandbox::new();
+    let root = sb.root.join("crate");
+    let write = |rel: &str, text: &str| {
+        let path = root.join("src").join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write("main.rs", "mod alpha;\nmod beta;\nmod gamma;\n");
+    write("alpha.rs", "mod inner;\n#[cfg(test)]\nmod tests;\n");
+    write("alpha/inner.rs", "use crate::beta::B;\n");
+    write("alpha/tests.rs", "use crate::gamma::G;\nmod deeper;\n");
+    write("alpha/tests/deeper.rs", "use crate::gamma::G;\n");
+    write("beta/mod.rs", "pub struct B;\nmod nested { mod leaf; }\n");
+    write("beta/nested/leaf.rs", "use crate::gamma::G;\n");
+    write("gamma.rs", "pub struct G;\n");
+    write("orphan.rs", "use crate::alpha::A;\n");
+    let (graph, _) = graph_of_crate(&root);
+    assert_eq!(graph, graph_of(&[("alpha", "beta"), ("beta", "gamma")]));
 }
 
 #[test]

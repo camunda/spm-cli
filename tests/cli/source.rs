@@ -52,9 +52,16 @@ pub fn is_cfg_test(attr: &Attribute) -> bool {
 
 /// Implements, inside an `impl Visit<'ast>`, every visit method of a node
 /// that carries attributes so that a node gated on a `cfg` requiring `test`
-/// is skipped whole and anything else is walked as usual.
+/// is skipped whole and anything else is walked as usual. With
+/// `except visit_item_mod`, the implementor writes that one itself.
 macro_rules! skip_test_only {
     () => {
+        $crate::source::skip_test_only!(except visit_item_mod);
+        $crate::source::skip_test_only! {
+            visit_item_mod(syn::ItemMod) via visit_item_mod;
+        }
+    };
+    (except visit_item_mod) => {
         $crate::source::skip_test_only! {
             visit_file(syn::File) via visit_file;
             visit_item_const(syn::ItemConst) via visit_item_const;
@@ -64,7 +71,6 @@ macro_rules! skip_test_only {
             visit_item_foreign_mod(syn::ItemForeignMod) via visit_item_foreign_mod;
             visit_item_impl(syn::ItemImpl) via visit_item_impl;
             visit_item_macro(syn::ItemMacro) via visit_item_macro;
-            visit_item_mod(syn::ItemMod) via visit_item_mod;
             visit_item_static(syn::ItemStatic) via visit_item_static;
             visit_item_struct(syn::ItemStruct) via visit_item_struct;
             visit_item_trait(syn::ItemTrait) via visit_item_trait;
@@ -149,6 +155,73 @@ pub(crate) use skip_test_only;
 /// Parses a `src/` file, failing the guard on a syntax `syn` cannot read.
 pub fn parse(src: &str) -> syn::File {
     syn::parse_file(src).unwrap_or_else(|e| panic!("cannot parse source: {e}"))
+}
+
+/// The out-of-line modules (`mod x;`) a file declares in shipped code, as
+/// the inline-module path leading to each plus its name.
+#[derive(Default)]
+struct ModDecls {
+    inline: Vec<String>,
+    found: Vec<(Vec<String>, String)>,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for ModDecls {
+    fn visit_item_mod(&mut self, m: &'ast syn::ItemMod) {
+        if m.attrs.iter().any(is_cfg_test) {
+            return;
+        }
+        assert!(
+            !m.attrs.iter().any(|a| a.path().is_ident("path")),
+            "`#[path]` on `mod {}` is not supported by the source guards: \
+             teach `source::shipped_files` to follow it",
+            m.ident
+        );
+        let name = m.ident.unraw().to_string();
+        if m.content.is_none() {
+            self.found.push((self.inline.clone(), name));
+            return;
+        }
+        self.inline.push(name);
+        syn::visit::visit_item_mod(self, m);
+        self.inline.pop();
+    }
+
+    skip_test_only!(except visit_item_mod);
+}
+
+/// The module files of the crate rooted at `root` (`src/main.rs`) that a
+/// non-test build compiles: the root plus every file reached through a
+/// `mod x;` declaration outside test-only code. A file declared only behind
+/// `#[cfg(test)]` (`#[cfg(test)] mod tests;`) or not declared at all ships
+/// nothing, so the guards never read it.
+pub fn shipped_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let mut queue = vec![root.to_path_buf()];
+    while let Some(file) = queue.pop() {
+        let src = std::fs::read_to_string(&file)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", file.display()));
+        let mut decls = ModDecls::default();
+        syn::visit::Visit::visit_file(&mut decls, &parse(&src));
+        // `main.rs`/`mod.rs` own their directory; `x.rs` owns `x/`.
+        let stem = file.file_stem().unwrap().to_string_lossy();
+        let dir = if file == root || stem == "mod" {
+            file.parent().unwrap().to_path_buf()
+        } else {
+            file.with_extension("")
+        };
+        for (inline, name) in decls.found {
+            let base = inline.iter().fold(dir.clone(), |d, m| d.join(m));
+            let flat = base.join(format!("{name}.rs"));
+            let nested = base.join(&name).join("mod.rs");
+            let found = [flat, nested].into_iter().find(|p| p.is_file());
+            queue.push(
+                found.unwrap_or_else(|| panic!("`mod {name};` in {} has no file", file.display())),
+            );
+        }
+        files.push(file);
+    }
+    files.sort();
+    files
 }
 
 /// Every `.rs` file under `dir`, recursively.

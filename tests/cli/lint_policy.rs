@@ -14,7 +14,7 @@ use proc_macro2::{TokenStream, TokenTree};
 use syn::visit::{self, Visit};
 use syn::{Attribute, Meta};
 
-use crate::source::{args, name, parse, requires_test, rust_files, skip_test_only};
+use crate::source::{args, name, parse, requires_test, shipped_files, skip_test_only};
 
 fn is_lint_level(meta: &Meta) -> bool {
     matches!(name(meta).as_deref(), Some("allow" | "expect"))
@@ -96,10 +96,9 @@ fn suppressions(src: &str) -> Vec<usize> {
 #[test]
 fn src_never_suppresses_lints() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut files = Vec::new();
-    rust_files(&root.join("src"), &mut files);
+    let files = shipped_files(&root.join("src/main.rs"));
     assert!(
-        files.iter().any(|f| f.ends_with("src/main.rs")),
+        files.len() > 10 && files.iter().any(|f| f.ends_with("src/main.rs")),
         "scan found no sources: {files:?}"
     );
     let mut offenders = Vec::new();
