@@ -1,5 +1,5 @@
-//! Drift guards: the shipped agent skill and the command overviews document
-//! every command and flag.
+//! Drift guards: the shipped agent skill documents every command and flag, and
+//! the command overviews in the docs are generated from the CLI itself.
 
 use crate::common::*;
 use std::path::{Path, PathBuf};
@@ -13,40 +13,91 @@ fn shipped_skill_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/spm")
 }
 
-/// Flags an `spm … --help` screen advertises, as `(long, short)` pairs (for
-/// example `("--global", Some("-g"))`), minus clap's own `--help` and `-V, --version`
-/// (a value-taking `--version <RANGE>`, as on `spm add`, is kept).
-/// Only the flag column is parsed, so `--foo` mentioned in a description is not
-/// mistaken for a flag.
-fn help_flags(sb: &Sandbox, args: &[&str]) -> Vec<(String, Option<String>)> {
+/// The compact help screen of `spm <args>` (`-h`: one line per argument or
+/// option, where `--help` spreads each over a paragraph), with LF line endings.
+fn short_help(sb: &Sandbox, args: &[&str]) -> String {
     let mut full = args.to_vec();
-    full.push("--help");
-    let help = sb.ok(&full);
-    let mut flags = Vec::new();
-    for line in help
-        .lines()
-        .skip_while(|l| !l.starts_with("Options:"))
+    full.push("-h");
+    sb.ok(&full).replace("\r\n", "\n")
+}
+
+/// One row of a compact help screen's `Arguments:` or `Options:` list.
+#[derive(Debug, PartialEq)]
+struct HelpEntry {
+    /// `-g` for `-g, --global`.
+    short: Option<String>,
+    /// `--global`; `None` for a positional argument.
+    long: Option<String>,
+    /// The value placeholder: `<TAG>` for `--tag <TAG>`, or the whole head of
+    /// a positional (`<NAME>`, `[VENDORS]...`).
+    value: Option<String>,
+    /// The `[possible values: …]` clap lists, from the arg's value parser.
+    possible: Vec<String>,
+}
+
+/// The rows of the `title` list (`"Arguments:"`/`"Options:"`) of a compact
+/// help screen. Only the head column (up to the first double space) is read as
+/// the flag, so a `--foo` mentioned in a description is not mistaken for one.
+fn help_entries(help: &str, title: &str) -> Vec<HelpEntry> {
+    help.lines()
+        .skip_while(|l| *l != title)
         .skip(1)
         .take_while(|l| l.starts_with(' '))
-    {
-        let mut short = None;
-        for tok in line.split_whitespace() {
-            let tok = tok.trim_end_matches(',');
-            if let Some(long) = tok.strip_prefix("--") {
-                let builtin =
-                    long == "help" || (long == "version" && short.as_deref() == Some("-V"));
-                if !builtin {
-                    flags.push((tok.to_string(), short.take()));
-                }
-                break;
-            } else if tok.starts_with('-') {
-                short = Some(tok.to_string());
-            } else {
-                break;
+        .map(|line| {
+            let line = line.trim();
+            let (head, desc) = line.split_once("  ").unwrap_or((line, ""));
+            let possible = desc
+                .split_once("[possible values: ")
+                .and_then(|(_, rest)| rest.split_once(']'))
+                .map(|(list, _)| list.split(", ").map(str::to_string).collect())
+                .unwrap_or_default();
+            let mut entry = HelpEntry {
+                short: None,
+                long: None,
+                value: None,
+                possible,
+            };
+            if !head.starts_with('-') {
+                entry.value = Some(head.to_string());
+                return entry;
             }
-        }
-    }
-    flags
+            let mut value = Vec::new();
+            for tok in head.split_whitespace() {
+                let tok = tok.trim_end_matches(',');
+                if tok.starts_with("--") {
+                    entry.long = Some(tok.to_string());
+                } else if tok.starts_with('-') {
+                    entry.short = Some(tok.to_string());
+                } else {
+                    value.push(tok);
+                }
+            }
+            entry.value = (!value.is_empty()).then(|| value.join(" "));
+            entry
+        })
+        .collect()
+}
+
+/// The options of a compact help screen minus clap's own `--help` and
+/// `-V, --version` (a value-taking `--version <RANGE>`, as on `spm add`, is kept).
+fn help_options(help: &str) -> Vec<HelpEntry> {
+    help_entries(help, "Options:")
+        .into_iter()
+        .filter(|e| {
+            let long = e.long.as_deref();
+            !(long == Some("--help")
+                || (long == Some("--version") && e.short.as_deref() == Some("-V")))
+        })
+        .collect()
+}
+
+/// Flags an `spm … -h` screen advertises, as `(long, short)` pairs (for
+/// example `("--global", Some("-g"))`), minus clap's built-in ones.
+fn help_flags(sb: &Sandbox, args: &[&str]) -> Vec<(String, Option<String>)> {
+    help_options(&short_help(sb, args))
+        .into_iter()
+        .filter_map(|e| Some((e.long?, e.short)))
+        .collect()
 }
 
 /// The body of one `###` (or `##`) section of the skill, from its heading line
@@ -152,54 +203,83 @@ fn shipped_skill_checks_are_line_ending_independent() {
     assert_skill_documents_cli(&sb, &crlf);
 }
 
-/// Every leaf command path (`["init"]`, `["target", "add"]`, …), discovered by
-/// following each `Commands:` block in `--help` recursively, so a new nested
-/// subcommand is picked up without touching the test.
-fn leaf_commands(sb: &Sandbox, prefix: &[&str]) -> Vec<Vec<String>> {
-    let mut args = prefix.to_vec();
-    args.push("--help");
-    let help = sb.ok(&args);
-    let children: Vec<String> = help
+/// A leaf command: its path (`["target", "add"]`) and its visible aliases.
+struct Leaf {
+    path: Vec<String>,
+    aliases: Vec<String>,
+}
+
+/// Every leaf command, discovered by following each `Commands:` block in the
+/// help recursively, so a new nested subcommand is picked up without touching
+/// the tests. Aliases are read from the parent's `[alias: …]`/`[aliases: …]`.
+fn leaf_commands(sb: &Sandbox, prefix: &[&str]) -> Vec<Leaf> {
+    let help = short_help(sb, prefix);
+    let children: Vec<(String, Vec<String>)> = help
         .lines()
-        .skip_while(|l| !l.starts_with("Commands:"))
+        .skip_while(|l| *l != "Commands:")
         .skip(1)
         .take_while(|l| l.starts_with(' '))
-        .filter_map(|l| l.split_whitespace().next().map(str::to_string))
-        .filter(|c| c != "help")
+        .filter_map(|l| {
+            let name = l.split_whitespace().next()?.to_string();
+            let aliases = ["[alias: ", "[aliases: "]
+                .iter()
+                .find_map(|tag| l.split_once(tag))
+                .and_then(|(_, rest)| rest.split_once(']'))
+                .map(|(list, _)| list.split(", ").map(str::to_string).collect())
+                .unwrap_or_default();
+            Some((name, aliases))
+        })
+        .filter(|(name, _)| name != "help")
         .collect();
-    if children.is_empty() {
-        return vec![prefix.iter().map(|s| s.to_string()).collect()];
-    }
     children
-        .iter()
-        .flat_map(|c| {
+        .into_iter()
+        .flat_map(|(name, aliases)| {
             let mut next = prefix.to_vec();
-            next.push(c.as_str());
-            leaf_commands(sb, &next)
+            next.push(&name);
+            let leaves = leaf_commands(sb, &next);
+            if leaves.is_empty() {
+                vec![Leaf {
+                    path: next.iter().map(|s| s.to_string()).collect(),
+                    aliases,
+                }]
+            } else {
+                leaves
+            }
         })
         .collect()
 }
 
-fn assert_skill_documents_cli(sb: &Sandbox, text: &str) {
+/// [`leaf_commands`] of the whole CLI, guarded against a vacuous parse.
+fn all_leaf_commands(sb: &Sandbox) -> Vec<Leaf> {
     let leaves = leaf_commands(sb, &[]);
+    let paths: Vec<String> = leaves.iter().map(|l| l.path.join(" ")).collect();
     assert!(
-        leaves.len() >= 11 && leaves.contains(&vec!["target".to_string(), "add".to_string()]),
-        "parsed too few commands: {leaves:?}"
+        leaves.len() >= 11 && paths.iter().any(|p| p == "target add"),
+        "parsed too few commands: {paths:?}"
     );
-    // Guard the parsers themselves: a silent empty parse would make the checks below vacuous.
+    leaves
+}
+
+fn assert_skill_documents_cli(sb: &Sandbox, text: &str) {
+    let leaves = all_leaf_commands(sb);
+    // Guard the parsers themselves: a silent empty parse would make the checks
+    // below vacuous, and `add --version <RANGE>` is a real selector, unlike
+    // clap's built-in `-V, --version`.
     let add_flags = help_flags(sb, &["add"]);
     assert!(
-        add_flags.iter().any(|(l, _)| l == "--force"),
+        ["--force", "--version"]
+            .iter()
+            .all(|f| add_flags.iter().any(|(l, _)| l == f)),
         "{add_flags:?}"
     );
     assert!(skill_section(text, "### `spm add`").contains("--force"));
 
     let invocations: Vec<(Vec<&str>, String)> = leaves
         .iter()
-        .map(|path| {
+        .map(|leaf| {
             (
-                path.iter().map(String::as_str).collect(),
-                format!("### `spm {}`", path.join(" ")),
+                leaf.path.iter().map(String::as_str).collect(),
+                format!("### `spm {}`", leaf.path.join(" ")),
             )
         })
         .collect();
@@ -219,70 +299,219 @@ fn assert_skill_documents_cli(sb: &Sandbox, text: &str) {
     }
 }
 
-/// Drift guard: the command overview block in the README and the CLI reference
-/// must list every leaf command with every flag it accepts, so a new command or
-/// flag can't silently go undocumented there. `--protocol`/`--protocol-fallback`
-/// are shared by many commands and documented in prose instead.
-#[test]
-fn command_overviews_document_every_command_and_flag() {
-    let sb = Sandbox::new();
-    let leaves = leaf_commands(&sb, &[]);
-    assert!(
-        leaves.len() >= 11 && leaves.contains(&vec!["target".to_string(), "add".to_string()]),
-        "parsed too few commands: {leaves:?}"
-    );
-    // `add --version <RANGE>` is a real selector, unlike clap's built-in `-V, --version`.
-    assert!(
-        help_flags(&sb, &["add"])
+// ---------------------------------------------------------------------------
+// Generated command overviews (README.md, docs/reference/cli-commands.md)
+// ---------------------------------------------------------------------------
+
+/// The docs holding a command overview generated by [`cli_overview`].
+const OVERVIEW_DOCS: &[&str] = &["README.md", "docs/reference/cli-commands.md"];
+
+/// The comments fencing a generated command overview (matched as line prefixes).
+const OVERVIEW_START: &str = "<!-- cli-overview:start";
+const OVERVIEW_END: &str = "<!-- cli-overview:end";
+
+/// Generated lines are wrapped (with a trailing ` \`) to stay within this width.
+const OVERVIEW_WIDTH: usize = 80;
+
+/// The line range strictly between the [`OVERVIEW_START`] and [`OVERVIEW_END`]
+/// comments of `doc` (named `file` in errors).
+fn overview_span(doc: &str, file: &str) -> std::ops::Range<usize> {
+    let lines: Vec<&str> = doc.lines().collect();
+    let find = |marker: &str, from: usize| {
+        lines[from..]
             .iter()
-            .any(|(l, _)| l == "--version"),
-        "help_flags dropped `add --version <RANGE>`"
-    );
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    for (file, heading) in [
-        ("README.md", "## Commands"),
-        ("docs/reference/cli-commands.md", "# CLI Commands"),
-    ] {
-        let text = std::fs::read_to_string(root.join(file))
-            .unwrap()
-            .replace("\r\n", "\n");
-        let after = &text[text
-            .find(&format!("{heading}\n"))
-            .unwrap_or_else(|| panic!("{file} has no `{heading}` heading"))..];
-        let block = after
-            .split("```bash\n")
-            .nth(1)
-            .and_then(|b| b.split("\n```").next())
-            .unwrap_or_else(|| panic!("{file}: no ```bash block under `{heading}`"));
-        // One entry per `spm …` line, plus its indented continuation lines.
-        let mut entries: Vec<String> = Vec::new();
-        for line in block.lines() {
-            match entries.last_mut() {
-                Some(e) if line.starts_with(' ') => e.push_str(line),
-                _ => entries.push(line.to_string()),
-            }
+            .position(|l| l.trim_start().starts_with(marker))
+            .map(|i| from + i)
+            .unwrap_or_else(|| panic!("{file}: no `{marker} … -->` comment"))
+    };
+    let start = find(OVERVIEW_START, 0);
+    let end = find(OVERVIEW_END, start + 1);
+    start + 1..end
+}
+
+/// The overview currently between the markers of `doc`, with `\n` line endings.
+fn overview_block(doc: &str, file: &str) -> String {
+    doc.lines()
+        .skip(overview_span(doc, file).start)
+        .take(overview_span(doc, file).len())
+        .flat_map(|l| [l, "\n"])
+        .collect()
+}
+
+/// How one positional argument or option of a leaf command reads in the
+/// overview: clap's own placeholder, with its possible values spelled out.
+fn overview_arg(entry: &HelpEntry) -> String {
+    // `<NAME>`, `[VENDORS]...`: swap the name inside the brackets for the values.
+    let with_values = |placeholder: &str| {
+        if entry.possible.is_empty() {
+            return placeholder.to_string();
         }
-        for path in &leaves {
-            let prefix = format!("spm {} ", path.join(" "));
-            let entry = entries
-                .iter()
-                .find(|e| e.starts_with(&prefix))
-                .unwrap_or_else(|| panic!("{file}: command overview lacks `{}`", prefix.trim()));
-            let args: Vec<&str> = path.iter().map(String::as_str).collect();
-            for (long, short) in help_flags(&sb, &args) {
-                if long == "--protocol" || long == "--protocol-fallback" {
-                    continue;
-                }
-                let documented = entry.contains(&long)
-                    || short.is_some_and(|s| entry.contains(&format!("[{s}]")));
-                assert!(
-                    documented,
-                    "{file}: `{}` overview line does not mention `{long}`",
-                    prefix.trim()
-                );
-            }
-        }
+        let close = placeholder.find(['>', ']']).expect("bracketed placeholder");
+        format!(
+            "{}{}{}",
+            &placeholder[..1],
+            entry.possible.join("|"),
+            &placeholder[close..]
+        )
+    };
+    let Some(flag) = entry.short.as_ref().or(entry.long.as_ref()) else {
+        return with_values(entry.value.as_deref().expect("positional placeholder"));
+    };
+    match &entry.value {
+        Some(value) => format!("[{flag} {}]", with_values(value)),
+        None => format!("[{flag}]"),
     }
+}
+
+/// `# <summary>` and the wrapped `spm <command> <args> <options>` line(s) for
+/// one leaf command, from its compact help screen (`help`).
+fn overview_entry(leaf: &Leaf, help: &str) -> String {
+    let summary = help.lines().next().unwrap_or_default().trim();
+    let mut out = format!("# {summary}");
+    match leaf.aliases.as_slice() {
+        [] => {}
+        [one] => out.push_str(&format!(" (alias: {one})")),
+        many => out.push_str(&format!(" (aliases: {})", many.join(", "))),
+    }
+    out.push('\n');
+    let words: Vec<String> = std::iter::once("spm".to_string())
+        .chain(leaf.path.iter().cloned())
+        .chain(help_entries(help, "Arguments:").iter().map(overview_arg))
+        .chain(help_options(help).iter().map(overview_arg))
+        .collect();
+    let mut line = String::new();
+    for word in words {
+        if !line.trim().is_empty() && line.len() + 1 + word.len() + " \\".len() > OVERVIEW_WIDTH {
+            out.push_str(&line);
+            out.push_str(" \\\n");
+            line = "   ".to_string();
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(&word);
+    }
+    out.push_str(&line);
+    out.push('\n');
+    out
+}
+
+/// The command overview: a ```bash block with every leaf command, its
+/// arguments and options and its one-line summary, all read from the CLI's
+/// own help, so it can't drift from the clap definitions.
+fn cli_overview(sb: &Sandbox) -> String {
+    let entries: Vec<String> = all_leaf_commands(sb)
+        .iter()
+        .map(|leaf| {
+            let path: Vec<&str> = leaf.path.iter().map(String::as_str).collect();
+            overview_entry(leaf, &short_help(sb, &path))
+        })
+        .collect();
+    format!("```bash\n{}```\n", entries.join("\n"))
+}
+
+/// The command overviews in the README and the CLI reference are exactly the
+/// one [`cli_overview`] generates. `SPM_BLESS=1` rewrites them in place.
+#[test]
+fn cli_overview_blocks_match_the_cli() {
+    let sb = Sandbox::new();
+    let expected = cli_overview(&sb);
+    // Guard the generator: the target list comes from the CLI's value parser,
+    // which must offer exactly the targets the `ai.json` schema accepts.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let schema: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(root.join("schema/ai.schema.json")).unwrap())
+            .unwrap();
+    let targets: Vec<&str> = schema["properties"]["targets"]["items"]["enum"]
+        .as_array()
+        .expect("schema lists the targets")
+        .iter()
+        .map(|t| t.as_str().unwrap())
+        .collect();
+    assert!(
+        expected.contains(&format!("[--target <{}>]", targets.join("|"))),
+        "`spm init --target` must list the schema targets {targets:?}:\n{expected}"
+    );
+    for file in OVERVIEW_DOCS {
+        let path = root.join(file);
+        let doc = std::fs::read_to_string(&path).unwrap();
+        if bless_requested() {
+            std::fs::write(
+                &path,
+                splice_lines(&doc, overview_span(&doc, file), &expected),
+            )
+            .unwrap();
+        }
+        let doc = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            overview_block(&doc, file) == expected,
+            "the command overview in {file} differs from the CLI. Regenerate it with \
+             `SPM_BLESS=1 cargo test cli_overview`, or put this between the \
+             `{OVERVIEW_START}` and `{OVERVIEW_END}` comments:\n\n{expected}"
+        );
+    }
+}
+
+#[test]
+fn overview_markers_splice_and_extract_the_block() {
+    let doc = "intro\n```bash\nkept\n```\n<!-- cli-overview:start x -->\nstale\n\
+               <!-- cli-overview:end -->\noutro\n";
+    let body = "```bash\nspm a\n```\n";
+    let blessed = splice_lines(doc, overview_span(doc, "doc"), body);
+    assert_eq!(
+        blessed,
+        "intro\n```bash\nkept\n```\n<!-- cli-overview:start x -->\n```bash\nspm a\n```\n\
+         <!-- cli-overview:end -->\noutro\n"
+    );
+    assert_eq!(overview_block(&blessed, "doc"), body);
+    // A CRLF checkout (Windows `core.autocrlf`) reads the same block.
+    assert_eq!(overview_block(&blessed.replace('\n', "\r\n"), "doc"), body);
+}
+
+#[test]
+#[should_panic(expected = "no `<!-- cli-overview:end")]
+fn overview_span_requires_the_end_marker() {
+    overview_span("<!-- cli-overview:start -->\n```bash\n```\n", "doc");
+}
+
+#[test]
+fn overview_entry_renders_args_options_and_possible_values() {
+    let help = "\
+Add things
+
+Usage: spm.exe thing add [OPTIONS] <NAME> [KINDS]...
+
+Arguments:
+  <NAME>      The name
+  [KINDS]...  Kinds [possible values: a, b]
+
+Options:
+      --tag <TAG>            Pin a tag; unlike --other
+      --protocol <PROTOCOL>  Protocol [default: ssh] [possible values: ssh, https]
+  -g, --global               Global
+  -h, --help                 Print help (see more with '--help')
+";
+    let leaf = Leaf {
+        path: vec!["thing".into(), "add".into()],
+        aliases: vec!["a".into()],
+    };
+    assert_eq!(
+        overview_entry(&leaf, help),
+        "# Add things (alias: a)\n\
+         spm thing add <NAME> [a|b]... [--tag <TAG>] [--protocol <ssh|https>] [-g]\n"
+    );
+    let long = Leaf {
+        path: vec!["x".repeat(60)],
+        aliases: vec![],
+    };
+    assert_eq!(
+        overview_entry(&long, help),
+        format!(
+            "# Add things\nspm {} <NAME> \\\n    [a|b]... [--tag <TAG>] \
+             [--protocol <ssh|https>] [-g]\n",
+            "x".repeat(60)
+        )
+    );
 }
 
 /// Dogfood: the shipped skill installs through `spm add … --path skills/spm`

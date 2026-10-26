@@ -23,6 +23,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+use crate::common::{bless_requested, splice_lines};
 use crate::source::{attribute, line_at, rust_files, shipped_code};
 
 /// The allowed top-level dependency edges: the single source of truth for the
@@ -785,19 +786,7 @@ fn render_diagram(modules: &BTreeSet<String>, graph: &Graph) -> String {
 
 /// Replace the module-layering diagram body in `doc` with `body`.
 fn bless_diagram(doc: &str, body: &str) -> String {
-    let span = diagram_span(doc);
-    let lines: Vec<&str> = doc.lines().collect();
-    let mut out = String::new();
-    for line in &lines[..span.start] {
-        out.push_str(line);
-        out.push('\n');
-    }
-    out.push_str(body);
-    for line in &lines[span.end..] {
-        out.push_str(line);
-        out.push('\n');
-    }
-    out
+    splice_lines(doc, diagram_span(doc), body)
 }
 
 /// The module-layering diagram in the docs shows exactly [`ALLOWED_EDGES`]
@@ -810,7 +799,7 @@ fn module_graph_diagram_matches_the_allowed_edges() {
     let expected = render_diagram(&modules, &allowed);
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(DIAGRAM_DOC);
     let doc = std::fs::read_to_string(&path).unwrap();
-    if std::env::var_os("SPM_BLESS").is_some_and(|v| v == "1") {
+    if bless_requested() {
         std::fs::write(&path, bless_diagram(&doc, &expected)).unwrap();
     }
     let doc = std::fs::read_to_string(&path).unwrap();

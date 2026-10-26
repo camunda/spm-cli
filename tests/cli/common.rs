@@ -800,3 +800,26 @@ pub fn check<'a>(doc: &'a serde_json::Value, id: &str, status: &str) -> &'a serd
     );
     found[0]
 }
+
+/// Whether `SPM_BLESS=1` asks the generated-docs checks (the module diagram,
+/// the command overviews) to rewrite their docs block in place before checking.
+pub fn bless_requested() -> bool {
+    std::env::var_os("SPM_BLESS").is_some_and(|v| v == "1")
+}
+
+/// `doc` with the lines in `span` (0-based line indices) replaced by `body`,
+/// which must end with a newline. Output lines end with `\n`, whatever `doc` used.
+pub fn splice_lines(doc: &str, span: std::ops::Range<usize>, body: &str) -> String {
+    let lines: Vec<&str> = doc.lines().collect();
+    let mut out = String::new();
+    for line in &lines[..span.start] {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str(body);
+    for line in &lines[span.end..] {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
