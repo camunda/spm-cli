@@ -833,7 +833,21 @@ fn graph_skips_files_only_test_code_declares() {
 fn graph_rejects_files_it_cannot_classify() {
     // (`main.rs`, other files, expected in the failure)
     type Case<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a str);
-    let cases: [Case; 4] = [
+    let cases: [Case; 6] = [
+        (
+            "#[cfg(test)]\nmod hidden;\n\
+             macro_rules! modules { ($name:ident) => { mod $name; }; }\n\
+             #[cfg(not(test))]\nmodules!(hidden);\n",
+            &[("hidden.rs", "use crate::x::Y;\n")],
+            "emitted by a macro",
+        ),
+        (
+            "#[cfg(test)]\nmod hidden;\n\
+             macro_rules! modules { ($($name:ident),*) => { $(mod $name;)* }; }\n\
+             #[cfg(not(test))]\nmodules!(hidden);\n",
+            &[("hidden.rs", "use crate::x::Y;\n")],
+            "emitted by a macro",
+        ),
         (
             "macro_rules! modules { () => { mod hidden; }; }\nmodules!();\n",
             &[("hidden.rs", "use crate::x::Y;\n")],

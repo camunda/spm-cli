@@ -198,12 +198,12 @@ impl<'ast> syn::visit::Visit<'ast> for ModDecls {
     }
 
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
-        let names = macro_mod_decls(mac.tokens.clone());
+        let found = macro_mod_decls(mac.tokens.clone());
         assert!(
-            names.is_empty(),
-            "`mod {};` emitted by a macro is not supported by the source guards, \
+            found.is_empty(),
+            "`{}` emitted by a macro is not supported by the source guards, \
              which cannot tell whether (or where) it ships: declare it directly",
-            names.join(";`, `mod ")
+            found.join("`, `")
         );
         syn::visit::visit_macro(self, mac);
     }
@@ -211,23 +211,33 @@ impl<'ast> syn::visit::Visit<'ast> for ModDecls {
     skip_test_only!(except visit_item_mod);
 }
 
-/// The out-of-line module declarations (`mod x;`) in macro tokens.
+/// The module declarations in macro tokens other than an inline module with a
+/// literal name (`mod x { .. }`): `mod x;`, and any whose name is captured
+/// (`mod $name;`, `mod $name { .. }`, also inside repetitions), which may
+/// declare a file the guards would then never classify.
 fn macro_mod_decls(tokens: proc_macro2::TokenStream) -> Vec<String> {
-    use proc_macro2::TokenTree;
+    use proc_macro2::{Delimiter, TokenTree};
     let trees: Vec<TokenTree> = tokens.into_iter().collect();
-    let mut names = Vec::new();
+    let mut found = Vec::new();
     for (k, tree) in trees.iter().enumerate() {
-        match (tree, trees.get(k + 1), trees.get(k + 2)) {
-            (TokenTree::Ident(m), Some(TokenTree::Ident(name)), Some(TokenTree::Punct(p)))
-                if m == "mod" && p.as_char() == ';' =>
-            {
-                names.push(name.unraw().to_string());
+        match tree {
+            TokenTree::Ident(m) if m == "mod" => {
+                let inline = matches!(
+                    (trees.get(k + 1), trees.get(k + 2)),
+                    (Some(TokenTree::Ident(_)), Some(TokenTree::Group(g)))
+                        if g.delimiter() == Delimiter::Brace
+                );
+                if !inline {
+                    let next: Vec<String> =
+                        trees[k..].iter().take(3).map(|t| t.to_string()).collect();
+                    found.push(next.join(" "));
+                }
             }
-            (TokenTree::Group(g), _, _) => names.extend(macro_mod_decls(g.stream())),
+            TokenTree::Group(g) => found.extend(macro_mod_decls(g.stream())),
             _ => {}
         }
     }
-    names
+    found
 }
 
 /// The module files of the crate rooted at `root` (`src/main.rs`) that a
