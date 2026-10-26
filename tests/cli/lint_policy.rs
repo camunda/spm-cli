@@ -232,6 +232,20 @@ fn suppressions(src: &str) -> Vec<usize> {
             i = end;
             continue;
         }
+        // Only an item (not a field, arm or parameter) has a generic list to
+        // skip; elsewhere `<` and `>` are comparisons.
+        let generics = code[end..]
+            .iter()
+            .collect::<String>()
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .filter(|w| !w.is_empty())
+            .take(4)
+            .any(|w| {
+                matches!(
+                    w,
+                    "fn" | "impl" | "struct" | "enum" | "trait" | "type" | "union"
+                )
+            });
         let (mut j, mut depth, mut angle) = (end, 0usize, 0usize);
         while j < code.len() {
             let (prev, next) = (j.checked_sub(1).map(|p| code[p]), code.get(j + 1).copied());
@@ -239,8 +253,13 @@ fn suppressions(src: &str) -> Vec<usize> {
                 '(' | '[' => depth += 1,
                 ')' | ']' if depth > 0 => depth -= 1,
                 // Generic lists: not `<<`, `<=`, `->`, `=>` or `>=`.
-                '<' if !matches!(prev, Some('<')) && !matches!(next, Some('<' | '=')) => angle += 1,
-                '>' if !matches!(prev, Some('-' | '=')) && next != Some('=') => {
+                '<' if generics
+                    && !matches!(prev, Some('<'))
+                    && !matches!(next, Some('<' | '=')) =>
+                {
+                    angle += 1
+                }
+                '>' if generics && !matches!(prev, Some('-' | '=')) && next != Some('=') => {
                     angle = angle.saturating_sub(1)
                 }
                 ';' | ',' if depth == 0 && angle == 0 => break,
@@ -442,6 +461,7 @@ fn suppressions_handles_generics_and_raw_c_strings() {
 const C: &core::ffi::CStr = cr#\"a\"b\"#;
 #[allow(live)]
 fn live() {}
+fn m(x: u8) { match x { #[cfg(test)] 0 => x < 1, #[allow(arm)] _ => x > 1 }; }
 ";
-    assert_eq!(suppressions(src), vec![4]);
+    assert_eq!(suppressions(src), vec![4, 6]);
 }
