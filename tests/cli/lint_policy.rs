@@ -109,3 +109,54 @@ fn live() {}
 "####;
     assert_eq!(suppressions(src), vec![20]);
 }
+
+/// Raw identifiers name the same attribute: `r#allow` silences a lint too.
+#[test]
+fn suppressions_flags_raw_identifier_attributes() {
+    let src = "\
+#[r#allow(dead_code)]
+fn a() {}
+#[cfg_attr(not(test), r#allow(dead_code))]
+fn b() {}
+#[r#expect(unused)]
+fn c() {}
+";
+    assert_eq!(suppressions(src), vec![1, 3, 5]);
+}
+
+/// A test-only parameter ends at the `)` closing the parameter list; the
+/// function body after it ships.
+#[test]
+fn suppressions_stops_a_test_only_item_at_its_enclosing_delimiter() {
+    let src = "\
+fn f(#[cfg(test)] _x: u8) {
+    #[allow(unused_variables)]
+    let x = 1;
+}
+fn g(a: [u8; 1], #[cfg(test)] _y: u8) -> u8 { #[allow(x)] let _ = 0; a[0] }
+";
+    assert_eq!(suppressions(src), vec![2, 5]);
+}
+
+/// The test-code exemption covers an item's whole attribute list, whatever
+/// the order of its attributes.
+#[test]
+fn suppressions_ignores_attributes_before_a_test_only_cfg() {
+    let src = "\
+#[allow(dead_code)]
+#[cfg(test)]
+fn helper() {}
+#[allow(dead_code)] /// docs
+#[derive(Debug)] #[cfg(test)] struct T;
+struct S { #[allow(dead_code)] #[cfg(test)] a: u8, b: u8 }
+#[allow(after)]
+fn live() {}
+#[allow(before_live)]
+fn live2() {}
+#[cfg(test)]
+fn t() {}
+#![allow(inner)]
+#[cfg(test)] mod m {}
+";
+    assert_eq!(suppressions(src), vec![7, 9, 13]);
+}

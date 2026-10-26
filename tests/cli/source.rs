@@ -96,7 +96,8 @@ fn code_only(src: &str) -> Vec<char> {
 }
 
 /// An attribute starting at `i` (`#[..]` or `#![..]`): its body with all
-/// whitespace removed and the offset just past its closing `]`.
+/// whitespace and raw-identifier prefixes (`r#allow` is `allow`) removed, and
+/// the offset just past its closing `]`.
 pub fn attribute(code: &[char], i: usize) -> Option<(String, usize)> {
     let skip_ws = |mut j: usize| {
         while code.get(j).is_some_and(|c| c.is_whitespace()) {
@@ -121,8 +122,12 @@ pub fn attribute(code: &[char], i: usize) -> Option<(String, usize)> {
             ']' => {
                 depth -= 1;
                 if depth == 0 {
-                    let body = code[start..j].iter().filter(|c| !c.is_whitespace());
-                    return Some((body.collect(), j + 1));
+                    let body: Vec<char> = code[start..j]
+                        .iter()
+                        .copied()
+                        .filter(|c| !c.is_whitespace())
+                        .collect();
+                    return Some((unraw(&body), j + 1));
                 }
             }
             _ => {}
@@ -130,6 +135,25 @@ pub fn attribute(code: &[char], i: usize) -> Option<(String, usize)> {
         j += 1;
     }
     None
+}
+
+/// `body` with every raw-identifier prefix dropped: `r#` starting an
+/// identifier (literals are already blanked, so no raw string remains).
+fn unraw(body: &[char]) -> String {
+    let ident = |c: char| c.is_alphanumeric() || c == '_';
+    let mut out = String::with_capacity(body.len());
+    let mut k = 0;
+    while k < body.len() {
+        let raw =
+            body[k] == 'r' && body.get(k + 1) == Some(&'#') && (k == 0 || !ident(body[k - 1]));
+        if raw {
+            k += 2;
+        } else {
+            out.push(body[k]);
+            k += 1;
+        }
+    }
+    out
 }
 
 /// Whether a compacted attribute body is a `cfg` that enables its item only
@@ -172,25 +196,34 @@ fn is_inner(code: &[char], i: usize) -> bool {
 }
 
 /// `src` as it ships: [`code_only`], with every `#[cfg(test)]` item (its
-/// attributes, signature and body) blanked too, and everything after a
-/// `#![cfg(test)]` up to the end of its module (a whole test-only file).
-/// Offsets still map to the same lines.
+/// whole attribute list, whatever the order, signature and body) blanked too,
+/// and everything after a `#![cfg(test)]` up to the end of its module (a whole
+/// test-only file). Offsets still map to the same lines.
 pub fn shipped_code(src: &str) -> Vec<char> {
     let mut code = code_only(src);
     // Blank every `#[cfg(test)]` item: its attributes, signature and body. An
-    // item ends at a top-level `;`, `,` (a field/arm/variant) or `{..}` block,
-    // or just before a `}` closing the enclosing block.
+    // item ends at a top-level `;`, `,` (a field/arm/variant/parameter) or
+    // `{..}` block, or just before a `}`, `)` or `]` closing the enclosing one.
     let mut i = 0;
+    // Start of the run of attributes the one at `i` belongs to, and the end of
+    // the previous attribute in it (only whitespace may separate two).
+    let (mut run, mut last_end) = (0usize, None::<usize>);
     while i < code.len() {
         let Some((body, end)) = attribute(&code, i) else {
             i += 1;
             continue;
         };
+        let inner = is_inner(&code, i);
+        let joined = last_end.is_some_and(|e| code[e..i].iter().all(|c| c.is_whitespace()));
+        if inner || !joined {
+            run = i;
+        }
+        // An inner attribute applies to its module, not to the next item.
+        last_end = (!inner).then_some(end);
         if !is_cfg_test(&body) {
             i = end;
             continue;
         }
-        let inner = is_inner(&code, i);
         let (mut j, mut depth) = (end, 0usize);
         while j < code.len() {
             match code[j] {
@@ -202,9 +235,9 @@ pub fn shipped_code(src: &str) -> Vec<char> {
                 }
                 _ if inner => {}
                 '(' | '[' => depth += 1,
-                ')' | ']' => depth = depth.saturating_sub(1),
+                ')' | ']' if depth > 0 => depth -= 1,
                 ';' | ',' if depth == 0 => break,
-                '}' if depth == 0 => {
+                '}' | ')' | ']' if depth == 0 => {
                     j -= 1;
                     break;
                 }
@@ -230,12 +263,13 @@ pub fn shipped_code(src: &str) -> Vec<char> {
             j += 1;
         }
         let stop = (j + 1).min(code.len());
-        for c in &mut code[i..stop] {
+        for c in &mut code[run..stop] {
             if *c != '\n' {
                 *c = ' ';
             }
         }
         i = stop;
+        last_end = None;
     }
     code
 }
