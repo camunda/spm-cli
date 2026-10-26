@@ -168,6 +168,46 @@ impl<'ast> Visit<'ast> for Guard {
         visit_lifetime_param(syn::LifetimeParam) via visit_lifetime_param;
         visit_receiver(syn::Receiver) via visit_receiver;
         visit_pat_type(syn::PatType) via visit_pat_type;
+        visit_expr_array(syn::ExprArray) via visit_expr_array;
+        visit_expr_assign(syn::ExprAssign) via visit_expr_assign;
+        visit_expr_async(syn::ExprAsync) via visit_expr_async;
+        visit_expr_await(syn::ExprAwait) via visit_expr_await;
+        visit_expr_binary(syn::ExprBinary) via visit_expr_binary;
+        visit_expr_block(syn::ExprBlock) via visit_expr_block;
+        visit_expr_break(syn::ExprBreak) via visit_expr_break;
+        visit_expr_call(syn::ExprCall) via visit_expr_call;
+        visit_expr_cast(syn::ExprCast) via visit_expr_cast;
+        visit_expr_closure(syn::ExprClosure) via visit_expr_closure;
+        visit_expr_const(syn::ExprConst) via visit_expr_const;
+        visit_expr_continue(syn::ExprContinue) via visit_expr_continue;
+        visit_expr_field(syn::ExprField) via visit_expr_field;
+        visit_expr_for_loop(syn::ExprForLoop) via visit_expr_for_loop;
+        visit_expr_group(syn::ExprGroup) via visit_expr_group;
+        visit_expr_if(syn::ExprIf) via visit_expr_if;
+        visit_expr_index(syn::ExprIndex) via visit_expr_index;
+        visit_expr_infer(syn::ExprInfer) via visit_expr_infer;
+        visit_expr_let(syn::ExprLet) via visit_expr_let;
+        visit_expr_lit(syn::ExprLit) via visit_expr_lit;
+        visit_expr_loop(syn::ExprLoop) via visit_expr_loop;
+        visit_expr_macro(syn::ExprMacro) via visit_expr_macro;
+        visit_expr_match(syn::ExprMatch) via visit_expr_match;
+        visit_expr_method_call(syn::ExprMethodCall) via visit_expr_method_call;
+        visit_expr_paren(syn::ExprParen) via visit_expr_paren;
+        visit_expr_path(syn::ExprPath) via visit_expr_path;
+        visit_expr_range(syn::ExprRange) via visit_expr_range;
+        visit_expr_raw_addr(syn::ExprRawAddr) via visit_expr_raw_addr;
+        visit_expr_reference(syn::ExprReference) via visit_expr_reference;
+        visit_expr_repeat(syn::ExprRepeat) via visit_expr_repeat;
+        visit_expr_return(syn::ExprReturn) via visit_expr_return;
+        visit_expr_struct(syn::ExprStruct) via visit_expr_struct;
+        visit_expr_try(syn::ExprTry) via visit_expr_try;
+        visit_expr_try_block(syn::ExprTryBlock) via visit_expr_try_block;
+        visit_expr_tuple(syn::ExprTuple) via visit_expr_tuple;
+        visit_expr_unary(syn::ExprUnary) via visit_expr_unary;
+        visit_expr_unsafe(syn::ExprUnsafe) via visit_expr_unsafe;
+        visit_expr_while(syn::ExprWhile) via visit_expr_while;
+        visit_expr_yield(syn::ExprYield) via visit_expr_yield;
+        visit_stmt_macro(syn::StmtMacro) via visit_stmt_macro;
     }
 }
 
@@ -252,7 +292,7 @@ struct S { #[cfg(test)] flag: bool }
 #[allow(live3)] fn l3() {}
 fn g<#[cfg(test)] T>() { #[allow(live4)] let _ = 0; }
 pub fn k<#[cfg(test)] const N: usize, #[allow(live5)] t>() {}
-fn p(#[cfg(test)] _x: u8) { #[allow(live6)] let _ = 0; }
+fn p(#[cfg(test)] _x: u8) { #[allow(live6)] let _ = 0; #[cfg(test)] { #[allow(k)] let _ = 1; } }
 fn e(x: u8) {
     match x {
         #[cfg(test)] 0 if x < 1 => { #[allow(j)] let _ = x; }
