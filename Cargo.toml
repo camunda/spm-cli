@@ -39,6 +39,7 @@ libc = "0.2"
 # first time `cargo test`/`cargo build` runs — no manual setup step needed.
 [dev-dependencies]
 cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
+proptest = { version = "1.12", default-features = false, features = ["std"] }
 serde-saphyr = "2.0.0"
 
 [profile.release]

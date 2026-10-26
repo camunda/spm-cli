@@ -168,7 +168,7 @@ pub(super) const DECODED_SHELL_MARKERS: &[&str] = &[
 /// The content of a fixture file.
 #[cfg(test)]
 #[derive(Clone, Copy)]
-enum Body {
+pub(super) enum Body {
     Text(&'static str),
     /// One byte past the engine's read cap.
     PastCap,
@@ -177,10 +177,10 @@ enum Body {
 /// A file at `path` (relative, parent dirs created) whose scan must report
 /// `rule` iff `fires`.
 #[cfg(test)]
-struct Fixture {
+pub(super) struct Fixture {
     rule: Rule,
-    path: &'static str,
-    body: Body,
+    pub(super) path: &'static str,
+    pub(super) body: Body,
     fires: bool,
 }
 
@@ -205,7 +205,7 @@ const fn benign(rule: Rule, path: &'static str, body: Body) -> Fixture {
 }
 
 #[cfg(test)]
-const FIXTURES: &[Fixture] = {
+pub(super) const FIXTURES: &[Fixture] = {
     use Body::{PastCap, Text};
     use Rule::*;
     &[
