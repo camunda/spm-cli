@@ -186,9 +186,12 @@ where
         {
             let kind = self.0;
             let mut out = BTreeMap::new();
-            while let Some((name, ObjectOnly(spec))) =
-                map.next_entry::<DepName, ObjectOnly<SkillSpec>>()?
-            {
+            while let Some(name) = map.next_key::<DepName>()? {
+                // Name the entry: serde's own message ("unknown field `x`",
+                // "invalid type: null") does not say which one is wrong.
+                let ObjectOnly(spec) = map
+                    .next_value::<ObjectOnly<SkillSpec>>()
+                    .map_err(|e| de::Error::custom(format!("{kind} `{name}`: {e}")))?;
                 if out.contains_key(&name) {
                     return Err(de::Error::custom(format!(
                         "duplicate {kind} name `{name}` in the `{kind}s` map; \
@@ -917,6 +920,63 @@ mod tests {
         assert_eq!(dep.skills.len(), 1);
         assert!(dep.skills.contains_key("leaf"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Writes `body` as a nested `ai.json` in a fresh dir and loads it.
+    fn load_nested(tag: &str, body: &str) -> (std::path::PathBuf, Result<DependencyManifest>) {
+        let dir = std::env::temp_dir().join(format!(
+            "spm-depman-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = Manifest::path_in(&dir);
+        std::fs::write(&path, body).unwrap();
+        let res = DependencyManifest::load_file(&path);
+        std::fs::remove_dir_all(&dir).unwrap();
+        (path, res)
+    }
+
+    /// Only the nested manifest's top level is lenient: a skill entry is held
+    /// to the root spec shape, so an unknown key inside it is rejected, with an
+    /// error naming the file and the offending key.
+    #[test]
+    fn dependency_manifest_rejects_unknown_key_in_skill_entry() {
+        let (path, res) = load_nested(
+            "unknown-key",
+            r#"{"skills":{"a":{"git":"u","tag":"v1","x":1}}}"#,
+        );
+        let err = format!("{:#}", res.unwrap_err());
+        assert!(err.contains(&path.display().to_string()), "{err}");
+        assert!(err.contains("skill `a`: unknown field `x`"), "{err}");
+    }
+
+    /// An explicit `null` for a spec field is rejected in a nested skill entry
+    /// exactly as in the root manifest, naming the file and the entry.
+    #[test]
+    fn dependency_manifest_rejects_explicit_null_in_skill_entry() {
+        let (path, res) = load_nested(
+            "null-field",
+            r#"{"skills":{"a":{"git":"u","tag":null,"branch":"main"}}}"#,
+        );
+        let err = format!("{:#}", res.unwrap_err());
+        assert!(err.contains(&path.display().to_string()), "{err}");
+        assert!(err.contains("skill `a`: invalid type: null"), "{err}");
+    }
+
+    /// Unknown keys at the nested manifest's top level (e.g. `$schema` or
+    /// a key from a newer spm) stay accepted and ignored.
+    #[test]
+    fn dependency_manifest_accepts_unknown_top_level_keys() {
+        let (_, res) = load_nested(
+            "top-level",
+            r#"{"$schema":"https://example.invalid/ai.schema.json","futureKey":{"a":1},"skills":{"a":{"git":"u","tag":"v1"}}}"#,
+        );
+        let dep = res.unwrap();
+        assert!(dep.skills.contains_key("a"));
     }
 
     /// A nested `resolveTransitive` is a hard error — recursion is controlled

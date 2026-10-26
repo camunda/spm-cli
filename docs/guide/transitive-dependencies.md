@@ -38,7 +38,9 @@ reviewable by your team — exactly like `targets`.
 
 ## What a dependency's `ai.json` may declare
 
-A dependency's own `ai.json` is parsed with a deliberately **lenient** shape:
+A dependency's own `ai.json` is **lenient only at its top level** (unknown
+top-level keys such as `$schema` are ignored); its skill entries are validated
+exactly like the root ones:
 
 - Only its `skills` map is read. Each entry is checked like a root one: the
   same spec fields (an unknown key or an explicit `null` is rejected), non-empty
