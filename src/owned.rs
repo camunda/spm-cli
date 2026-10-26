@@ -322,7 +322,7 @@ impl Ownership {
             // claim saves whenever the name or the binding is new.
             let mut bound = skills_dir_identity(scope, target)?;
             let mut claim = |name: &DepName| -> Result<()> {
-                let owned = record.get_mut(target).expect("target recorded above");
+                let owned = record.entry(target.clone()).or_default();
                 // Claimed only to be removed: nothing to record.
                 let added = desired.skills.contains(name) && owned.skills.insert(name.clone());
                 let dir = skills_dir_identity(scope, target)?;
@@ -333,7 +333,7 @@ impl Ownership {
                 Ok(())
             };
             if let Err(e) = install(i, &prior, &mut claim) {
-                let owned = record.get_mut(target).expect("target recorded above");
+                let owned = record.entry(target.clone()).or_default();
                 owned.skills.extend(prior.skills.iter().cloned());
                 return Err(Self::Recorded(record).fail(scope, targets, e));
             }
@@ -412,7 +412,9 @@ impl Ownership {
             return Ok(());
         };
         let p = Self::path(scope)?;
-        let dir = p.parent().expect("record path has a parent");
+        let dir = p
+            .parent()
+            .with_context(|| format!("{} has no parent directory", p.display()))?;
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
         let mut dirs = BTreeMap::new();
         for (target, owned) in targets {

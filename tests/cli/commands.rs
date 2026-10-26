@@ -1342,3 +1342,21 @@ fn prune_prompt_removes_on_yes() {
         "store should be empty after a confirmed prune"
     );
 }
+
+#[test]
+fn claude_settings_with_non_object_entries_fail_cleanly() {
+    // A hand-edited settings file whose root, or a key spm merges into, is not
+    // a JSON object must be reported as an error, never panic.
+    for settings in [r#"{"enabledPlugins": "oops"}"#, "[]"] {
+        let sb = Sandbox::new();
+        sb.ok(&["init", "--target", "claude"]);
+        std::fs::create_dir_all(sb.project.join(".claude")).unwrap();
+        std::fs::write(sb.project.join(".claude/settings.local.json"), settings).unwrap();
+
+        let out = sb.spm(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+        let err = stderr_of(&out);
+        assert_eq!(out.status.code(), Some(1), "{settings}: {err}");
+        assert!(!err.contains("panicked"), "{settings}: {err}");
+        assert!(err.contains("settings.local.json"), "{settings}: {err}");
+    }
+}

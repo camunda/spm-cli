@@ -102,7 +102,6 @@ pub fn classify(skills_dir: &Path, expected: &[DepName], detect_stale: bool) -> 
 pub type Claim<'a> = &'a mut dyn FnMut(&DepName) -> Result<()>;
 
 pub trait Vendor {
-    #[allow(dead_code)] // part of the adapter contract; not all call sites use it yet
     fn name(&self) -> &'static str;
 
     /// Generate/refresh whatever config makes this vendor load `skills` in the
