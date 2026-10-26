@@ -356,6 +356,18 @@ impl Refs {
                         }
                     }
                 }
+                // A `macro_rules!` an invocation emits is a definition too.
+                TokenTree::Group(g)
+                    if k >= 3
+                        && ident(k - 1).is_some()
+                        && punct(k - 2, '!')
+                        && ident(k - 3).as_deref() == Some("macro_rules") =>
+                {
+                    let (rules, input) = (self.rules, self.input);
+                    (self.rules, self.input) = (true, false);
+                    self.tokens(g.stream(), strings);
+                    (self.rules, self.input) = (rules, input);
+                }
                 // A macro invocation's input: see `input`.
                 TokenTree::Group(g) if k >= 2 && punct(k - 1, '!') && ident(k - 2).is_some() => {
                     let outer = std::mem::replace(&mut self.input, true);
@@ -380,6 +392,11 @@ impl Refs {
                             found.1 = line;
                         }
                     }
+                }
+                // A module a `macro_rules!` body emits belongs wherever the
+                // macro is invoked, which may be any module.
+                TokenTree::Ident(i) if i == "mod" && self.rules => {
+                    self.out.push((OPAQUE.into(), i.span().start().line));
                 }
                 // `mod x { .. }` a macro emits: one level deeper (and, in
                 // `main.rs`, a crate-root inline module).
@@ -1196,21 +1213,42 @@ fn graph_rejects_relative_paths_in_macro_definitions() {
         std::fs::write(path, text).unwrap();
     };
     write("main.rs", "mod cli;\nmod git;\nmod policy;\n");
-    write("cli.rs", "pub fn run() {}\n");
     write(
         "git.rs",
         "mod repository;\npub(crate) use repository::run_cli;\n",
     );
-    write(
-        "git/repository.rs",
-        "macro_rules! run_cli { () => {\n    super::cli::run()\n}; }\n\
-         pub(crate) use run_cli;\n",
-    );
     write("policy.rs", "fn go() { crate::git::run_cli!(); }\n");
-    let err = std::panic::catch_unwind(|| graph_of_crate(&root)).expect_err("hidden edge");
-    let msg = err.downcast_ref::<String>().cloned().unwrap_or_default();
     let site = Path::new("src").join("git").join("repository.rs");
-    assert!(msg.contains(&format!("{}:2", site.display())), "{msg}");
+    let site = format!("{}:2", site.display());
+    for (cli, repository, at) in [
+        (
+            "pub fn run() {}\n",
+            "macro_rules! run_cli { () => {\n    super::cli::run()\n}; }\n\
+             pub(crate) use run_cli;\n",
+            site.as_str(),
+        ),
+        // A definition an (identity) macro wraps is still one.
+        (
+            "pub fn run() {}\n",
+            "emit! { macro_rules! run_cli { () => {\n    super::cli::run()\n}; } }\n\
+             pub(crate) use run_cli;\n",
+            site.as_str(),
+        ),
+        // A module a macro emits belongs to the invoking module, unknown
+        // here: `main.rs` invoking this one owns a `hidden -> cli` edge.
+        (
+            "macro_rules! hide { () => {\n    mod hidden { pub fn f() { let _ = crate::cli::run; } }\n}; }\n\
+             pub(crate) use hide;\npub fn run() {}\n",
+            "",
+            "cli.rs:2",
+        ),
+    ] {
+        write("cli.rs", cli);
+        write("git/repository.rs", repository);
+        let err = std::panic::catch_unwind(|| graph_of_crate(&root)).expect_err("hidden edge");
+        let msg = err.downcast_ref::<String>().cloned().unwrap_or_default();
+        assert!(msg.contains(at), "{at}: {msg}");
+    }
 }
 
 /// A file the module walk cannot classify as shipped or test-only fails the
@@ -1389,8 +1427,17 @@ fn crate_refs_flags_macro_paths_it_cannot_read() {
     assert!(crate_refs("m! { extern crate alloc; }", 1).is_empty());
 }
 
-/// Top-level inline modules in `main.rs` would hide their edges behind
-/// `main`, so they fail; test-only ones, and inline modules deeper down, are
+/// A `#[cfg(test)]` on any node that takes attributes drops it from the
+/// shipped build, a struct-pattern field included.
+#[test]
+fn crate_refs_skips_test_only_pattern_fields() {
+    let src = "fn f(s: S) {\n    let S { #[cfg(test)] extra: crate::ghost::CHECK, kept: crate::alpha::K, .. } = s;\n}\n";
+    let names: Vec<String> = crate_refs(src, 1).into_iter().map(|r| r.0).collect();
+    assert_eq!(names, ["alpha"]);
+}
+
+/// Top-level inline modules in `main.rs` (written out or emitted by an
+/// invocation) would hide their edges behind `main`, so they fail; test-only ones, and inline modules deeper down, are
 /// fine.
 #[test]
 fn crate_refs_rejects_inline_modules_at_the_crate_root() {
@@ -1403,9 +1450,17 @@ fn crate_refs_rejects_inline_modules_at_the_crate_root() {
                mod alpha { pub fn f() { crate::beta::f(); } }\n\
                mod beta { pub fn f() { crate::alpha::f(); } }\n\
                }; }\nmodules!();\n";
+    // A `macro_rules!` body's modules belong to whichever module invokes it,
+    // so they cannot be read at all.
+    let opaque = crate_refs(src, 0)
+        .into_iter()
+        .filter(|r| r.0 == OPAQUE)
+        .count();
+    assert_eq!(opaque, 2, "{src}");
+    let src = "m! {\nmod alpha { pub fn f() { crate::beta::f(); } }\n}\n";
     let err = std::panic::catch_unwind(|| crate_refs(src, 0)).expect_err(src);
     let msg = err.downcast_ref::<String>().cloned().unwrap_or_default();
-    assert!(msg.contains("\"alpha\", \"beta\""), "{msg}");
+    assert!(msg.contains("\"alpha\""), "{msg}");
     crate_refs("#[cfg(test)]\nmod tests { use crate::alpha::X; }\n", 0);
     crate_refs("mod inner { use crate::alpha::X; }\n", 1);
 }

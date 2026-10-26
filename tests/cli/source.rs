@@ -105,6 +105,20 @@ macro_rules! skip_test_only {
             visit_lifetime_param(syn::LifetimeParam) via visit_lifetime_param;
             visit_receiver(syn::Receiver) via visit_receiver;
             visit_pat_type(syn::PatType) via visit_pat_type;
+            visit_pat_ident(syn::PatIdent) via visit_pat_ident;
+            visit_pat_or(syn::PatOr) via visit_pat_or;
+            visit_pat_paren(syn::PatParen) via visit_pat_paren;
+            visit_pat_reference(syn::PatReference) via visit_pat_reference;
+            visit_pat_rest(syn::PatRest) via visit_pat_rest;
+            visit_pat_slice(syn::PatSlice) via visit_pat_slice;
+            visit_pat_struct(syn::PatStruct) via visit_pat_struct;
+            visit_pat_tuple(syn::PatTuple) via visit_pat_tuple;
+            visit_pat_tuple_struct(syn::PatTupleStruct) via visit_pat_tuple_struct;
+            visit_pat_wild(syn::PatWild) via visit_pat_wild;
+            visit_field_pat(syn::FieldPat) via visit_field_pat;
+            visit_bare_fn_arg(syn::BareFnArg) via visit_bare_fn_arg;
+            visit_bare_variadic(syn::BareVariadic) via visit_bare_variadic;
+            visit_variadic(syn::Variadic) via visit_variadic;
             visit_expr_array(syn::ExprArray) via visit_expr_array;
             visit_expr_assign(syn::ExprAssign) via visit_expr_assign;
             visit_expr_async(syn::ExprAsync) via visit_expr_async;
@@ -341,4 +355,68 @@ pub fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
             out.push(path);
         }
     }
+}
+
+/// Every `syn` node that carries attributes can be `#[cfg(test)]`-gated, so
+/// `skip_test_only!` must list each one (`DeriveInput` is a derive macro's
+/// input, never part of a parsed file): derived from the `syn` sources the
+/// guards build against, so a node missing here or added by a `syn` upgrade
+/// fails.
+#[test]
+fn skip_test_only_covers_every_node_with_attributes() {
+    let out = std::process::Command::new(env!("CARGO"))
+        .args(["metadata", "--offline", "--format-version", "1"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let meta: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let syn = meta["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "syn" && p["version"].as_str().unwrap().starts_with("2."))
+        .expect("syn 2 in the dependency graph");
+    let root = Path::new(syn["manifest_path"].as_str().unwrap()).with_file_name("src");
+    let mut nodes = Vec::new();
+    let mut dirs = vec![root];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                nodes.extend(attributed_structs(&std::fs::read_to_string(path).unwrap()));
+            }
+        }
+    }
+    assert!(nodes.iter().any(|n| n == "FieldPat"), "{nodes:?}");
+    let listed = include_str!("source.rs");
+    let missing: Vec<&String> = nodes
+        .iter()
+        .filter(|n| *n != "DeriveInput" && !listed.contains(&format!("(syn::{n}) via")))
+        .collect();
+    assert!(missing.is_empty(), "skip_test_only! misses {missing:?}");
+}
+
+/// The structs `src` declares with a `pub attrs: Vec<Attribute>` field.
+fn attributed_structs(src: &str) -> Vec<String> {
+    src.split("pub struct ")
+        .skip(1)
+        .filter_map(|rest| {
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            let open = rest
+                .find('{')
+                .filter(|&o| rest.find(';').is_none_or(|s| o < s))?;
+            let body = &rest[open..open + rest[open..].find('}')?];
+            body.contains("pub attrs: Vec<Attribute>").then_some(name)
+        })
+        .collect()
 }
