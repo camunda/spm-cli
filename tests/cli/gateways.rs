@@ -125,7 +125,7 @@ const GUARDS: &[Guard] = &[
                 "the private `StateLock` waiting for a busy state lock",
             ),
             (
-                "src/policy.rs",
+                "src/policy/active.rs",
                 "`Mutex::lock` on the process-wide active policy",
             ),
             ("src/cli/common.rs", "`Stdin::lock` to read a confirmation"),
