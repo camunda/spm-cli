@@ -16,27 +16,34 @@ use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
 use syn::{Attribute, Meta, Token};
 
-fn is_lint_level(meta: &Meta) -> bool {
-    meta.path().get_ident().is_some_and(|i| {
-        let name = i.unraw().to_string();
-        name == "allow" || name == "expect"
-    })
+/// The attribute's name, without a raw-identifier prefix (`r#allow`).
+fn name(meta: &Meta) -> Option<String> {
+    meta.path().get_ident().map(|i| i.unraw().to_string())
 }
 
-fn nested(meta: &Meta) -> Vec<Meta> {
+fn is_lint_level(meta: &Meta) -> bool {
+    matches!(name(meta).as_deref(), Some("allow" | "expect"))
+}
+
+/// The comma-separated arguments of a list attribute, or `None` if they don't
+/// parse as meta items.
+fn args(meta: &Meta) -> Option<Vec<Meta>> {
     match meta {
         Meta::List(list) => list
             .parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
-            .map(|p| p.into_iter().collect())
-            .unwrap_or_default(),
-        _ => Vec::new(),
+            .ok()
+            .map(|p| p.into_iter().collect()),
+        _ => Some(Vec::new()),
     }
+}
+
+fn nested(meta: &Meta) -> Vec<Meta> {
+    args(meta).unwrap_or_default()
 }
 
 /// Whether `pred` (a `cfg` predicate) can only hold when `test` does.
 fn requires_test(pred: &Meta) -> bool {
-    let name = pred.path().get_ident().map(|i| i.unraw().to_string());
-    match name.as_deref() {
+    match name(pred).as_deref() {
         Some("test") => matches!(pred, Meta::Path(_)),
         Some("all") => nested(pred).iter().any(requires_test),
         Some("any") => {
@@ -49,7 +56,7 @@ fn requires_test(pred: &Meta) -> bool {
 
 fn is_cfg_test(attr: &Attribute) -> bool {
     let meta = &attr.meta;
-    meta.path().is_ident("cfg") && nested(meta).first().is_some_and(requires_test)
+    name(meta).as_deref() == Some("cfg") && nested(meta).first().is_some_and(requires_test)
 }
 
 /// Whether `meta` is a lint-level attribute, or a `cfg_attr` (that can apply
@@ -58,10 +65,13 @@ fn suppresses(meta: &Meta) -> bool {
     if is_lint_level(meta) {
         return true;
     }
-    if !meta.path().is_ident("cfg_attr") {
+    if name(meta).as_deref() != Some("cfg_attr") {
         return false;
     }
-    let args = nested(meta);
+    // Arguments that don't parse can't be proven test-only: they count.
+    let Some(args) = args(meta) else {
+        return true;
+    };
     let shipped = args.first().is_some_and(|p| !requires_test(p));
     shipped && args.iter().skip(1).any(suppresses)
 }
@@ -214,11 +224,13 @@ fn suppressions_flags_every_attribute_form() {
 #[r#allow(dead_code)] fn c() {}
 #[cfg_attr(unix, allow(dead_code))] fn d() {}
 #[cfg_attr(unix, cfg_attr(unix, expect(dead_code)))] fn e() {}
+#[r#cfg_attr(unix, allow(dead_code))] fn h() {}
+#[cfg_attr(feature = \"x\" + 1, allow(dead_code))] fn i() {}
 mod live { #![allow(unused)] }
 fn f(x: u8) { #[allow(unused)] let _y = x; }
 macro_rules! m { () => { #[allow(unused)] fn g() {} }; }
 ";
-    assert_eq!(suppressions(src), vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(suppressions(src), vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
 }
 
 /// Items, fields, arms, parameters, generics and modules gated on a predicate
