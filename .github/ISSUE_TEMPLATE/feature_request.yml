@@ -46,7 +46,7 @@ body:
       description: Files or modules likely to change.
       placeholder: |
         - src/cli.rs (new flag / command)
-        - src/manifest.rs (ai.json field)
+        - src/manifest/model.rs (ai.json field)
         - schema/ai.schema.json (schema update)
     validations:
       required: false
