@@ -205,6 +205,52 @@ fn suppresses(body: &str) -> bool {
             && (body.contains(",allow(") || body.contains(",expect(")))
 }
 
+/// Whether the thing starting at `i` is an item: after any further attributes,
+/// visibility and modifiers comes an item keyword (a raw identifier such as
+/// `r#type` is not one).
+fn starts_item(code: &[char], mut i: usize) -> bool {
+    loop {
+        while code.get(i).is_some_and(|c| c.is_whitespace()) {
+            i += 1;
+        }
+        if let Some((_, end)) = attribute(code, i) {
+            i = end;
+            continue;
+        }
+        let start = i;
+        while code
+            .get(i)
+            .is_some_and(|&c| c.is_alphanumeric() || c == '_' || (c == '#' && i > start))
+        {
+            i += 1;
+        }
+        let word: String = code[start..i].iter().collect();
+        match word.as_str() {
+            "pub" => {
+                while code.get(i).is_some_and(|c| c.is_whitespace()) {
+                    i += 1;
+                }
+                if code.get(i) == Some(&'(') {
+                    while code.get(i).is_some_and(|&c| c != ')') {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            "async" | "unsafe" | "default" | "safe" | "extern" => {}
+            "fn" | "impl" | "struct" | "enum" | "trait" | "type" | "union" | "mod" | "const"
+            | "static" | "use" | "macro_rules" => return true,
+            _ => {
+                if code.get(i) == Some(&'"') {
+                    i += 1;
+                    continue;
+                }
+                return false;
+            }
+        }
+    }
+}
+
 /// 1-based lines of `src` holding a lint suppression outside test code.
 fn suppressions(src: &str) -> Vec<usize> {
     let mut code = code_only(src);
@@ -232,37 +278,15 @@ fn suppressions(src: &str) -> Vec<usize> {
             i = end;
             continue;
         }
-        // Only an item (not a field, arm or parameter) has a generic list to
-        // skip; elsewhere `<` and `>` are comparisons.
-        let generics = code[end..]
-            .iter()
-            .collect::<String>()
-            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
-            .filter(|w| !w.is_empty())
-            .take(4)
-            .any(|w| {
-                matches!(
-                    w,
-                    "fn" | "impl" | "struct" | "enum" | "trait" | "type" | "union"
-                )
-            });
-        let (mut j, mut depth, mut angle) = (end, 0usize, 0usize);
+        // An item's header may hold commas (generics, `where` bounds); a
+        // field, arm or parameter ends at its comma.
+        let item = starts_item(&code, end);
+        let (mut j, mut depth) = (end, 0usize);
         while j < code.len() {
-            let (prev, next) = (j.checked_sub(1).map(|p| code[p]), code.get(j + 1).copied());
             match code[j] {
                 '(' | '[' => depth += 1,
                 ')' | ']' if depth > 0 => depth -= 1,
-                // Generic lists: not `<<`, `<=`, `->`, `=>` or `>=`.
-                '<' if generics
-                    && !matches!(prev, Some('<'))
-                    && !matches!(next, Some('<' | '=')) =>
-                {
-                    angle += 1
-                }
-                '>' if generics && !matches!(prev, Some('-' | '=')) && next != Some('=') => {
-                    angle = angle.saturating_sub(1)
-                }
-                ';' | ',' if depth == 0 && angle == 0 => break,
+                ',' if depth == 0 && !item => break,
                 ';' if depth == 0 => break,
                 '}' | ')' | ']' if depth == 0 => {
                     j -= 1;
@@ -456,12 +480,14 @@ fn t() {}
 #[test]
 fn suppressions_handles_generics_and_raw_c_strings() {
     let src = "\
+#[cfg(test)] pub(crate) async fn w<A, B>() where A: Copy, B: Copy { #[allow(w)] let _ = 0; }
 #[cfg(test)] fn helper<A, B>(_a: A, _b: B) -> Vec<(A, B)> { #[allow(x)] let _ = 0; vec![] }
 #[cfg(test)] fn ret() -> Result<u8, u8> { #[allow(y)] Ok(0) }
 const C: &core::ffi::CStr = cr#\"a\"b\"#;
 #[allow(live)]
 fn live() {}
 fn m(x: u8) { match x { #[cfg(test)] 0 => x < 1, #[allow(arm)] _ => x > 1 }; }
+fn n(x: u8) { match x { #[cfg(test)] r#type if r#type < 1 => true, #[allow(raw)] _ => false }; }
 ";
-    assert_eq!(suppressions(src), vec![4, 6]);
+    assert_eq!(suppressions(src), vec![5, 7, 8]);
 }
