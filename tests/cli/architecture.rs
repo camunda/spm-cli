@@ -280,8 +280,12 @@ impl Refs {
             syn::UseTree::Name(n) if self.depth == 0 && prefix.is_empty() => {
                 Some(n.ident.unraw().to_string())
             }
+            // `use crate as root;` aliases the root itself.
             syn::UseTree::Rename(r) if self.depth == 0 && prefix.is_empty() => {
-                Some(r.ident.unraw().to_string())
+                Some(match r.ident.unraw().to_string() {
+                    root if root == "crate" || root == "self" => OPAQUE.into(),
+                    name => name,
+                })
             }
             syn::UseTree::Name(n) => {
                 resolve(prefix, Leaf::Name(n.ident.unraw().to_string()), self.depth)
@@ -314,30 +318,21 @@ impl Refs {
             match &trees[k] {
                 // An attribute a macro emits: read like a parsed one.
                 TokenTree::Punct(p) if p.as_char() == '#' => {
-                    let inner = punct(k + 1, '!');
+                    let (hash, inner) = (k, punct(k + 1, '!'));
                     let j = k + 1 + usize::from(inner);
                     if let Some(TokenTree::Group(g)) = trees.get(j) {
                         if g.delimiter() == Delimiter::Bracket {
                             k = j + 1;
                             match syn::parse2::<syn::Meta>(g.stream()) {
-                                // `#[cfg(test)]`: skip the item it gates (to
-                                // its body, `;` or `,`); `#![cfg(test)]`, the
-                                // rest.
+                                // `#![cfg(test)]` gates the whole enclosing
+                                // group; `#[cfg(test)]` the item it starts,
+                                // if what follows parses as one (anything
+                                // else, e.g. a generic parameter, is read).
                                 Ok(meta) if cfg_test(&meta) => {
-                                    while k < trees.len() {
-                                        let end = match &trees[k] {
-                                            TokenTree::Punct(p) => {
-                                                matches!(p.as_char(), ';' | ',')
-                                            }
-                                            TokenTree::Group(g) => {
-                                                g.delimiter() == Delimiter::Brace
-                                            }
-                                            _ => false,
-                                        };
-                                        k += 1;
-                                        if end && !inner {
-                                            break;
-                                        }
+                                    if inner {
+                                        k = trees.len();
+                                    } else if let Some(rest) = item_rest(&trees[hash..]) {
+                                        k = trees.len() - rest;
                                     }
                                 }
                                 Ok(meta) => self.meta(&meta),
@@ -528,6 +523,19 @@ impl Refs {
             k += 1;
         }
     }
+}
+
+/// If `trees` starts with a whole item, how many token trees follow it.
+fn item_rest(trees: &[TokenTree]) -> Option<usize> {
+    let tokens: TokenStream = trees.iter().cloned().collect();
+    let parser = |input: syn::parse::ParseStream| {
+        input.parse::<syn::Item>()?;
+        input.parse::<TokenStream>()
+    };
+    parser
+        .parse2(tokens)
+        .ok()
+        .map(|rest| rest.into_iter().count())
 }
 
 /// How many `super` segments `tokens` holds, at any nesting.
@@ -1336,6 +1344,11 @@ m! { #![cfg(test)] use crate::ghost::Y; }
 "#;
     let names: Vec<String> = crate_refs(src, 1).into_iter().map(|r| r.0).collect();
     assert_eq!(names, ["alpha", "beta"]);
+    // A test-only node that is not a whole item (a generic parameter) gates
+    // only itself: what follows is read.
+    let src = "macro_rules! m { () => { fn f<#[cfg(test)] T>() { crate::cli::run(); } }; }";
+    let names: Vec<String> = crate_refs(src, 1).into_iter().map(|r| r.0).collect();
+    assert_eq!(names, ["cli"]);
     // A relative path string a `macro_rules!` body emits resolves where the
     // macro is invoked, so it fails at any depth.
     for attr in [
@@ -1486,6 +1499,12 @@ fn crate_refs_flags_imports_that_hide_edges() {
     assert_eq!(opaque(aliased, 1), [OPAQUE]);
     assert_eq!(opaque("use super::super as root;", 2), [OPAQUE]);
     assert_eq!(opaque("use super::{super as root};", 2), [OPAQUE]);
+    // At the crate root too, while ordinary module aliases are edges.
+    assert_eq!(
+        opaque("use crate as root;\nfn f() { root::beta::run(); }", 0),
+        [OPAQUE]
+    );
+    assert!(opaque("use alpha as renamed;", 0).is_empty());
     assert!(opaque("use super as parent;", 2).is_empty());
     // Globs that stay inside the top-level module, or in test code, are fine.
     for (src, depth) in [
