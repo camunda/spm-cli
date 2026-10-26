@@ -98,7 +98,8 @@ fn code_only(src: &str) -> Vec<char> {
 }
 
 /// An attribute starting at `i` (`#[..]` or `#![..]`): its body with all
-/// whitespace removed and the offset just past its closing `]`.
+/// whitespace and raw-identifier prefixes (`r#allow` is `allow`) removed, and
+/// the offset just past its closing `]`.
 fn attribute(code: &[char], i: usize) -> Option<(String, usize)> {
     let skip_ws = |mut j: usize| {
         while code.get(j).is_some_and(|c| c.is_whitespace()) {
@@ -123,8 +124,12 @@ fn attribute(code: &[char], i: usize) -> Option<(String, usize)> {
             ']' => {
                 depth -= 1;
                 if depth == 0 {
-                    let body = code[start..j].iter().filter(|c| !c.is_whitespace());
-                    return Some((body.collect(), j + 1));
+                    let body: Vec<char> = code[start..j]
+                        .iter()
+                        .copied()
+                        .filter(|c| !c.is_whitespace())
+                        .collect();
+                    return Some((unraw(&body), j + 1));
                 }
             }
             _ => {}
@@ -132,6 +137,25 @@ fn attribute(code: &[char], i: usize) -> Option<(String, usize)> {
         j += 1;
     }
     None
+}
+
+/// `body` with every raw-identifier prefix dropped: `r#` starting an
+/// identifier (literals are already blanked, so no raw string remains).
+fn unraw(body: &[char]) -> String {
+    let ident = |c: char| c.is_alphanumeric() || c == '_';
+    let mut out = String::with_capacity(body.len());
+    let mut k = 0;
+    while k < body.len() {
+        let raw =
+            body[k] == 'r' && body.get(k + 1) == Some(&'#') && (k == 0 || !ident(body[k - 1]));
+        if raw {
+            k += 2;
+        } else {
+            out.push(body[k]);
+            k += 1;
+        }
+    }
+    out
 }
 
 /// Whether a compacted attribute body is a `cfg` that enables its item only
@@ -164,6 +188,15 @@ fn is_cfg_test(body: &str) -> bool {
     &args[start..] == "test"
 }
 
+/// Whether the attribute starting at `i` is an inner one (`#![..]`), which
+/// applies to its enclosing module rather than the next item.
+fn is_inner(code: &[char], i: usize) -> bool {
+    code[i + 1..]
+        .iter()
+        .find(|c| !c.is_whitespace())
+        .is_some_and(|&c| c == '!')
+}
+
 /// Whether a compacted attribute body silences a lint.
 fn suppresses(body: &str) -> bool {
     let lint_level = |b: &str| b.starts_with("allow(") || b.starts_with("expect(");
@@ -175,15 +208,26 @@ fn suppresses(body: &str) -> bool {
 /// 1-based lines of `src` holding a lint suppression outside test code.
 fn suppressions(src: &str) -> Vec<usize> {
     let mut code = code_only(src);
-    // Blank every `#[cfg(test)]` item: its attributes, signature and body. An
-    // item ends at a top-level `;`, `,` (a field/arm/variant) or `{..}` block,
-    // or just before a `}` closing the enclosing block.
+    // Blank every `#[cfg(test)]` item: its whole attribute list (whatever the
+    // order), signature and body. An item ends at a top-level `;`, `,` (a
+    // field/arm/variant/parameter) or `{..}` block, or just before a `}`, `)`
+    // or `]` closing the enclosing one.
     let mut i = 0;
+    // Start of the run of attributes the one at `i` belongs to, and the end of
+    // the previous attribute in it (only whitespace may separate two).
+    let (mut run, mut last_end) = (0usize, None::<usize>);
     while i < code.len() {
         let Some((body, end)) = attribute(&code, i) else {
             i += 1;
             continue;
         };
+        let inner = is_inner(&code, i);
+        let joined = last_end.is_some_and(|e| code[e..i].iter().all(|c| c.is_whitespace()));
+        if inner || !joined {
+            run = i;
+        }
+        // An inner attribute applies to its module, not to the next item.
+        last_end = (!inner).then_some(end);
         if !is_cfg_test(&body) {
             i = end;
             continue;
@@ -192,9 +236,9 @@ fn suppressions(src: &str) -> Vec<usize> {
         while j < code.len() {
             match code[j] {
                 '(' | '[' => depth += 1,
-                ')' | ']' => depth = depth.saturating_sub(1),
+                ')' | ']' if depth > 0 => depth -= 1,
                 ';' | ',' if depth == 0 => break,
-                '}' if depth == 0 => {
+                '}' | ')' | ']' if depth == 0 => {
                     j -= 1;
                     break;
                 }
@@ -220,12 +264,13 @@ fn suppressions(src: &str) -> Vec<usize> {
             j += 1;
         }
         let stop = (j + 1).min(code.len());
-        for c in &mut code[i..stop] {
+        for c in &mut code[run..stop] {
             if *c != '\n' {
                 *c = ' ';
             }
         }
         i = stop;
+        last_end = None;
     }
     let mut lines = Vec::new();
     let mut i = 0;
@@ -327,4 +372,55 @@ mod unix_tests { #[allow(x)] fn h() {} }
 fn live() {}
 "####;
     assert_eq!(suppressions(src), vec![20]);
+}
+
+/// Raw identifiers name the same attribute: `r#allow` silences a lint too.
+#[test]
+fn suppressions_flags_raw_identifier_attributes() {
+    let src = "\
+#[r#allow(dead_code)]
+fn a() {}
+#[cfg_attr(not(test), r#allow(dead_code))]
+fn b() {}
+#[r#expect(unused)]
+fn c() {}
+";
+    assert_eq!(suppressions(src), vec![1, 3, 5]);
+}
+
+/// A test-only parameter ends at the `)` closing the parameter list; the
+/// function body after it ships.
+#[test]
+fn suppressions_stops_a_test_only_item_at_its_enclosing_delimiter() {
+    let src = "\
+fn f(#[cfg(test)] _x: u8) {
+    #[allow(unused_variables)]
+    let x = 1;
+}
+fn g(a: [u8; 1], #[cfg(test)] _y: u8) -> u8 { #[allow(x)] let _ = 0; a[0] }
+";
+    assert_eq!(suppressions(src), vec![2, 5]);
+}
+
+/// The test-code exemption covers an item's whole attribute list, whatever
+/// the order of its attributes.
+#[test]
+fn suppressions_ignores_attributes_before_a_test_only_cfg() {
+    let src = "\
+#[allow(dead_code)]
+#[cfg(test)]
+fn helper() {}
+#[allow(dead_code)] /// docs
+#[derive(Debug)] #[cfg(test)] struct T;
+struct S { #[allow(dead_code)] #[cfg(test)] a: u8, b: u8 }
+#[allow(after)]
+fn live() {}
+#[allow(before_live)]
+fn live2() {}
+#[cfg(test)]
+fn t() {}
+#![allow(inner)]
+#[cfg(test)] mod m {}
+";
+    assert_eq!(suppressions(src), vec![7, 9, 13]);
 }
