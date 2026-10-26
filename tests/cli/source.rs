@@ -364,26 +364,8 @@ pub fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
 /// fails.
 #[test]
 fn skip_test_only_covers_every_node_with_attributes() {
-    let out = std::process::Command::new(env!("CARGO"))
-        .args(["metadata", "--offline", "--format-version", "1"])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let meta: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    let syn = meta["packages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|p| p["name"] == "syn" && p["version"].as_str().unwrap().starts_with("2."))
-        .expect("syn 2 in the dependency graph");
-    let root = Path::new(syn["manifest_path"].as_str().unwrap()).with_file_name("src");
     let mut nodes = Vec::new();
-    let mut dirs = vec![root];
+    let mut dirs = vec![syn_sources()];
     while let Some(dir) = dirs.pop() {
         for entry in std::fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
@@ -401,6 +383,60 @@ fn skip_test_only_covers_every_node_with_attributes() {
         .filter(|n| *n != "DeriveInput" && !listed.contains(&format!("(syn::{n}) via")))
         .collect();
     assert!(missing.is_empty(), "skip_test_only! misses {missing:?}");
+}
+
+/// The `src` directory of the `syn` this crate builds against: its version
+/// from `Cargo.lock`, its location from the dep-info files the build wrote
+/// next to this test binary (no registry or network access needed).
+fn syn_sources() -> PathBuf {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let lock = std::fs::read_to_string(manifest.join("Cargo.lock")).unwrap();
+    let field = |pkg: &str, key: &str| -> Option<String> {
+        let line = pkg.lines().find(|l| l.starts_with(&format!("{key} = ")))?;
+        Some(line.split('"').nth(1)?.to_string())
+    };
+    let packages: Vec<&str> = lock.split("[[package]]").collect();
+    let ours = packages
+        .iter()
+        .find(|p| field(p, "name").as_deref() == Some(env!("CARGO_PKG_NAME")))
+        .unwrap();
+    // `"syn"`, or `"syn 2.0.1"` when the lockfile holds several versions.
+    let dep = ours
+        .lines()
+        .map(|l| l.trim().trim_end_matches(',').trim_matches('"'))
+        .find(|d| *d == "syn" || d.starts_with("syn "))
+        .expect("syn among this crate's dependencies");
+    let version = match dep.strip_prefix("syn ") {
+        Some(v) => v.to_string(),
+        None => packages
+            .iter()
+            .find(|p| field(p, "name").as_deref() == Some("syn"))
+            .and_then(|p| field(p, "version"))
+            .unwrap(),
+    };
+    let dir = format!("syn-{version}");
+    let deps = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    for entry in std::fs::read_dir(&deps).unwrap() {
+        let path = entry.unwrap().path();
+        if !path.extension().is_some_and(|e| e == "d") {
+            continue;
+        }
+        let info = std::fs::read_to_string(&path).unwrap_or_default();
+        // Each source also gets its own `path:` line.
+        for line in info.lines() {
+            let file = Path::new(line.strip_suffix(':').unwrap_or_default());
+            if file.ends_with(Path::new("src").join("lib.rs"))
+                && file.components().any(|c| c.as_os_str() == dir.as_str())
+            {
+                return file.parent().unwrap().to_path_buf();
+            }
+        }
+    }
+    panic!("no dep-info in {} names {dir}'s sources", deps.display());
 }
 
 /// The structs `src` declares with a `pub attrs: Vec<Attribute>` field.

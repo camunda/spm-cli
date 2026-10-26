@@ -470,13 +470,19 @@ impl Refs {
                 {
                     self.out.push((OPAQUE.into(), i.span().start().line));
                 }
+                // A repetition (`$(..)*::`, `$(..),+::`) roots one too, as
+                // does one joined by `::` (`$($seg)::*`).
                 TokenTree::Punct(p)
                     if self.rules
                         && p.as_char() == '$'
-                        && (ident(k + 1).is_some_and(|n| n != "crate")
-                            || matches!(trees.get(k + 1), Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis))
-                        && sep(k + 2)
-                        && !(k > 1 && sep(k - 2)) =>
+                        && !(k > 1 && sep(k - 2))
+                        && (ident(k + 1).is_some_and(|n| n != "crate") && sep(k + 2)
+                            || matches!(trees.get(k + 1), Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis)
+                                && {
+                                    let op =
+                                        |a: usize| ['*', '+', '?'].iter().any(|&c| punct(a, c));
+                                    sep(k + 2) || op(k + 2) && sep(k + 3) || op(k + 3) && sep(k + 4)
+                                }) =>
                 {
                     self.out.push((OPAQUE.into(), p.span().start().line));
                 }
@@ -1224,6 +1230,25 @@ fn graph_rejects_relative_paths_in_macro_definitions() {
         (
             "pub fn run() {}\n",
             "macro_rules! run_cli { () => {\n    super::cli::run()\n}; }\n\
+             pub(crate) use run_cli;\n",
+            site.as_str(),
+        ),
+        // A repeated fragment roots a path just as a single one does.
+        (
+            "pub fn run() {}\n",
+            "macro_rules! run_cli { ($($root:ident)*) => {\n    $($root)*::run()\n}; }\n\
+             pub(crate) use run_cli;\n",
+            site.as_str(),
+        ),
+        (
+            "pub fn run() {}\n",
+            "macro_rules! run_cli { ($($seg:ident)::+) => {\n    $($seg)::+()\n}; }\n\
+             pub(crate) use run_cli;\n",
+            site.as_str(),
+        ),
+        (
+            "pub fn run() {}\n",
+            "macro_rules! run_cli { ($($root:ident),+) => {\n    $($root),+::run()\n}; }\n\
              pub(crate) use run_cli;\n",
             site.as_str(),
         ),
