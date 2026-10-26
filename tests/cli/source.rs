@@ -214,11 +214,16 @@ pub fn shipped_files(root: &Path) -> Vec<PathBuf> {
     while let Some((file, test)) = queue.pop() {
         let src = std::fs::read_to_string(&file)
             .unwrap_or_else(|e| panic!("cannot read {}: {e}", file.display()));
+        let parsed = parse(&src);
+        // A file under `#![cfg(test)]` is test-only, and so is all it declares.
+        let test = test || parsed.attrs.iter().any(is_cfg_test);
         let mut decls = ModDecls {
             test,
             ..ModDecls::default()
         };
-        syn::visit::Visit::visit_file(&mut decls, &parse(&src));
+        for item in &parsed.items {
+            syn::visit::Visit::visit_item(&mut decls, item);
+        }
         // `main.rs`/`mod.rs` own their directory; `x.rs` owns `x/`.
         let stem = file.file_stem().unwrap().to_string_lossy();
         let dir = if file == root || stem == "mod" {
