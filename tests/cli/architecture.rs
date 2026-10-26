@@ -15,7 +15,11 @@
 //! reviewed edit of that table, never a side effect. Crate-root globs and
 //! aliases (`use crate::*`, `use super::*` out of a top-level module,
 //! `use crate as x`, `use super as x` reaching the root,
-//! `extern crate self as x`) would hide edges, so they fail.
+//! `extern crate self as x`) would hide edges, so they fail, as do paths the
+//! guard cannot resolve: macro fragments that may reach the root
+//! (`crate::$m`, a bare `crate` passed to a macro) and relative paths in a
+//! `macro_rules!` body (`super::`, `self::`, `$root::`), which resolve
+//! wherever the macro is invoked.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -223,10 +227,16 @@ impl Refs {
             .iter()
             .map(|s| s.ident.unraw().to_string())
             .collect();
+        let line = line.unwrap_or_else(|| path.segments[0].ident.span().start().line);
+        // A path string a `macro_rules!` body emits resolves where it is
+        // invoked, like the body's other relative paths.
+        if self.rules && segs.first().is_some_and(|s| s == "super" || s == "self") {
+            self.out.push((OPAQUE.into(), line));
+            return;
+        }
         let Some(last) = segs.pop() else {
             return;
         };
-        let line = line.unwrap_or_else(|| path.segments[0].ident.span().start().line);
         self.push(resolve(&segs, Leaf::Name(last), self.depth), line);
     }
 
@@ -315,14 +325,34 @@ impl Refs {
                         }
                     }
                 }
+                // `pub(crate)`/`pub(in crate::x)` restrict visibility; they
+                // use nothing.
+                TokenTree::Ident(i)
+                    if i == "pub"
+                        && matches!(trees.get(k + 1), Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis) =>
+                {
+                    k += 2;
+                    continue;
+                }
                 // `super::`/`self::` in a `macro_rules!` body: its depth is
-                // the invocation's, which may be any module.
+                // the invocation's, which may be any module. So is a path
+                // rooted at a fragment (`$root::cli`), which an invocation
+                // may fill with `crate`.
                 TokenTree::Ident(i)
                     if self.rules
                         && (i == "super" || (i == "self" && sep(k + 1)))
                         && !(k > 1 && sep(k - 2)) =>
                 {
                     self.out.push((OPAQUE.into(), i.span().start().line));
+                }
+                TokenTree::Punct(p)
+                    if self.rules
+                        && p.as_char() == '$'
+                        && ident(k + 1).is_some_and(|n| n != "crate")
+                        && sep(k + 2)
+                        && !(k > 1 && sep(k - 2)) =>
+                {
+                    self.out.push((OPAQUE.into(), p.span().start().line));
                 }
                 TokenTree::Ident(i)
                     if matches!(i.to_string().as_str(), "crate" | "super")
@@ -378,14 +408,17 @@ impl Refs {
                             }
                         }
                     }
-                    // `crate as x`, `super as x`, `crate self as x`.
+                    // `crate as x`, `super as x`, `crate self as x`, or a bare
+                    // `crate`/`super` a macro may splice into a path root
+                    // (`call!(crate)` for `$root::cli::run()`).
                     if !sep(j) {
                         let last = prefix.pop().unwrap_or_default();
                         let aliased = ident(j).as_deref() == Some("as")
                             || (last == "crate"
                                 && ident(j).as_deref() == Some("self")
                                 && ident(j + 1).as_deref() == Some("as"));
-                        if aliased {
+                        let bare = j == k + 1 && !(k > 0 && punct(k - 1, '$'));
+                        if aliased || bare {
                             self.push(resolve(&prefix, Leaf::Rename(last), self.depth), line);
                         }
                     }
@@ -881,23 +914,45 @@ fn graph_rejects_relative_paths_in_macro_definitions() {
 
 /// A file the module walk cannot classify as shipped or test-only fails the
 /// guard instead of escaping it: a macro-emitted declaration (even of a file
-/// test code also declares), one an alternate
+/// test code also declares), an `include!` (however spelled or renamed), one
+/// an alternate
 /// `#[cfg_attr(.., path = ..)]` points at, or one nothing declares.
 #[test]
 fn graph_rejects_files_it_cannot_classify() {
     // (`main.rs`, other files, expected in the failure)
     type Case<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a str);
-    let cases: [Case; 8] = [
+    let cases: [Case; 12] = [
+        (
+            "use std::include as splice;\n#[cfg(test)]\nmod hidden;\nsplice!(\"hidden.rs\");\n",
+            &[("hidden.rs", "use crate::x::Y;\n")],
+            "`include` (as",
+        ),
+        (
+            "use std::{include as splice};\n#[cfg(test)]\nmod hidden;\nsplice!(\"hidden.rs\");\n",
+            &[("hidden.rs", "use crate::x::Y;\n")],
+            "`include` (as",
+        ),
+        (
+            "#[cfg(test)]\nmod hidden;\nr#include!(\"hidden.rs\");\n",
+            &[("hidden.rs", "use crate::x::Y;\n")],
+            "`include` (as",
+        ),
+        (
+            "#[cfg(test)]\nmod hidden;\n\
+             macro_rules! src { () => { std::r#include!(\"hidden.rs\"); }; }\nsrc!();\n",
+            &[("hidden.rs", "use crate::x::Y;\n")],
+            "`include` (as",
+        ),
         (
             "#[cfg(test)]\nmod hidden;\ninclude!(\"hidden.rs\");\n",
             &[("hidden.rs", "use crate::x::Y;\n")],
-            "`include!`",
+            "`include` (as",
         ),
         (
             "#[cfg(test)]\nmod hidden;\n\
              macro_rules! src { () => { std::include!(\"hidden.rs\"); }; }\nsrc!();\n",
             &[("hidden.rs", "use crate::x::Y;\n")],
-            "`include!`",
+            "`include` (as",
         ),
         (
             "#[cfg(test)]\nmod hidden;\n\
@@ -988,6 +1043,27 @@ fn crate_refs_flags_macro_paths_it_cannot_read() {
         assert_eq!(names, [OPAQUE], "{src}");
     }
     assert!(crate_refs("macro_rules! m { ($s:expr) => { self.0 + $s }; }", 1).is_empty());
+    // So does a path rooted at a fragment an invocation may fill with
+    // `crate`, and a bare `crate` such an invocation passes.
+    for (src, depth) in [
+        (
+            "macro_rules! m { ($root:ident) => { $root::cli::run() }; }",
+            3,
+        ),
+        ("call!(crate);", 3),
+        ("call!(super);", 1),
+    ] {
+        let names: Vec<String> = crate_refs(src, depth).into_iter().map(|r| r.0).collect();
+        assert_eq!(names, [OPAQUE], "{src}");
+    }
+    for src in [
+        "macro_rules! m { () => { $crate::alpha::run() }; }",
+        "m! { pub(crate) fn f() {} pub(in crate::alpha) fn g() {} }",
+    ] {
+        let names: Vec<String> = crate_refs(src, 1).into_iter().map(|r| r.0).collect();
+        assert!(!names.contains(&OPAQUE.to_string()), "{src}: {names:?}");
+    }
+    assert!(crate_refs("call!(super);", 2).is_empty());
 }
 
 /// Top-level inline modules in `main.rs` would hide their edges behind
@@ -1031,6 +1107,16 @@ macro_rules! s { () => {
 "##;
     let names: Vec<String> = crate_refs(src, 1).into_iter().map(|r| r.0).collect();
     assert_eq!(names, ["alpha", "beta"]);
+    // A relative path string a `macro_rules!` body emits resolves where the
+    // macro is invoked, so it fails at any depth.
+    for attr in [
+        "#[serde(with = \"super::cli\")]",
+        "#[serde(with = \"self::cli\")]",
+    ] {
+        let src = format!("macro_rules! m {{ () => {{ {attr} struct S; }}; }}");
+        let names: Vec<String> = crate_refs(&src, 2).into_iter().map(|r| r.0).collect();
+        assert_eq!(names, [OPAQUE], "{src}");
+    }
 }
 
 #[test]

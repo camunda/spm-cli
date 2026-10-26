@@ -197,22 +197,16 @@ impl<'ast> syn::visit::Visit<'ast> for ModDecls {
         self.test = outer;
     }
 
+    fn visit_ident(&mut self, ident: &'ast proc_macro2::Ident) {
+        assert!(self.test || ident.unraw() != "include", "{INCLUDE}");
+    }
+
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
         // Test-only code ships nothing, whatever it generates.
         if self.test {
             return syn::visit::visit_macro(self, mac);
         }
-        let included = mac
-            .path
-            .segments
-            .last()
-            .is_some_and(|s| s.ident == "include")
-            || emits_include(mac.tokens.clone());
-        assert!(
-            !included,
-            "`include!` is not supported by the source guards, which cannot \
-             tell which module owns the included code: declare it as a module"
-        );
+        assert!(!names_include(mac.tokens.clone()), "{INCLUDE}");
         let found = macro_mod_decls(mac.tokens.clone());
         assert!(
             found.is_empty(),
@@ -226,16 +220,19 @@ impl<'ast> syn::visit::Visit<'ast> for ModDecls {
     skip_test_only!(except visit_item_mod);
 }
 
-/// Whether macro tokens invoke `include!` (at any nesting).
-fn emits_include(tokens: proc_macro2::TokenStream) -> bool {
+/// Why `include` may not appear in shipped code: `include!` (however
+/// spelled, imported, renamed or generated) compiles a file into whichever
+/// module invokes it, which the module walk cannot follow.
+const INCLUDE: &str = "`include` (as `include!`, an import or an alias of it) is not supported \
+     by the source guards, which cannot tell which module owns the included code: \
+     declare it as a module";
+
+/// Whether macro tokens name `include` (raw or not, at any nesting).
+fn names_include(tokens: proc_macro2::TokenStream) -> bool {
     use proc_macro2::TokenTree;
-    let trees: Vec<TokenTree> = tokens.into_iter().collect();
-    trees.iter().enumerate().any(|(k, tree)| match tree {
-        TokenTree::Ident(i) => {
-            i == "include"
-                && matches!(trees.get(k + 1), Some(TokenTree::Punct(p)) if p.as_char() == '!')
-        }
-        TokenTree::Group(g) => emits_include(g.stream()),
+    tokens.into_iter().any(|tree| match tree {
+        TokenTree::Ident(i) => i.unraw() == "include",
+        TokenTree::Group(g) => names_include(g.stream()),
         _ => false,
     })
 }
