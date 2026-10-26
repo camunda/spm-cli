@@ -157,33 +157,44 @@ pub fn parse(src: &str) -> syn::File {
     syn::parse_file(src).unwrap_or_else(|e| panic!("cannot parse source: {e}"))
 }
 
-/// The out-of-line modules (`mod x;`) a file declares in shipped code, as
-/// the inline-module path leading to each plus its name.
+/// Whether `meta` sets a module's file (`path = ".."`), directly or inside
+/// a `cfg_attr`.
+fn sets_path(meta: &Meta) -> bool {
+    match name(meta).as_deref() {
+        Some("path") => true,
+        Some("cfg_attr") => args(meta).is_none_or(|a| a.iter().skip(1).any(sets_path)),
+        _ => false,
+    }
+}
+
+/// The out-of-line modules (`mod x;`) a file declares, as the inline-module
+/// path leading to each, its name and whether only test code declares it.
 #[derive(Default)]
 struct ModDecls {
     inline: Vec<String>,
-    found: Vec<(Vec<String>, String)>,
+    test: bool,
+    found: Vec<(Vec<String>, String, bool)>,
 }
 
 impl<'ast> syn::visit::Visit<'ast> for ModDecls {
     fn visit_item_mod(&mut self, m: &'ast syn::ItemMod) {
-        if m.attrs.iter().any(is_cfg_test) {
-            return;
-        }
         assert!(
-            !m.attrs.iter().any(|a| a.path().is_ident("path")),
-            "`#[path]` on `mod {}` is not supported by the source guards: \
-             teach `source::shipped_files` to follow it",
+            !m.attrs.iter().any(|a| sets_path(&a.meta)),
+            "`#[path]` (or a `cfg_attr` setting one) on `mod {}` is not supported by \
+             the source guards: teach `source::shipped_files` to follow it",
             m.ident
         );
+        let test = self.test || m.attrs.iter().any(is_cfg_test);
         let name = m.ident.unraw().to_string();
         if m.content.is_none() {
-            self.found.push((self.inline.clone(), name));
+            self.found.push((self.inline.clone(), name, test));
             return;
         }
+        let outer = std::mem::replace(&mut self.test, test);
         self.inline.push(name);
         syn::visit::visit_item_mod(self, m);
         self.inline.pop();
+        self.test = outer;
     }
 
     skip_test_only!(except visit_item_mod);
@@ -191,16 +202,22 @@ impl<'ast> syn::visit::Visit<'ast> for ModDecls {
 
 /// The module files of the crate rooted at `root` (`src/main.rs`) that a
 /// non-test build compiles: the root plus every file reached through a
-/// `mod x;` declaration outside test-only code. A file declared only behind
-/// `#[cfg(test)]` (`#[cfg(test)] mod tests;`) or not declared at all ships
-/// nothing, so the guards never read it.
+/// `mod x;` declaration outside test-only code. A file reached only through
+/// test code (`#[cfg(test)] mod tests;`) ships nothing, so the guards never
+/// read it. Every other `.rs` file under the root's directory must be one of
+/// the two: a file the walk cannot classify (declared by a macro, behind
+/// test-only items other than modules, or not at all) fails the guard rather
+/// than escape it.
 pub fn shipped_files(root: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    let mut queue = vec![root.to_path_buf()];
-    while let Some(file) = queue.pop() {
+    let (mut shipped, mut test_only) = (Vec::new(), Vec::new());
+    let mut queue = vec![(root.to_path_buf(), false)];
+    while let Some((file, test)) = queue.pop() {
         let src = std::fs::read_to_string(&file)
             .unwrap_or_else(|e| panic!("cannot read {}: {e}", file.display()));
-        let mut decls = ModDecls::default();
+        let mut decls = ModDecls {
+            test,
+            ..ModDecls::default()
+        };
         syn::visit::Visit::visit_file(&mut decls, &parse(&src));
         // `main.rs`/`mod.rs` own their directory; `x.rs` owns `x/`.
         let stem = file.file_stem().unwrap().to_string_lossy();
@@ -209,19 +226,33 @@ pub fn shipped_files(root: &Path) -> Vec<PathBuf> {
         } else {
             file.with_extension("")
         };
-        for (inline, name) in decls.found {
+        for (inline, name, test) in decls.found {
             let base = inline.iter().fold(dir.clone(), |d, m| d.join(m));
             let flat = base.join(format!("{name}.rs"));
             let nested = base.join(&name).join("mod.rs");
             let found = [flat, nested].into_iter().find(|p| p.is_file());
-            queue.push(
-                found.unwrap_or_else(|| panic!("`mod {name};` in {} has no file", file.display())),
-            );
+            let found =
+                found.unwrap_or_else(|| panic!("`mod {name};` in {} has no file", file.display()));
+            queue.push((found, test));
         }
-        files.push(file);
+        if test { &mut test_only } else { &mut shipped }.push(file);
     }
-    files.sort();
-    files
+    let mut all = Vec::new();
+    rust_files(root.parent().unwrap(), &mut all);
+    let unknown: Vec<String> = all
+        .iter()
+        .filter(|f| !shipped.contains(f) && !test_only.contains(f))
+        .map(|f| format!("  {}", f.display()))
+        .collect();
+    assert!(
+        unknown.is_empty(),
+        "no `mod x;` the source guards can follow reaches these files, so they \
+         cannot tell whether they ship:\n{}\nDeclare each with a plain \
+         `mod x;` (not from a macro), or delete it if unused.",
+        unknown.join("\n")
+    );
+    shipped.sort();
+    shipped
 }
 
 /// Every `.rs` file under `dir`, recursively.

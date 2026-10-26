@@ -408,8 +408,10 @@ fn module_of(rel: &Path) -> (String, usize) {
         .iter()
         .map(|p| p.to_string_lossy().trim_end_matches(".rs").to_string())
         .collect();
+    // `mod.rs` is its directory's module; only the crate root's `main.rs` is.
     let last = parts.last().map(String::as_str);
-    let depth = parts.len() - usize::from(matches!(last, Some("mod" | "main")));
+    let dir_module = last == Some("mod") || parts == ["main"];
+    let depth = parts.len() - usize::from(dir_module);
     (parts[0].clone(), depth)
 }
 
@@ -713,7 +715,7 @@ struct S;
 }
 
 /// Only files a non-test build compiles count: a module declared behind
-/// `#[cfg(test)]` (and everything below it) or not declared at all is skipped.
+/// `#[cfg(test)]` (and everything below it) is skipped.
 #[test]
 fn graph_skips_files_only_test_code_declares() {
     let sb = crate::common::Sandbox::new();
@@ -731,9 +733,54 @@ fn graph_skips_files_only_test_code_declares() {
     write("beta/mod.rs", "pub struct B;\nmod nested { mod leaf; }\n");
     write("beta/nested/leaf.rs", "use crate::gamma::G;\n");
     write("gamma.rs", "pub struct G;\n");
-    write("orphan.rs", "use crate::alpha::A;\n");
     let (graph, _) = graph_of_crate(&root);
     assert_eq!(graph, graph_of(&[("alpha", "beta"), ("beta", "gamma")]));
+}
+
+/// A file the module walk cannot classify as shipped or test-only fails the
+/// guard instead of escaping it: one a macro declares, one an alternate
+/// `#[cfg_attr(.., path = ..)]` points at, or one nothing declares.
+#[test]
+fn graph_rejects_files_it_cannot_classify() {
+    // (`main.rs`, other files, expected in the failure)
+    type Case<'a> = (&'a str, &'a [(&'a str, &'a str)], &'a str);
+    let cases: [Case; 3] = [
+        (
+            "macro_rules! modules { () => { mod hidden; }; }\nmodules!();\n",
+            &[("hidden.rs", "use crate::x::Y;\n")],
+            "hidden.rs",
+        ),
+        (
+            "#[cfg_attr(unix, path = \"alternate.rs\")]\nmod foo;\n",
+            &[("foo.rs", ""), ("alternate.rs", "")],
+            "#[path]",
+        ),
+        ("", &[("orphan.rs", "")], "orphan.rs"),
+    ];
+    for (main, files, expected) in cases {
+        let sb = crate::common::Sandbox::new();
+        let src = sb.root.join("crate/src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("main.rs"), main).unwrap();
+        for (rel, text) in files {
+            std::fs::write(src.join(rel), text).unwrap();
+        }
+        let err = std::panic::catch_unwind(|| shipped_files(&src.join("main.rs"))).expect_err(main);
+        let msg = err
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_default();
+        assert!(msg.contains(expected), "{main}: {msg}");
+    }
+}
+
+#[test]
+fn module_of_counts_only_the_crate_root_main_as_its_directory() {
+    assert_eq!(module_of(Path::new("main.rs")), ("main".into(), 0));
+    assert_eq!(module_of(Path::new("foo/main.rs")), ("foo".into(), 2));
+    assert_eq!(module_of(Path::new("foo/mod.rs")), ("foo".into(), 1));
+    assert_eq!(module_of(Path::new("foo/bar.rs")), ("foo".into(), 2));
 }
 
 #[test]
