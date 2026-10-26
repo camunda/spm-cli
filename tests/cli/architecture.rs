@@ -33,7 +33,9 @@ use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::Token;
 
-use crate::source::{args, is_cfg_test, parse, requires_test, shipped_files, skip_test_only};
+use crate::source::{
+    args, cfg_test, is_cfg_test, parse, requires_test, shipped_files, skip_test_only,
+};
 
 /// The allowed top-level dependency edges: the single source of truth for the
 /// layering of `src/`. A module absent here depends on no other module.
@@ -147,6 +149,11 @@ type Graph = BTreeMap<String, BTreeSet<String>>;
 /// reaches: a glob (`crate::*`) or an alias of the root (`crate as x`).
 const OPAQUE: &str = "*";
 
+/// Marks a name that is an edge only if it names a top-level module: the
+/// head of a qualified path in a `macro_rules!` body (`beta::run()`), which
+/// resolves at the invocation, where it may be a root module.
+const MAYBE: char = '?';
+
 /// How a path ends: a name, a renamed name (`x as y`) or a glob.
 enum Leaf {
     Name(String),
@@ -246,6 +253,9 @@ impl Refs {
             self.out.push((OPAQUE.into(), line));
             return;
         }
+        if self.rules && segs.len() > 1 && segs[0] != "crate" {
+            self.out.push((format!("{MAYBE}{}", segs[0]), line));
+        }
         let Some(last) = segs.pop() else {
             return;
         };
@@ -265,6 +275,13 @@ impl Refs {
                     self.use_tree(item, prefix, line);
                 }
                 return;
+            }
+            // At the crate root, `use x;` and `use x as y;` name a root item.
+            syn::UseTree::Name(n) if self.depth == 0 && prefix.is_empty() => {
+                Some(n.ident.unraw().to_string())
+            }
+            syn::UseTree::Rename(r) if self.depth == 0 && prefix.is_empty() => {
+                Some(r.ident.unraw().to_string())
             }
             syn::UseTree::Name(n) => {
                 resolve(prefix, Leaf::Name(n.ident.unraw().to_string()), self.depth)
@@ -297,15 +314,42 @@ impl Refs {
             match &trees[k] {
                 // An attribute a macro emits: read like a parsed one.
                 TokenTree::Punct(p) if p.as_char() == '#' => {
-                    let j = k + 1 + usize::from(punct(k + 1, '!'));
+                    let inner = punct(k + 1, '!');
+                    let j = k + 1 + usize::from(inner);
                     if let Some(TokenTree::Group(g)) = trees.get(j) {
                         if g.delimiter() == Delimiter::Bracket {
-                            let first = g.stream().into_iter().next();
-                            let doc = matches!(&first, Some(TokenTree::Ident(i)) if i == "doc");
-                            if !doc {
-                                self.tokens(g.stream(), true);
-                            }
                             k = j + 1;
+                            match syn::parse2::<syn::Meta>(g.stream()) {
+                                // `#[cfg(test)]`: skip the item it gates (to
+                                // its body, `;` or `,`); `#![cfg(test)]`, the
+                                // rest.
+                                Ok(meta) if cfg_test(&meta) => {
+                                    while k < trees.len() {
+                                        let end = match &trees[k] {
+                                            TokenTree::Punct(p) => {
+                                                matches!(p.as_char(), ';' | ',')
+                                            }
+                                            TokenTree::Group(g) => {
+                                                g.delimiter() == Delimiter::Brace
+                                            }
+                                            _ => false,
+                                        };
+                                        k += 1;
+                                        if end && !inner {
+                                            break;
+                                        }
+                                    }
+                                }
+                                Ok(meta) => self.meta(&meta),
+                                Err(_) => {
+                                    let first = g.stream().into_iter().next();
+                                    let doc =
+                                        matches!(&first, Some(TokenTree::Ident(i)) if i == "doc");
+                                    if !doc {
+                                        self.tokens(g.stream(), true);
+                                    }
+                                }
+                            }
                             continue;
                         }
                     }
@@ -353,6 +397,18 @@ impl Refs {
                 {
                     k += 2;
                     continue;
+                }
+                // `x::..` in a `macro_rules!` body names a root module if the
+                // macro is invoked at the root.
+                TokenTree::Ident(i)
+                    if self.rules
+                        && !matches!(i.to_string().as_str(), "crate" | "super" | "self")
+                        && sep(k + 1)
+                        && !(k > 1 && sep(k - 2))
+                        && !(k > 0 && punct(k - 1, '$')) =>
+                {
+                    self.out
+                        .push((format!("{MAYBE}{}", i.unraw()), i.span().start().line));
                 }
                 // `super::`/`self::` in a `macro_rules!` body: its depth is
                 // the invocation's, which may be any module. So is a path
@@ -638,6 +694,11 @@ fn graph_of_crate(root: &Path) -> (Graph, BTreeMap<(String, String), String>) {
                 opaque.push(format!("  {}:{line}", rel.display()));
                 continue;
             }
+            let name = match name.strip_prefix(MAYBE) {
+                Some(head) if modules.contains(head) => head.to_string(),
+                Some(_) => continue,
+                None => name,
+            };
             // Anything not a module is an item defined in `main.rs`.
             let to = if modules.contains(&name) {
                 name
@@ -954,8 +1015,8 @@ fn graph_skips_files_only_test_code_declares() {
 }
 
 /// At the crate root every spelling of a root path is an edge: `crate::x`,
-/// `self::x`, a qualified `x::..`, in code or macro tokens; a bare local name
-/// that happens to match a module is not.
+/// `self::x`, a qualified `x::..`, in code or macro tokens, and `use x;` or
+/// `use x as y;`; a bare local name that happens to match a module is not.
 #[test]
 fn graph_reads_every_spelling_of_root_paths_in_main() {
     let sb = crate::common::Sandbox::new();
@@ -965,15 +1026,20 @@ fn graph_reads_every_spelling_of_root_paths_in_main() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
     };
-    let mods = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"];
+    let mods = [
+        "alpha", "beta", "gamma", "delta", "epsilon", "eta", "theta", "zeta",
+    ];
     let mut main: String = mods.iter().map(|m| format!("mod {m};\n")).collect();
     main.push_str(
         "use self::beta::B;\n\
+         use eta as renamed;\n\
+         use theta;\n\
          fn main() {\n\
          \x20   crate::alpha::run();\n\
          \x20   gamma::run();\n\
          \x20   println!(\"{}\", delta::D);\n\
          \x20   println!(\"{}\", self::epsilon::E);\n\
+         \x20   renamed::run();\n\
          \x20   let zeta = 1;\n\
          \x20   drop(zeta);\n\
          }\n",
@@ -983,8 +1049,35 @@ fn graph_reads_every_spelling_of_root_paths_in_main() {
         write(&format!("{m}.rs"), "");
     }
     let (graph, _) = graph_of_crate(&root);
-    let edges: Vec<(&str, &str)> = mods[..5].iter().map(|m| ("main", *m)).collect();
+    let edges: Vec<(&str, &str)> = mods[..7].iter().map(|m| ("main", *m)).collect();
     assert_eq!(graph, graph_of(&edges));
+}
+
+/// A qualified `beta::..` in a `macro_rules!` body resolves where the macro
+/// is invoked: at the root it is the top-level `beta`. It counts as an edge of
+/// the defining module (spell it `$crate::beta::..`), while heads that name no
+/// module (`fmt::Display`) do not.
+#[test]
+fn graph_reads_unqualified_macro_paths_as_their_modules() {
+    let sb = crate::common::Sandbox::new();
+    let root = sb.root.join("crate");
+    let write = |rel: &str, text: &str| {
+        let path = root.join("src").join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write(
+        "main.rs",
+        "mod alpha;\nmod beta;\nfn main() { alpha::run_beta!(); }\n",
+    );
+    write(
+        "alpha.rs",
+        "macro_rules! run_beta { () => { beta::run(); std::fmt::Display::fmt; } }\n\
+         pub(crate) use run_beta;\n",
+    );
+    write("beta.rs", "pub fn run() {}\n");
+    let (graph, _) = graph_of_crate(&root);
+    assert_eq!(graph, graph_of(&[("main", "alpha"), ("alpha", "beta")]));
 }
 
 /// `super::` in a `macro_rules!` body resolves where the macro is invoked:
@@ -1224,6 +1317,23 @@ macro_rules! s { () => {
     fn f() { println!("crate::ghost"); g("crate::ghost"); }
 }; }
 "##;
+    let names: Vec<String> = crate_refs(src, 1).into_iter().map(|r| r.0).collect();
+    assert_eq!(names, ["alpha", "beta"]);
+    // Test-only attributes and items a macro emits are test code.
+    let src = r#"
+macro_rules! t { () => {
+    #[cfg_attr(test, serde(with = "crate::ghost"))]
+    struct S;
+    #[cfg(test)]
+    fn t() { crate::ghost::x() }
+    #[cfg(test)]
+    use crate::ghost::Y;
+    #[cfg_attr(unix, serde(with = "crate::alpha"))]
+    struct T;
+    fn u() { crate::beta::x() }
+}; }
+m! { #![cfg(test)] use crate::ghost::Y; }
+"#;
     let names: Vec<String> = crate_refs(src, 1).into_iter().map(|r| r.0).collect();
     assert_eq!(names, ["alpha", "beta"]);
     // A relative path string a `macro_rules!` body emits resolves where the

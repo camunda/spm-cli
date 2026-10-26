@@ -46,7 +46,12 @@ pub fn requires_test(pred: &Meta) -> bool {
 
 /// Whether `attr` is a `cfg` that enables its node only under test.
 pub fn is_cfg_test(attr: &Attribute) -> bool {
-    let meta = &attr.meta;
+    cfg_test(&attr.meta)
+}
+
+/// Whether `meta` (an attribute's content) is a `cfg` that enables its node
+/// only under test.
+pub fn cfg_test(meta: &Meta) -> bool {
     name(meta).as_deref() == Some("cfg") && nested(meta).first().is_some_and(requires_test)
 }
 
