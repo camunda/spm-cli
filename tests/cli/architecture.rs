@@ -321,22 +321,26 @@ impl Refs {
             match &trees[k] {
                 // An attribute a macro emits: read like a parsed one.
                 TokenTree::Punct(p) if p.as_char() == '#' => {
-                    let (hash, inner) = (k, punct(k + 1, '!'));
+                    let inner = punct(k + 1, '!');
+                    // An item any of whose attributes is `#[cfg(test)]`,
+                    // in whatever order, is skipped whole, those attributes
+                    // included (anything else, e.g. a generic parameter, is
+                    // read).
+                    if let Some(rest) =
+                        test_item_rest(&trees[k..]).filter(|_| !inner && !self.input)
+                    {
+                        k = trees.len() - rest;
+                        continue;
+                    }
                     let j = k + 1 + usize::from(inner);
                     if let Some(TokenTree::Group(g)) = trees.get(j) {
                         if g.delimiter() == Delimiter::Bracket {
                             k = j + 1;
                             match syn::parse2::<syn::Meta>(g.stream()) {
                                 // `#![cfg(test)]` gates the whole enclosing
-                                // group; `#[cfg(test)]` the item it starts,
-                                // if what follows parses as one (anything
-                                // else, e.g. a generic parameter, is read).
-                                Ok(meta) if cfg_test(&meta) && !self.input => {
-                                    if inner {
-                                        k = trees.len();
-                                    } else if let Some(rest) = item_rest(&trees[hash..]) {
-                                        k = trees.len() - rest;
-                                    }
+                                // group.
+                                Ok(meta) if inner && cfg_test(&meta) && !self.input => {
+                                    k = trees.len();
                                 }
                                 Ok(meta) => self.meta(&meta),
                                 Err(_) => {
@@ -394,15 +398,17 @@ impl Refs {
                     }
                 }
                 // `use ..;` a macro emits: read like a parsed one if it
-                // parses.
+                // parses (`use ::x;` names an external crate).
                 TokenTree::Ident(i) if i == "use" => {
                     let end = (k + 1..trees.len()).find(|&e| punct(e, ';'));
-                    let tree = end.and_then(|e| {
-                        let tokens: TokenStream = trees[k + 1..e].iter().cloned().collect();
-                        syn::parse2::<syn::UseTree>(tokens).ok()
+                    let item = end.and_then(|e| {
+                        let tokens: TokenStream = trees[k..=e].iter().cloned().collect();
+                        syn::parse2::<syn::ItemUse>(tokens).ok()
                     });
-                    if let (Some(e), Some(tree)) = (end, tree) {
-                        self.macro_use(&tree, i.span().start().line);
+                    if let (Some(e), Some(item)) = (end, item) {
+                        if item.leading_colon.is_none() {
+                            self.macro_use(&item.tree, i.span().start().line);
+                        }
                         k = e + 1;
                         continue;
                     }
@@ -583,10 +589,15 @@ impl Refs {
     }
 }
 
-/// If `trees` starts with a whole item, how many token trees follow it.
-fn item_rest(trees: &[TokenTree]) -> Option<usize> {
+/// If `trees` starts with a whole item an outer `#[cfg(test)]` gates, how
+/// many token trees follow it.
+fn test_item_rest(trees: &[TokenTree]) -> Option<usize> {
     let tokens: TokenStream = trees.iter().cloned().collect();
     let parser = |input: syn::parse::ParseStream| {
+        let attrs = input.call(syn::Attribute::parse_outer)?;
+        if !attrs.iter().any(|a| cfg_test(&a.meta)) {
+            return Err(input.error("not test-only"));
+        }
         input.parse::<syn::Item>()?;
         input.parse::<TokenStream>()
     };
@@ -1428,6 +1439,12 @@ macro_rules! t { () => {
     fn t() { crate::ghost::x() }
     #[cfg(test)]
     use crate::ghost::Y;
+    #[derive(crate::ghost::Derive)]
+    #[cfg(test)]
+    struct U;
+    #[cfg(test)]
+    #[derive(crate::ghost::Derive)]
+    struct V;
     #[cfg_attr(unix, serde(with = "crate::alpha"))]
     struct T;
     fn u() { crate::beta::x() }
@@ -1616,7 +1633,15 @@ fn crate_refs_flags_imports_that_hide_edges() {
         ("use crate::alpha::*;", 1),
         ("pub(crate) use self::x::*;", 1),
         ("m! { mod inner { use super::*; } }", 1),
+        // A leading `::` names an external crate.
+        ("macro_rules! m { () => { use ::std::path::Path; }; }", 1),
+        (
+            "macro_rules! m { () => { use ::std::{fs, io as stdio}; }; }",
+            1,
+        ),
     ] {
         assert!(opaque(src, depth).is_empty(), "{src}");
     }
+    let refs = crate_refs("macro_rules! m { () => { use ::std::path::Path; }; }", 1);
+    assert!(refs.is_empty(), "{refs:?}");
 }
