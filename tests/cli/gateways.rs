@@ -128,7 +128,8 @@ const GUARDS: &[Guard] = &[
             "File::lock",
         ],
         imports: &[],
-        opaque: &[],
+        // Not left to the write guard: its allow-list is wider than this one.
+        opaque: &["fs::File"],
         allowed: &[(
             "src/cli/session.rs",
             "the private `StateLock` behind every command's state lock",
@@ -347,6 +348,9 @@ enum Bind {
     Alias(String),
     /// `use a::b::*;`
     Glob,
+    /// A macro's `use` that does not parse (`use std::fs::{$($i),*};`): its
+    /// path holds every identifier in it, in order.
+    Unread,
 }
 
 /// A shipped binding: the path it names (`self` resolved to its module),
@@ -379,21 +383,59 @@ impl Shipped {
 
 impl Shipped {
     /// Records the bindings of a macro body: the items or statements it
-    /// holds, or else those of each delimited group in it (a `macro_rules!`
-    /// arm's body), so `use std::fs::write;` inside a macro is no blind spot.
+    /// holds or, when it does not parse as a whole (a `macro_rules!` arm, a
+    /// repetition), each `use`/`type` item in it and in its groups, so
+    /// `use std::fs::write;` inside a macro is no blind spot. A `use` that does
+    /// not parse on its own is recorded as [`Bind::Unread`].
     fn bind_tokens(&mut self, tokens: TokenStream) {
         if let Ok(file) = syn::parse2::<syn::File>(tokens.clone()) {
-            self.visit_file(&file);
-        } else if let Ok(stmts) = syn::Block::parse_within.parse2(tokens.clone()) {
-            stmts.iter().for_each(|s| self.visit_stmt(s));
-        } else {
-            for tree in tokens {
-                if let TokenTree::Group(g) = tree {
-                    self.bind_tokens(g.stream());
+            return self.visit_file(&file);
+        }
+        if let Ok(stmts) = syn::Block::parse_within.parse2(tokens.clone()) {
+            return stmts.iter().for_each(|s| self.visit_stmt(s));
+        }
+        let trees: Vec<TokenTree> = tokens.into_iter().collect();
+        let mut i = 0;
+        while i < trees.len() {
+            match &trees[i] {
+                TokenTree::Ident(kw) if kw == "use" || kw == "type" => {
+                    let end = (i..trees.len())
+                        .find(|&j| matches!(&trees[j], TokenTree::Punct(p) if p.as_char() == ';'))
+                        .unwrap_or(trees.len() - 1);
+                    let item: TokenStream = trees[i..=end].iter().cloned().collect();
+                    match syn::parse2::<syn::Item>(item.clone()) {
+                        Ok(item) => self.visit_item(&item),
+                        Err(_) if kw == "use" => {
+                            self.bindings.push(Binding {
+                                path: flat_idents(item),
+                                bind: Bind::Unread,
+                                line: kw.span().start().line,
+                            });
+                        }
+                        Err(_) => {}
+                    }
+                    i = end + 1;
                 }
+                TokenTree::Group(g) => {
+                    self.bind_tokens(g.stream());
+                    i += 1;
+                }
+                _ => i += 1,
             }
         }
     }
+}
+
+/// Every identifier in `tokens`, in order, groups included.
+fn flat_idents(tokens: TokenStream) -> Vec<String> {
+    tokens
+        .into_iter()
+        .flat_map(|t| match t {
+            TokenTree::Ident(i) => vec![i.unraw().to_string()],
+            TokenTree::Group(g) => flat_idents(g.stream()),
+            _ => Vec::new(),
+        })
+        .collect()
 }
 
 /// `tokens` without `macro_rules!` sigils, so `$crate::fs` and `write($p)`
@@ -549,6 +591,11 @@ impl Source {
                     names(guard.opaque, &b.path).map(|item| format!("{item} as {alias}"))
                 }
                 Bind::Glob => names(guard.opaque, &b.path).map(|item| format!("{item}::*")),
+                Bind::Unread => guard
+                    .opaque
+                    .iter()
+                    .find(|item| item.split("::").any(|seg| b.path.iter().any(|p| p == seg)))
+                    .map(|item| format!("{item} (in a macro import it cannot read)")),
             };
             out.extend(label.map(|l| (b.line, l)));
         }
@@ -913,6 +960,14 @@ fn guards_see_bindings_inside_macro_bodies() {
                     "src/items.rs",
                     "items! { type Out = std::fs::File; }",
                 ),
+                (
+                    "src/repeat.rs",
+                    "macro_rules! put {\n    ($($p:expr),*) => {{\n        use std::fs::{write};\n        $(let _ = write($p, \"{}\");)*\n    }};\n}",
+                ),
+                (
+                    "src/unreadable.rs",
+                    "macro_rules! put {\n    ($($i:ident),*) => {\n        use std::fs::{$($i),*};\n    };\n}",
+                ),
                 ("src/fine.rs", "fn f() { println!(\"{}\", x); }"),
             ],
         ),
@@ -920,6 +975,20 @@ fn guards_see_bindings_inside_macro_bodies() {
             "src/call.rs:1 uses `fs::write`",
             "src/rules.rs:3 uses `fs as disk`",
             "src/items.rs:1 uses `fs::File as Out`",
+            "src/repeat.rs:3 uses `fs::write`",
+            "src/unreadable.rs:3 uses `fs (in a macro import it cannot read)`",
         ]
+    );
+}
+
+#[test]
+fn lock_guard_rejects_file_aliases_even_where_writes_are_allowed() {
+    let files = [(
+        "src/store.rs",
+        "use std::fs::File as F;\nfn f(h: &F) { F::lock(h); }",
+    )];
+    assert_eq!(
+        flagged("OS file locks", &files),
+        vec!["src/store.rs:1 uses `fs::File as F`"]
     );
 }
