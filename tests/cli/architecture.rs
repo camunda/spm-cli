@@ -384,6 +384,20 @@ impl Refs {
                         }
                     }
                 }
+                // `use ..;` a macro emits: read like a parsed one if it
+                // parses (a `$` fragment in it is read token by token).
+                TokenTree::Ident(i) if i == "use" => {
+                    let end = (k + 1..trees.len()).find(|&e| punct(e, ';'));
+                    let tree = end.and_then(|e| {
+                        let tokens: TokenStream = trees[k + 1..e].iter().cloned().collect();
+                        syn::parse2::<syn::UseTree>(tokens).ok()
+                    });
+                    if let (Some(e), Some(tree)) = (end, tree) {
+                        self.macro_use(&tree, i.span().start().line);
+                        k = e + 1;
+                        continue;
+                    }
+                }
                 // `pub(crate)`/`pub(in crate::x)` restrict visibility; they
                 // use nothing.
                 TokenTree::Ident(i)
@@ -521,6 +535,33 @@ impl Refs {
                 _ => {}
             }
             k += 1;
+        }
+    }
+}
+
+impl Refs {
+    /// A `use` tree a macro emits. In a `macro_rules!` body it resolves at
+    /// the invocation: a `crate::` branch is still exact, a `super`/`self`
+    /// one may reach anything, and any other head is a module if the macro is
+    /// invoked at the root.
+    fn macro_use(&mut self, tree: &syn::UseTree, line: usize) {
+        if !self.rules {
+            return self.use_tree(tree, &mut Vec::new(), line);
+        }
+        let head = match tree {
+            syn::UseTree::Group(g) => {
+                g.items.iter().for_each(|t| self.macro_use(t, line));
+                return;
+            }
+            syn::UseTree::Path(p) => p.ident.unraw().to_string(),
+            syn::UseTree::Name(n) => n.ident.unraw().to_string(),
+            syn::UseTree::Rename(r) => r.ident.unraw().to_string(),
+            syn::UseTree::Glob(_) => OPAQUE.into(),
+        };
+        match head.as_str() {
+            "crate" => self.use_tree(tree, &mut Vec::new(), line),
+            "super" | "self" | OPAQUE => self.out.push((OPAQUE.into(), line)),
+            _ => self.out.push((format!("{MAYBE}{head}"), line)),
         }
     }
 }
@@ -1074,18 +1115,39 @@ fn graph_reads_unqualified_macro_paths_as_their_modules() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
     };
-    write(
-        "main.rs",
-        "mod alpha;\nmod beta;\nfn main() { alpha::run_beta!(); }\n",
+    let mods = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"];
+    let mut main: String = mods.iter().map(|m| format!("mod {m};\n")).collect();
+    // Imports a macro emits, defined at the root or elsewhere, count too.
+    main.push_str(
+        "macro_rules! here { () => { use gamma as renamed; renamed::run(); } }\n\
+         fn main() { alpha::run_beta!(); here!(); }\n",
     );
+    write("main.rs", &main);
     write(
         "alpha.rs",
-        "macro_rules! run_beta { () => { beta::run(); std::fmt::Display::fmt; } }\n\
+        "macro_rules! run_beta { () => {\n\
+         \x20   beta::run();\n\
+         \x20   std::fmt::Display::fmt;\n\
+         \x20   use {delta as d, epsilon};\n\
+         } }\n\
          pub(crate) use run_beta;\n",
     );
-    write("beta.rs", "pub fn run() {}\n");
+    for m in &mods[1..] {
+        write(&format!("{m}.rs"), "");
+    }
+    write("zeta.rs", "m! { use super::delta as d; }\n");
     let (graph, _) = graph_of_crate(&root);
-    assert_eq!(graph, graph_of(&[("main", "alpha"), ("alpha", "beta")]));
+    assert_eq!(
+        graph,
+        graph_of(&[
+            ("main", "alpha"),
+            ("main", "gamma"),
+            ("alpha", "beta"),
+            ("alpha", "delta"),
+            ("alpha", "epsilon"),
+            ("zeta", "delta"),
+        ])
+    );
 }
 
 /// `super::` in a `macro_rules!` body resolves where the macro is invoked:
@@ -1115,7 +1177,8 @@ fn graph_rejects_relative_paths_in_macro_definitions() {
     write("policy.rs", "fn go() { crate::git::run_cli!(); }\n");
     let err = std::panic::catch_unwind(|| graph_of_crate(&root)).expect_err("hidden edge");
     let msg = err.downcast_ref::<String>().cloned().unwrap_or_default();
-    assert!(msg.contains("src/git/repository.rs:2"), "{msg}");
+    let site = Path::new("src").join("git").join("repository.rs");
+    assert!(msg.contains(&format!("{}:2", site.display())), "{msg}");
 }
 
 /// A file the module walk cannot classify as shipped or test-only fails the
