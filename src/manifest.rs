@@ -546,7 +546,7 @@ impl DependencyManifest {
     ///
     /// The transitive resolver validates the nested `ai.json` against the
     /// checkout boundary *before* reading it and gets back a canonical,
-    /// symlink-resolved path (see `transitive::nested_manifest_path`). Reading
+    /// symlink-resolved path (see `transitive::walk::nested_manifest_path`). Reading
     /// that exact path — rather than re-deriving `<dir>/ai.json` and letting the
     /// loader follow the on-disk symlink a second time — closes the TOCTOU window
     /// where the symlink could be swapped between the boundary check and the read
