@@ -232,10 +232,21 @@ fn clean(v: &dyn Vendor, scope: &Scope, skills: &[DepName], plugins: &[DepName])
     }
 }
 
-fn check_contract(target: &str, global: bool) {
+/// Whether the files a [`Registration`](super::Registration) vendor patches
+/// already hold [`user_config`] before the first materialize.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Settings {
+    Seeded,
+    Absent,
+}
+
+fn check_contract(target: &str, global: bool, settings: Settings) {
     let label = if global { "global" } else { "project" };
-    let ctx = format!("[{target} / {label}]");
-    let sb = Sandbox::new(target, label);
+    let ctx = match settings {
+        Settings::Seeded => format!("[{target} / {label}]"),
+        Settings::Absent => format!("[{target} / {label} / no settings]"),
+    };
+    let sb = Sandbox::new(target, &format!("{label}-{settings:?}"));
     let scope = Scope::new(global, sb.project.clone());
     let v = for_target(target).unwrap();
     let v = v.as_ref();
@@ -260,8 +271,10 @@ fn check_contract(target: &str, global: bool) {
         .registration()
         .map(|r| r.patched_files(&scope).unwrap())
         .unwrap_or_default();
-    for f in &patched {
-        sb.write(f, &serde_json::to_string_pretty(&user_config()).unwrap());
+    if settings == Settings::Seeded {
+        for f in &patched {
+            sb.write(f, &serde_json::to_string_pretty(&user_config()).unwrap());
+        }
     }
     sb.write(&sb.project.join(".gitignore"), USER_GITIGNORE);
     sb.write(&sb.project.join("README.md"), "user\n");
@@ -293,8 +306,10 @@ fn check_contract(target: &str, global: bool) {
             p.display()
         );
     }
-    for f in &patched {
-        assert_contains_user_config(&read_json(f), &user_config(), &format!("{ctx} {f:?}"));
+    if settings == Settings::Seeded {
+        for f in &patched {
+            assert_contains_user_config(&read_json(f), &user_config(), &format!("{ctx} {f:?}"));
+        }
     }
     let gitignore = std::fs::read_to_string(sb.project.join(".gitignore")).unwrap();
     assert!(gitignore.starts_with(USER_GITIGNORE), "{ctx} {gitignore}");
@@ -333,8 +348,8 @@ fn check_contract(target: &str, global: bool) {
     );
 
     // Clean removes everything spm wrote and restores the user's config; only
-    // the directories created on the way and `.gitignore` (left on purpose)
-    // may remain.
+    // the directories created on the way, the patched files and `.gitignore`
+    // (left on purpose, with spm's entries) may remain.
     clean(v, &scope, &skill_names, &plugin_names);
     let cleaned = snapshot(&sb.root);
     for p in &clean_paths {
@@ -344,9 +359,20 @@ fn check_contract(target: &str, global: bool) {
             p.display()
         );
     }
+    // A patched file spm created is left behind as an empty object: every
+    // entry it registered, and the now-empty objects holding them, are gone.
+    let restored = match settings {
+        Settings::Seeded => user_config(),
+        Settings::Absent => json!({}),
+    };
     for f in &patched {
-        assert_eq!(read_json(f), user_config(), "{ctx} {f:?} after clean");
+        assert_eq!(read_json(f), restored, "{ctx} {f:?} after clean");
     }
+    assert_eq!(
+        std::fs::read_to_string(sb.project.join(".gitignore")).unwrap(),
+        gitignore,
+        "{ctx} clean changed .gitignore"
+    );
     if shared {
         assert!(
             user_skill.join("SKILL.md").is_file(),
@@ -359,7 +385,7 @@ fn check_contract(target: &str, global: bool) {
         let ok = (left_dir && is_declared(&p, &cleaned, &declared))
             || removed_owned
             || patched.contains(&p)
-            || p == sb.project.join(".gitignore");
+            || p == sb.project.join(".gitignore") && cleaned.get(&p) == materialized.get(&p);
         assert!(ok, "{ctx} clean left a change at {}", p.display());
     }
     let st = v.status(&scope, &skill_names).unwrap();
@@ -384,14 +410,32 @@ fn check_contract(target: &str, global: bool) {
 
 #[test]
 fn every_vendor_honors_the_contract_in_project_scope() {
+    assert!(!ALL_TARGETS.is_empty());
     for target in ALL_TARGETS {
-        check_contract(target, false);
+        check_contract(target, false, Settings::Seeded);
     }
 }
 
 #[test]
 fn every_vendor_honors_the_contract_in_global_scope() {
+    assert!(!ALL_TARGETS.is_empty());
     for target in ALL_TARGETS {
-        check_contract(target, true);
+        check_contract(target, true, Settings::Seeded);
+    }
+}
+
+/// Without pre-existing settings, clean must also drop the containers spm's
+/// registration created, not just its own entries.
+#[test]
+fn every_registration_vendor_cleans_settings_it_created() {
+    let registering: Vec<_> = ALL_TARGETS
+        .iter()
+        .filter(|t| for_target(t).unwrap().registration().is_some())
+        .collect();
+    assert!(!registering.is_empty());
+    for target in registering {
+        for global in [false, true] {
+            check_contract(target, global, Settings::Absent);
+        }
     }
 }
