@@ -48,15 +48,15 @@ fn code_only(src: &str) -> Vec<char> {
             }
             blank(&mut out, i, j);
             i = j;
-        } else if (at(0) == Some('r') || (at(0) == Some('b') && at(1) == Some('r')))
+        } else if (at(0) == Some('r') || (matches!(at(0), Some('b' | 'c')) && at(1) == Some('r')))
             && (i == 0 || !ident(s[i - 1]))
             && {
-                let r = if at(0) == Some('b') { i + 1 } else { i };
+                let r = if at(0) == Some('r') { i } else { i + 1 };
                 let hashes = s[r + 1..].iter().take_while(|&&c| c == '#').count();
                 s.get(r + 1 + hashes) == Some(&'"')
             }
         {
-            let r = if at(0) == Some('b') { i + 1 } else { i };
+            let r = if at(0) == Some('r') { i } else { i + 1 };
             let hashes = s[r + 1..].iter().take_while(|&&c| c == '#').count();
             let mut j = r + 2 + hashes;
             while j < s.len() {
@@ -232,12 +232,19 @@ fn suppressions(src: &str) -> Vec<usize> {
             i = end;
             continue;
         }
-        let (mut j, mut depth) = (end, 0usize);
+        let (mut j, mut depth, mut angle) = (end, 0usize, 0usize);
         while j < code.len() {
+            let (prev, next) = (j.checked_sub(1).map(|p| code[p]), code.get(j + 1).copied());
             match code[j] {
                 '(' | '[' => depth += 1,
                 ')' | ']' if depth > 0 => depth -= 1,
-                ';' | ',' if depth == 0 => break,
+                // Generic lists: not `<<`, `<=`, `->`, `=>` or `>=`.
+                '<' if !matches!(prev, Some('<')) && !matches!(next, Some('<' | '=')) => angle += 1,
+                '>' if !matches!(prev, Some('-' | '=')) && next != Some('=') => {
+                    angle = angle.saturating_sub(1)
+                }
+                ';' | ',' if depth == 0 && angle == 0 => break,
+                ';' if depth == 0 => break,
                 '}' | ')' | ']' if depth == 0 => {
                     j -= 1;
                     break;
@@ -423,4 +430,18 @@ fn t() {}
 #[cfg(test)] mod m {}
 ";
     assert_eq!(suppressions(src), vec![7, 9, 13]);
+}
+
+/// A comma inside a generic parameter list does not end a test-only item, and
+/// a raw C string does not derail the literal scanner.
+#[test]
+fn suppressions_handles_generics_and_raw_c_strings() {
+    let src = "\
+#[cfg(test)] fn helper<A, B>(_a: A, _b: B) -> Vec<(A, B)> { #[allow(x)] let _ = 0; vec![] }
+#[cfg(test)] fn ret() -> Result<u8, u8> { #[allow(y)] Ok(0) }
+const C: &core::ffi::CStr = cr#\"a\"b\"#;
+#[allow(live)]
+fn live() {}
+";
+    assert_eq!(suppressions(src), vec![4]);
 }
