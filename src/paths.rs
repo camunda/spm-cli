@@ -4,6 +4,10 @@ use std::path::PathBuf;
 /// Root of the global spm store, e.g. `~/.spm`.
 /// Skills are fetched here once and shared across every project (pnpm-style).
 pub fn spm_home() -> Result<PathBuf> {
+    #[cfg(test)]
+    if let Some((_, spm_home)) = sandbox::roots() {
+        return Ok(spm_home);
+    }
     if let Ok(custom) = std::env::var("SPM_HOME") {
         return Ok(PathBuf::from(custom));
     }
@@ -44,6 +48,10 @@ pub fn policy_file() -> Result<PolicyLocation> {
 /// `~/.claude/settings.json`) for global-scope installs — deliberately
 /// independent of `SPM_HOME`, which only relocates spm's own store/manifest.
 pub fn home_dir() -> Result<PathBuf> {
+    #[cfg(test)]
+    if let Some((home, _)) = sandbox::roots() {
+        return Ok(home);
+    }
     let base = directories::BaseDirs::new().context("could not determine home directory")?;
     Ok(base.home_dir().to_path_buf())
 }
@@ -90,6 +98,41 @@ impl Drop for SpmHomeGuard {
         match &self.saved {
             Some(v) => std::env::set_var("SPM_HOME", v),
             None => std::env::remove_var("SPM_HOME"),
+        }
+    }
+}
+
+/// Per-thread redirection of [`home_dir`] and [`spm_home`] for unit tests that
+/// exercise global-scope code without touching the real user's home. Unlike
+/// [`SpmHomeGuard`] it mutates no process-wide state: `cargo test` runs each
+/// test on its own thread, so concurrent tests never observe each other's
+/// sandbox (and need no lock).
+#[cfg(test)]
+pub(crate) mod sandbox {
+    use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
+
+    thread_local! {
+        static ROOTS: RefCell<Option<(PathBuf, PathBuf)>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn roots() -> Option<(PathBuf, PathBuf)> {
+        ROOTS.with(|r| r.borrow().clone())
+    }
+
+    /// Redirects `home_dir`/`spm_home` on this thread until dropped.
+    pub(crate) struct Guard(());
+
+    impl Guard {
+        pub(crate) fn enter(home: &Path, spm_home: &Path) -> Self {
+            ROOTS.with(|r| *r.borrow_mut() = Some((home.to_path_buf(), spm_home.to_path_buf())));
+            Guard(())
+        }
+    }
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            ROOTS.with(|r| *r.borrow_mut() = None);
         }
     }
 }

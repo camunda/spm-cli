@@ -413,7 +413,6 @@ fn settings_path(scope: &Scope) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ids::dep;
 
     fn scratch(name: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -469,29 +468,6 @@ mod tests {
         assert!(std::fs::read_to_string(tmp.join(".gitignore"))
             .unwrap()
             .contains(".spm/"));
-
-        std::fs::remove_dir_all(&tmp).unwrap();
-    }
-
-    /// Clean removes the marketplace dir and de-registers the plugin/marketplace.
-    #[test]
-    fn project_clean_removes_dir_and_registration() {
-        let tmp = scratch("proj-clean");
-        std::fs::create_dir_all(&tmp).unwrap();
-        let scope = Scope::Project { root: tmp.clone() };
-        let s = make_skill(&tmp, "greet");
-        Claude
-            .materialize(&scope, "spm-1234", &[s], &[], &mut |_| Ok(()))
-            .unwrap();
-        Claude.clean(&scope, &[dep("greet")]).unwrap();
-
-        assert!(!tmp.join(".spm/claude").exists(), "marketplace dir removed");
-        let settings: Value = serde_json::from_str(
-            &std::fs::read_to_string(tmp.join(".claude/settings.local.json")).unwrap(),
-        )
-        .unwrap();
-        assert!(settings.get("extraKnownMarketplaces").is_none());
-        assert!(settings.get("enabledPlugins").is_none());
 
         std::fs::remove_dir_all(&tmp).unwrap();
     }

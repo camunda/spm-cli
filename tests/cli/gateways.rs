@@ -7,8 +7,9 @@
 //! (stale entry), so the lists can only shrink.
 //!
 //! Only shipped code counts: files are tokenized, so comments are gone and a
-//! literal never matches, and identifiers only `#[cfg(test)]` code reaches
-//! (tests legitimately spawn `git`/`mkfifo` or write fixtures) are ignored,
+//! literal never matches, and identifiers only `#[cfg(test)]` code (items or
+//! whole `#![cfg(test)]` files) reaches (tests legitimately spawn
+//! `git`/`mkfifo` or write fixtures) are ignored,
 //! through the shared [`skip_test_only`] visitor. Anything the visitor does not
 //! prove test-only (a macro body, an attribute argument) counts as shipped, so
 //! a gap can only over-report. Imports and aliases are read structurally,
@@ -718,6 +719,17 @@ fn m() { println!("{}", std::fs::read_dir(p)); }
     assert_eq!(occurrences(src, "try_lock"), Vec::<usize>::new());
     // Macro bodies are tokens syn does not parse: they count as shipped.
     assert_eq!(occurrences(src, "read_dir"), vec![18]);
+}
+
+/// A whole test-only file (`#![cfg(test)]`, declared `mod x;`) ships nothing,
+/// however many items follow the attribute.
+#[test]
+fn occurrences_skips_a_test_only_file() {
+    let src = "//! Fixtures.\n#![cfg(test)]\nuse std::fs;\nfn a() { fs::read_dir(p); }\nfn b() { std::fs::write(p, x); }\n";
+    assert_eq!(occurrences(src, "read_dir"), Vec::<usize>::new());
+    assert_eq!(occurrences(src, "fs::write"), Vec::<usize>::new());
+    let shipped = "#![cfg(not(test))]\nfn b() { std::fs::write(p, x); }\n";
+    assert_eq!(occurrences(shipped, "fs::write"), vec![2]);
 }
 
 #[test]
