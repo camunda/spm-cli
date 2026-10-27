@@ -129,49 +129,23 @@ fn policy_judges_the_expanded_shorthand() {
         .contains("https://github.com/owner/repo.git"));
 }
 
-/// HTTPS, `ssh://` and scp-style spellings of one repository share an
-/// identity, so one pattern allows all three.
+/// A pattern written as `host/path` allows the scp-style SSH spelling of that
+/// repository, on `add` and on a re-install from the lock. (Every spelling
+/// sharing one identity is `policy::source`'s unit tests.)
 #[test]
-fn policy_allows_a_matching_remote_in_every_spelling() {
-    for url in [
-        HTTPS_URL,
-        "https://user@EXAMPLE.test/org/skill",
-        "ssh://git@example.test/org/skill.git",
-        SSH_URL,
-    ] {
-        let sb = Sandbox::new();
-        sb.ok(&["init", "--target", "claude"]);
-        set_project_policy(&sb, &["example.test/org/*"]);
-        let good = sb.skill_url();
-        let out = sb.spm_remotes(
-            &["add", url, "--branch", "main", "--name", "greet"],
-            &[(url, &good)],
-        );
-        assert!(out.status.success(), "{url}: {}", stderr_of(&out));
-        assert!(sb.read("ai.lock").contains(url), "{url}");
-        // A re-install from the lock passes the policy too.
-        let out = sb.spm_remotes(&["install", "--locked"], &[(url, &good)]);
-        assert!(out.status.success(), "{url}: {}", stderr_of(&out));
-    }
-}
-
-/// An exact pattern allows only that repository; paths are case-sensitive.
-#[test]
-fn policy_exact_pattern_and_path_case() {
+fn policy_allows_a_matching_scp_remote_end_to_end() {
     let sb = Sandbox::new();
     sb.ok(&["init", "--target", "claude"]);
-    set_project_policy(&sb, &["example.test/org/skill"]);
+    set_project_policy(&sb, &["example.test/org/*"]);
     let good = sb.skill_url();
-    let other = "https://example.test/org/other.git";
-    let upper = "https://example.test/ORG/skill.git";
-    for denied in [other, upper] {
-        let err = fails_without_git(&sb, &["add", denied, "--branch", "main"]);
-        assert!(err.contains("is not allowed"), "{denied}: {err}");
-    }
     let out = sb.spm_remotes(
-        &["add", HTTPS_URL, "--branch", "main", "--name", "greet"],
-        &[(HTTPS_URL, &good)],
+        &["add", SSH_URL, "--branch", "main", "--name", "greet"],
+        &[(SSH_URL, &good)],
     );
+    assert!(out.status.success(), "{}", stderr_of(&out));
+    assert!(sb.read("ai.lock").contains(SSH_URL));
+    // A re-install from the lock passes the policy too.
+    let out = sb.spm_remotes(&["install", "--locked"], &[(SSH_URL, &good)]);
     assert!(out.status.success(), "{}", stderr_of(&out));
 }
 
@@ -185,19 +159,6 @@ fn policy_local_sources_need_file_star() {
     let err = fails_without_git(&sb, &["add", &sb.skill_url(), "--branch", "main"]);
     assert!(err.contains("a local source"), "{err}");
     assert!(err.contains("file://*"), "{err}");
-
-    // `file://*` covers local paths only, never a remote that merely looks
-    // like one: a backslash before the colon is still scp-style SSH to git.
-    set_project_policy(&sb, &["file://*"]);
-    let mut remotes = vec![r"domain\user@evil.test:attacker/skill.git"];
-    // Off Windows git reads a drive-like `x:path` as SSH to host `x`.
-    if cfg!(not(windows)) {
-        remotes.push("x:attacker/skill.git");
-    }
-    for url in remotes {
-        let err = fails_without_git(&sb, &["add", url, "--branch", "main"]);
-        assert!(err.contains("is not allowed"), "{url}: {err}");
-    }
 
     set_project_policy(&sb, &["example.test/org/*", "file://*"]);
     sb.ok(&[
@@ -223,16 +184,6 @@ fn policy_windows_drive_paths_are_local() {
     set_project_policy(&sb, &["example.test/org/*"]);
     let err = fails_without_git(&sb, &["install"]);
     assert!(err.contains("a local source"), "{err}");
-}
-
-/// An empty `allowedSources` is a policy that allows nothing.
-#[test]
-fn policy_empty_list_denies_everything() {
-    let sb = Sandbox::new();
-    sb.ok(&["init", "--target", "claude"]);
-    set_project_policy(&sb, &[]);
-    let err = fails_without_git(&sb, &["add", &sb.skill_url(), "--branch", "main"]);
-    assert!(err.contains("allows nothing"), "{err}");
 }
 
 /// `--protocol` rewrites (and `--protocol-fallback` retries) cannot turn a

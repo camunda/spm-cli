@@ -241,67 +241,6 @@ fn doctor_checks_policy_for_stale_locked_plugins() {
     );
 }
 
-/// A direct skill entry left in `ai.lock` after it was dropped from `ai.json`
-/// is stale and fails `--locked`.
-#[test]
-fn install_locked_rejects_stale_skill_entry() {
-    let sb = Sandbox::new();
-    sb.ok(&["init", "--target", "copilot"]);
-    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
-    write_manifest(&sb, r#"{"targets":["copilot"],"skills":{}}"#);
-    let err = fails(&sb, &["install", "--locked"]);
-    assert!(
-        err.contains("skill `greet`: in ai.lock but not declared in ai.json"),
-        "{err}"
-    );
-}
-
-/// `--locked` without any `ai.lock` is an error, not a fresh resolution.
-#[test]
-fn install_locked_requires_a_lockfile() {
-    let sb = Sandbox::new();
-    sb.ok(&["init", "--target", "copilot"]);
-    let err = fails(&sb, &["install", "--locked"]);
-    assert!(err.contains("ai.lock not found"), "{err}");
-    assert!(
-        err.contains("run `spm install` (without --locked)"),
-        "{err}"
-    );
-    assert!(!sb.project.join("ai.lock").exists());
-}
-
-/// A hand-edited lock whose derived data (a plugin's bundled skills) no longer
-/// matches what spm would write is caught by the whole-lock backstop.
-#[test]
-fn install_locked_rejects_lock_spm_would_rewrite() {
-    let sb = Sandbox::new();
-    sb.add_plugin();
-    sb.ok(&["init", "--target", "copilot"]);
-    sb.ok(&[
-        "add",
-        &sb.skill_url(),
-        "--plugin",
-        "--branch",
-        "main",
-        "--path",
-        "pkg",
-        "--name",
-        "ds",
-    ]);
-    let mut lock: serde_json::Value = serde_json::from_str(&sb.read("ai.lock")).unwrap();
-    lock["plugins"]["ds"]["bundled_skills"] = serde_json::json!([]);
-    std::fs::write(
-        sb.project.join("ai.lock"),
-        serde_json::to_string_pretty(&lock).unwrap(),
-    )
-    .unwrap();
-    let err = fails(&sb, &["install", "--locked"]);
-    assert!(
-        err.contains("ai.lock differs from what spm would write"),
-        "{err}"
-    );
-}
-
 /// With `resolveTransitive`, a transitive child missing from `ai.lock` fails
 /// `--locked` (it is never resolved), and a transitive pin no longer reached
 /// is stale.

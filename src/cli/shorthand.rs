@@ -204,7 +204,10 @@ mod tests {
             "github.com/o/r@ v1",
             "github.com/@v1",
         ] {
-            assert!(parse(input).is_err(), "{input} should be rejected");
+            let err = format!("{:#}", parse(input).unwrap_err());
+            assert!(err.contains("invalid GitHub shorthand"), "{input}: {err}");
+            let shape = err.contains("github.com/<owner>/<repo>[@<ref>]");
+            assert!(shape || err.contains("is not a valid ref"), "{err}");
         }
     }
 
@@ -254,19 +257,24 @@ mod tests {
 
     #[test]
     fn ref_conflicts_with_explicit_version_flags() {
-        let v = VersionArg {
-            tag: None,
-            branch: Some("main".into()),
-            commit: None,
-            range: None,
+        let arg = |flag: usize| {
+            let set = |i: usize| (flag == i).then(|| "x".to_string());
+            VersionArg {
+                tag: set(0),
+                branch: set(1),
+                commit: set(2),
+                range: set(3),
+            }
         };
-        let err = expand("github.com/o/r@v1".into(), v, &Policy::default())
-            .err()
-            .unwrap();
-        assert!(
-            format!("{err:#}").contains("already names a ref"),
-            "{err:#}"
-        );
+        for v in (0..4).map(arg) {
+            let err = expand("github.com/o/r@v1".into(), v, &Policy::default())
+                .err()
+                .unwrap();
+            assert!(
+                format!("{err:#}").contains("already names a ref"),
+                "{err:#}"
+            );
+        }
     }
 
     /// `@<ref>` is tag/branch/commit only; a range must come from `--version`

@@ -148,6 +148,68 @@ mod tests {
         }
     }
 
+    /// Each layer of `parse` (schema, then model) rejects a bad spec with an
+    /// error naming what is wrong, before anything is fetched.
+    #[test]
+    fn parse_rejects_bad_targets_selectors_and_paths() {
+        let p = Path::new("ai.json");
+        let skill = |spec: &str| format!(r#"{{"targets":["claude"],"skills":{{"x":{spec}}}}}"#);
+        let sha = "a".repeat(40);
+        for (json, needle) in [
+            (
+                r#"{"targets":["bogus"],"skills":{}}"#.to_string(),
+                "does not match schema",
+            ),
+            (skill(r#"{"git":"u"}"#), "oneOf"),
+            (
+                skill(r#"{"git":"u","version":"^1","tag":"v1.0.0"}"#),
+                "oneOf",
+            ),
+            (
+                skill(r#"{"git":"u","version":""}"#),
+                "does not match schema",
+            ),
+            (
+                skill(r#"{"git":"u","version":"banana"}"#),
+                "invalid version requirement",
+            ),
+            (
+                skill(r#"{"git":"u","commit":"abc1234"}"#),
+                "does not match schema",
+            ),
+            (
+                skill(r#"{"git":"u","tag":"v1","path":"../../../../etc"}"#),
+                "`..`",
+            ),
+            (
+                skill(r#"{"git":"u","tag":"v1","path":"/etc"}"#),
+                "relative to the repo root",
+            ),
+            (
+                r#"{"targets":["claude"],"skills":{"../../evil":{"git":"u","tag":"v1"}}}"#
+                    .to_string(),
+                "invalid skill name",
+            ),
+        ] {
+            let err = Manifest::parse(&json, p).unwrap_err();
+            assert!(format!("{err:#}").contains(needle), "{json}: {err:#}");
+        }
+        let ok = Manifest::parse(&skill(&format!(r#"{{"git":"u","commit":"{sha}"}}"#)), p);
+        assert!(ok.is_ok(), "{ok:?}");
+    }
+
+    /// `resolveTransitive` is a root flag, and an empty `allowedSources` is
+    /// kept as a policy allowing nothing — never read as "no policy".
+    #[test]
+    fn parse_keeps_resolve_transitive_and_an_empty_allowed_sources() {
+        let p = Path::new("ai.json");
+        let m = Manifest::parse(r#"{"targets":["copilot"],"resolveTransitive":true}"#, p).unwrap();
+        assert!(m.resolve_transitive);
+        assert_eq!(m.allowed_sources, None);
+        let m = Manifest::parse(r#"{"targets":["copilot"],"allowedSources":[]}"#, p).unwrap();
+        assert_eq!(m.allowed_sources, Some(Vec::new()));
+    }
+
     mod props {
         use super::*;
         use crate::manifest::testutil::{dep_name, edited, Scratch};
