@@ -352,7 +352,7 @@ fn check_contract(target: &str, global: bool, settings: Settings) {
     // (left on purpose, with spm's entries) may remain.
     clean(v, &scope, &skill_names, &plugin_names);
     let cleaned = snapshot(&sb.root);
-    for p in &clean_paths {
+    for p in &owned {
         assert!(
             std::fs::symlink_metadata(p).is_err(),
             "{ctx} clean left {}",
