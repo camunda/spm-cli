@@ -4,8 +4,9 @@ use super::session::{Access, ScopeSession};
 use crate::ids::DepName;
 use crate::links::Links;
 use crate::lockfile::{LockedSkill, Lockfile};
-use crate::manifest::{DependencyKind, Manifest, Version};
+use crate::manifest::{DependencyKind, Manifest};
 use crate::scope::Scope;
+use crate::version::Version;
 use anyhow::Result;
 use serde::Serialize;
 

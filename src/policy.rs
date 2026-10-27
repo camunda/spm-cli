@@ -20,7 +20,6 @@
 //! (`git::transport::with_transport`) and
 //! every store checkout, even a cached one (`store::ensure`), passes [`gate`].
 
-use crate::manifest::Manifest;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
 use std::path::Path;
@@ -47,7 +46,7 @@ impl Source {
     /// Classify a dependency's `git` value.
     ///
     /// Remotes with an HTTPS/SSH equivalent are first folded through
-    /// [`crate::git::remote_identity`] — the same equivalence `--protocol`
+    /// [`crate::remote::remote_identity`] — the same equivalence `--protocol`
     /// rewriting relies on — so the interchangeable spellings of one repository
     /// can never be judged differently. Everything else is parsed strictly and
     /// fails closed to [`Source::Opaque`].
@@ -59,7 +58,7 @@ impl Source {
         if s.trim() != s {
             return Source::Opaque;
         }
-        if let Some(identity) = crate::git::remote_identity(s) {
+        if let Some(identity) = crate::remote::remote_identity(s) {
             return match identity
                 .strip_prefix("https://")
                 .and_then(|r| r.split_once('/'))
@@ -356,11 +355,12 @@ pub struct Policy {
 }
 
 impl Policy {
-    /// The policy for a command operating on `manifest` (read from `manifest_path`):
-    /// the machine layer, if configured, plus the manifest's `allowedSources`.
-    pub fn load(manifest: &Manifest, manifest_path: &Path) -> Result<Policy> {
+    /// The policy for a command operating on the `ai.json` at `manifest_path`:
+    /// the machine layer, if configured, plus the manifest's `allowedSources`
+    /// (`allowed_sources`), if set.
+    pub fn load(allowed_sources: Option<&[String]>, manifest_path: &Path) -> Result<Policy> {
         let mut policy = Policy::machine()?;
-        if let Some(raw) = &manifest.allowed_sources {
+        if let Some(raw) = allowed_sources {
             policy.layers.push(Layer::new(
                 format!(
                     "project policy `allowedSources` in {}",
@@ -446,12 +446,12 @@ impl Policy {
 /// The policy the current command activated (see [`activate`]).
 static ACTIVE: Mutex<Option<Arc<Policy>>> = Mutex::new(None);
 
-/// Load the policy for `manifest` (in `dir`) and make it the one [`gate`]
-/// enforces for the rest of the process. Returns it for up-front checks.
-pub fn activate(manifest: &Manifest, dir: &Path) -> Result<Arc<Policy>> {
-    let policy = Arc::new(Policy::load(manifest, &Manifest::path_in(dir))?);
+/// Make `policy` (see `Manifest::policy`) the one [`gate`] enforces for the
+/// rest of the process. Returns it for up-front checks.
+pub fn activate(policy: Policy) -> Arc<Policy> {
+    let policy = Arc::new(policy);
     *ACTIVE.lock().unwrap_or_else(|e| e.into_inner()) = Some(policy.clone());
-    Ok(policy)
+    policy
 }
 
 /// The backstop every source access goes through. Uses the activated policy;

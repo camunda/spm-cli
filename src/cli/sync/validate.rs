@@ -9,10 +9,11 @@ use crate::ids::DepName;
 use crate::links::{Linked, Links};
 use crate::lockfile::{LockedSkill, Lockfile};
 use crate::manifest::Manifest;
+use crate::materialized::{MaterializedPlugin, MaterializedSkill};
 use crate::owned::{Owned, Ownership};
 use crate::policy::Policy;
 use crate::scope::Scope;
-use crate::vendor::{MaterializedPlugin, MaterializedSkill, Vendor};
+use crate::vendor::Vendor;
 use anyhow::{bail, Result};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -53,7 +54,7 @@ pub(super) fn preflight(
     }
     // Source policy: judge every direct source before any network access, and
     // report all denied ones at once.
-    let policy = crate::policy::activate(manifest, dir)?;
+    let policy = crate::policy::activate(manifest.policy(dir)?);
     // `ai.lock` never depends on links, and a lock-only sync writes nothing
     // else, so it ignores them (a missing linked directory can't block it).
     let linked = if run.lock_only || run.check {

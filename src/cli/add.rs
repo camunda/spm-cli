@@ -46,7 +46,7 @@ pub(super) fn add(scope: &Scope, req: AddRequest) -> Result<()> {
     //
     // The source policy is checked here, before `ai.json` is touched and before
     // any git call (the shorthand's ref lookup checks the expanded URL first).
-    let policy = crate::policy::activate(&manifest, &dir)?;
+    let policy = crate::policy::activate(manifest.policy(&dir)?);
     let (git, version) = shorthand::expand(git, version, &policy)?;
     policy
         .check(&git)

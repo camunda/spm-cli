@@ -12,4 +12,4 @@ pub use repository::{
     default_branch, fetch_commit, is_at_commit, is_ignored, is_tracked, ls_remote, probe,
     remote_ref_names, remote_refs, Reach,
 };
-pub use transport::{contacts_over_ssh, remote_identity, set_transport, Protocol, Transport};
+pub use transport::{contacts_over_ssh, set_transport, Transport};

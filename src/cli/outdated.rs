@@ -4,8 +4,9 @@ use super::session::{Access, ScopeSession};
 use crate::git;
 use crate::ids::{DepName, LockReference};
 use crate::lockfile::{LockedSkill, Lockfile};
-use crate::manifest::{semver_of_tag, DependencyKind, Version};
+use crate::manifest::DependencyKind;
 use crate::scope::Scope;
+use crate::version::{semver_of_tag, Version};
 use anyhow::{bail, Result};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -231,7 +232,7 @@ pub(super) fn outdated(
     let manifest = session.manifest()?;
     // Every remote this reports on is queried through the policy gate; a denied
     // source shows up as an error row instead of being contacted.
-    crate::policy::activate(&manifest, session.dir())?;
+    crate::policy::activate(manifest.policy(session.dir())?);
     let lock = session.lockfile()?;
     if let Some(name) = name {
         if !lock.contains_dependency(name) {
@@ -961,7 +962,7 @@ mod tests {
 
     #[test]
     fn summary_routes_range_rows_to_update_or_a_wider_range() {
-        use crate::manifest::Version;
+        use crate::version::Version;
         let range = || Some(Version::Range("^1.2".into()));
         let report = OutdatedReport {
             scope: "project",

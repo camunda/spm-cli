@@ -1,7 +1,8 @@
 use crate::git;
 use crate::ids::{CommitSha, LockReference, StoreKey};
 use crate::lockfile::LockedSkill;
-use crate::manifest::{parse_version_req, semver_of_tag, SkillSpec, Version};
+use crate::manifest::SkillSpec;
+use crate::version::{parse_version_req, semver_of_tag, Version};
 use anyhow::{bail, Result};
 use std::collections::BTreeMap;
 

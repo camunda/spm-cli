@@ -37,9 +37,9 @@
 use crate::ids::{CommitSha, DepName, LockReference, StoreKey};
 use crate::lockfile::{LockedSkill, Satisfied};
 use crate::manifest::{DependencyManifest, Manifest, SkillSpec};
+use crate::materialized::MaterializedSkill;
 use crate::resolver;
 use crate::store;
-use crate::vendor::MaterializedSkill;
 use anyhow::{bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -203,8 +203,8 @@ struct ConflictSide<'a> {
 /// Transport-equivalent spellings of the *same* remote are also folded to one
 /// identity: `https://host/o/r`, `ssh://git@host/o/r` and scp-style
 /// `git@host:o/r` all normalize to the canonical HTTPS form via
-/// [`git::remote_identity`], reusing the exact HTTPS/SSH equivalence that
-/// `--protocol` rewriting relies on, so a dependency cannot evade `(git, path)`
+/// [`crate::remote::remote_identity`], reusing the exact HTTPS/SSH equivalence
+/// that `--protocol` rewriting relies on, so a dependency cannot evade `(git, path)`
 /// deduplication or version-conflict detection by requesting a repo through a
 /// different protocol.
 pub fn normalize_git(url: &str) -> String {
@@ -215,7 +215,7 @@ pub fn normalize_git(url: &str) -> String {
     // spelling supplied. Sources with no such equivalent (`file://`, a port,
     // userinfo, a non-`git` SSH user, a local path) return `None` and keep their
     // literal, protocol-specific identity below.
-    if let Some(identity) = crate::git::remote_identity(s) {
+    if let Some(identity) = crate::remote::remote_identity(s) {
         return strip_git_suffix(&identity);
     }
 
