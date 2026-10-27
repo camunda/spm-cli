@@ -71,7 +71,8 @@ generated source to regenerate.
 | `update/` | Update GitHub Action (`camunda/spm-cli/update@v0`): entry point for `action/lib/update.mjs`, which opens one PR per outdated dependency (`action/lib/report.mjs` builds branch names + PR bodies, `action/lib/github.mjs` is the REST client). |
 | `action/test/` | `node --test` suites for both actions, against the real debug `spm`, throwaway git repos and a fake GitHub API; `release.test.mjs` guards release-workflow drift (targets, tag triggers, action inputs/outputs). |
 | `Makefile` | Convenience shortcuts over `cargo` (`make check` mirrors the CI gate). |
-| `.cargo-husky/hooks/` | Pre-commit hook (fmt + clippy) auto-installed via `cargo-husky` on first `cargo test`/`build`. |
+| `.cargo-husky/hooks/` | Git hooks auto-installed via `cargo-husky` on first `cargo test`/`build`: `pre-commit` (fmt + clippy) and `commit-msg` (commitlint via `scripts/commitlint.sh`). |
+| `scripts/commitlint.sh` | Runs the same commitlint as CI (`@commitlint/cli` + `config-conventional`, reading `commitlint.config.js`) on one message (`--edit`, the `commit-msg` hook) or on `origin/main..HEAD` (`make commitlint`). Rules are not re-implemented. |
 | `.github/workflows/` | `ci.yml` (fmt + clippy + test + MSRV), `release.yml`, `publish.yml`. |
 
 ## Build / test / lint
@@ -87,7 +88,8 @@ make test-action  # cargo build + node --test the GitHub Actions (Node 24)
 make fmt          # cargo fmt --all
 make fmt-check    # fail if not formatted
 make lint         # cargo clippy --all-targets -- -D warnings
-make check        # fmt-check + lint + test + test-action  ← the full CI gate
+make commitlint   # commitlint origin/main..HEAD, as CI does (needs Node)
+make check        # fmt-check + lint + test + test-action + commitlint  ← the full CI gate
 make run ARGS=".." # cargo run -- $(ARGS)
 make install      # release build → $(PREFIX)/bin/spm  (default /usr/local)
 ```
@@ -198,12 +200,30 @@ Format:
 <body>
 ```
 
-Common `type` values: `feat`, `fix`, `chore`, `docs`, `style`, `refactor`,
-`test`, `ci`, `build`, `perf`. Rules:
+Rules (errors in `@commitlint/config-conventional` fail CI):
 
-- Imperative, lowercase subject ("add SSH support", not "Added SSH support").
+- **Header ≤ 100 characters** — the whole `type(scope): subject` line, not just
+  the subject. Aim for ≤ 72.
+- **Body and footer lines ≤ 100 characters** each — wrap them (a long URL
+  belongs on its own line, and still must fit).
+- `type` is lowercase and one of `build`, `chore`, `ci`, `docs`, `feat`, `fix`,
+  `perf`, `refactor`, `revert`, `style`, `test`.
+- Subject is non-empty, imperative and lowercase ("add SSH support", not
+  "Added SSH support" — no sentence-, start-, pascal- or upper-case), with **no
+  trailing period**, and the header has no leading/trailing whitespace.
+- A **blank line** separates the header from the body and the body from the
+  footer (warnings in CI, but keep them).
 - Keep the subject concise; put rationale, links, and detail in the body.
 - Mark breaking changes with `BREAKING CHANGE:` in the body/footer.
+
+These fail **before** the push: the `commit-msg` hook in `.cargo-husky/hooks/`
+(installed by `cargo test`/`cargo build`) runs `scripts/commitlint.sh`, the same
+commitlint and config as CI, on every `git commit`, and `make commitlint` (part
+of `make check`) lints every commit in `origin/main..HEAD`. Both need Node
+(`npx`). cargo-husky installs hooks only when its build script runs, so a clone
+made before a hook was added picks it up after `cargo clean -p cargo-husky &&
+cargo test --no-run`. Fix a rejected message with `git commit --amend` (or `git rebase -i`
+for older commits) rather than bypassing with `--no-verify`.
 
 Attribute the AI author with a **single** `Co-authored-by` trailer: the Copilot
 co-author line, with the model name as the author name. Do not add a second,

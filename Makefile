@@ -1,12 +1,12 @@
 # spm — common developer tasks.
-# `make check` mirrors the CI gate (fmt + clippy + test + action tests).
+# `make check` mirrors the CI gate (fmt + clippy + test + action tests + commitlint).
 
 CARGO   ?= cargo
 PREFIX  ?= /usr/local
 BINDIR  ?= $(PREFIX)/bin
 
 .DEFAULT_GOAL := build
-.PHONY: build release test test-action fmt fmt-check lint check run install uninstall clean bump bump-pr coverage coverage-check
+.PHONY: build release test test-action fmt fmt-check lint commitlint check run install uninstall clean bump bump-pr coverage coverage-check
 
 # Minimum line coverage (%). CI fails if `cargo test` drops below this.
 COVERAGE_MIN ?= 95
@@ -39,8 +39,12 @@ fmt-check:
 lint:
 	$(CARGO) clippy --all-targets -- -D warnings
 
-## check:      full CI gate — fmt-check + lint + test + test-action
-check: fmt-check lint test test-action
+## commitlint: lint this branch's commit messages (origin/main..HEAD) like CI (needs Node)
+commitlint:
+	scripts/commitlint.sh
+
+## check:      full CI gate — fmt-check + lint + test + test-action + commitlint
+check: fmt-check lint test test-action commitlint
 
 ## coverage:   print a per-file line-coverage report (needs cargo-llvm-cov)
 coverage:

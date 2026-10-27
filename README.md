@@ -614,7 +614,7 @@ To see what each harness actually loaded: `claude plugin list` /
 ## Development
 
 `make check` runs the full CI gate locally (`fmt-check` + `clippy` + `test` +
-`test-action`).
+`test-action` + `commitlint`).
 
 The [Architecture guide](docs/guide/architecture.md) maps the source: the
 module layering (pinned by `tests/cli/architecture.rs`), the command flow
@@ -626,8 +626,12 @@ crates.io, npm, and the GitHub Release) with `make bump` — `PART=patch|minor|m
 does the bump on a branch and opens the PR for you. See [`RELEASE.md`](RELEASE.md)
 for the full procedure.
 
-A **pre-commit hook** (fmt + clippy) installs itself automatically via
-[`cargo-husky`](https://github.com/rhysd/cargo-husky) — just run `cargo test`
-(or `cargo build`) once after cloning and the hook lands in `.git/hooks`. The
-hook source lives in [`.cargo-husky/hooks/`](.cargo-husky/hooks). Bypass a
-single commit with `git commit --no-verify`.
+A **pre-commit hook** (fmt + clippy) and a **commit-msg hook** (the same
+[commitlint](https://commitlint.js.org/) check CI runs, via
+[`scripts/commitlint.sh`](scripts/commitlint.sh); needs Node) install themselves
+automatically via [`cargo-husky`](https://github.com/rhysd/cargo-husky) — just
+run `cargo test` (or `cargo build`) once after cloning and the hooks land in
+`.git/hooks`. The hook sources live in [`.cargo-husky/hooks/`](.cargo-husky/hooks).
+A clone made before a hook was added picks it up after
+`cargo clean -p cargo-husky && cargo test --no-run`. Bypass a single commit with
+`git commit --no-verify`.

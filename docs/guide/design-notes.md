@@ -73,7 +73,7 @@ the checkout are detected and skipped rather than followed forever.
 ## Contributing
 
 `make check` runs the full CI gate locally (`fmt-check` + `clippy` + `test` +
-`test-action`). A
-pre-commit hook (fmt + clippy) installs itself automatically via `cargo-husky` —
-run `cargo test` (or `cargo build`) once after cloning. Bypass a single commit
-with `git commit --no-verify`.
+`test-action` + `commitlint`). A pre-commit hook (fmt + clippy) and a commit-msg
+hook (the same commitlint check CI runs; needs Node) install themselves
+automatically via `cargo-husky` — run `cargo test` (or `cargo build`) once after
+cloning. Bypass a single commit with `git commit --no-verify`.
