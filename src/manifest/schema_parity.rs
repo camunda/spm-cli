@@ -409,10 +409,20 @@ fn hand_cases() -> Vec<Case> {
         "spec as an array",
         with_spec(json!(["u", "v1"])),
     );
+    // Every field, in declaration order, with a valid value: only the
+    // object-only guard can reject it.
     push(
         "positional-manifest",
         "manifest as an array",
-        json!([["claude"]]).to_string(),
+        json!([
+            "./schema/ai.schema.json",
+            ["claude"],
+            false,
+            ["github.com/org/*"],
+            {"a": dep},
+            {"b": dep}
+        ])
+        .to_string(),
     );
     for name in [
         "", ".", "..", "a/b", "a\\b", "a:b", "a*b", "a?b", "a\u{1}b", "con", "aux.txt", "LPT1",
