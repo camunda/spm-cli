@@ -78,6 +78,8 @@ Add a `"$schema"` reference for editor autocompletion/validation:
 { "$schema": "./schema/ai.schema.json", "targets": ["claude"], "skills": {} }
 ```
 
+Commands that rewrite `ai.json` keep the reference.
+
 Version selectors (exactly one per skill):
 
 | field    | meaning                                    | locked to      |

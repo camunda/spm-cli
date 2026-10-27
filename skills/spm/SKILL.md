@@ -500,8 +500,9 @@ or npm pull in transitive dependencies.
   supply-chain surface.
 - **What is read.** Only the nested `ai.json` *co-located with a skill's own
   content* (the repo root, or the skill's `path` subdirectory for a monorepo),
-  and only its `skills` map. Nested `targets` and `plugins` are ignored;
-  transitive skills always inherit your root `targets`.
+  and only its `skills` map, whose entries are checked like root ones (an
+  unknown key or explicit `null` is rejected). Nested `targets` and `plugins`
+  are ignored; transitive skills always inherit your root `targets`.
 - **Scan still gates it.** Every fetched skill (direct or transitive) passes the
   [content scan](#content-scan) **before** its nested manifest is read or its
   own dependencies are fetched, so a blocked skill aborts before recursion.

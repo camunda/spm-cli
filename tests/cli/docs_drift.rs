@@ -1,5 +1,6 @@
-//! Drift guards: the shipped agent skill documents every command and flag, and
-//! the command overviews in the docs are generated from the CLI itself.
+//! Drift guards: the shipped agent skill documents every command and flag, the
+//! command overviews in the docs are generated from the CLI itself, and the
+//! targets guide lists every supported target.
 
 use crate::common::*;
 use std::path::{Path, PathBuf};
@@ -867,4 +868,45 @@ fn shipped_skill_installs_with_spm_add_path() {
         .join(".agents/skills/spm-managed-skills/spm/SKILL.md");
     assert!(installed.exists(), "skill not materialized");
     assert!(sb.read("ai.json").contains("\"path\": \"skills/spm\""));
+}
+
+// ---------------------------------------------------------------------------
+// Targets table (`docs/guide/targets.md`)
+// ---------------------------------------------------------------------------
+
+/// The first column of the Markdown table headed `| Target |`: the backticked
+/// target ids, in row order.
+fn targets_table(doc: &str) -> Vec<String> {
+    let mut lines = doc
+        .lines()
+        .skip_while(|l| !l.starts_with("| Target "))
+        .skip(2);
+    std::iter::from_fn(|| lines.next().filter(|l| l.starts_with('|')))
+        .map(|row| {
+            let cell = row.split('|').nth(1).unwrap_or_default().trim();
+            cell.trim_matches('`').to_string()
+        })
+        .collect()
+}
+
+/// The targets table in the targets guide lists exactly the targets the CLI
+/// accepts (`spm target add`'s possible values: `vendor::ALL_TARGETS`), in
+/// the same order.
+#[test]
+fn targets_guide_table_lists_every_target() {
+    let sb = Sandbox::new();
+    let help = short_help(&sb, &["target", "add"]);
+    let accepted = help_entries(&help, "Arguments:")
+        .into_iter()
+        .find(|e| e.value.as_deref() == Some("[VENDORS]..."))
+        .expect("`spm target add` takes [VENDORS]...")
+        .possible;
+    assert!(!accepted.is_empty(), "no possible values in:\n{help}");
+    let file = "docs/guide/targets.md";
+    let doc = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(file)).unwrap();
+    assert_eq!(
+        targets_table(&doc),
+        accepted,
+        "the `| Target |` table in {file} must list every supported target, and nothing else"
+    );
 }

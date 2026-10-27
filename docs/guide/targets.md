@@ -1,9 +1,19 @@
 # Targets & Vendors
 
 `targets` in [`ai.json`](/reference/ai-json) lists one or more vendors. A skill
-resolves once and projects into each target independently. Eight vendors are
-supported today: `amp`, `claude`, `cline`, `codex`, `copilot`, `cursor`,
-`gemini`, and `windsurf`.
+resolves once and projects into each target independently. The supported
+targets:
+
+| Target     | Tool                                       | Project directory                           | Global directory                           |
+|------------|--------------------------------------------|---------------------------------------------|--------------------------------------------|
+| `amp`      | [Amp](#amp)                                | `.agents/skills/<name>/`                    | `~/.config/agents/skills/<name>/`          |
+| `claude`   | [Claude Code](#claude-code)                | `.spm/claude/` (marketplace)                | `$SPM_HOME/claude-global/` (marketplace)   |
+| `cline`    | [Cline](#cline)                            | `.cline/skills/<name>/`                     | `~/.cline/skills/<name>/`                  |
+| `codex`    | [OpenAI Codex CLI](#openai-codex-cli)      | `.agents/skills/<name>/`                    | `~/.agents/skills/<name>/`                 |
+| `copilot`  | [GitHub Copilot CLI](#github-copilot-cli)  | `.agents/skills/spm-managed-skills/<name>/` | `~/.copilot/skills/<name>/`                |
+| `cursor`   | [Cursor](#cursor)                          | `.cursor/skills/<name>/`                    | `~/.cursor/skills/<name>/`                 |
+| `gemini`   | [Gemini CLI](#gemini-cli)                  | `.gemini/skills/<name>/`                    | `~/.gemini/skills/<name>/`                 |
+| `windsurf` | [Windsurf](#windsurf)                      | `.windsurf/skills/<name>/`                  | `~/.codeium/windsurf/skills/<name>/`       |
 
 Add or remove targets at any time:
 
