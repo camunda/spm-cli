@@ -1,4 +1,5 @@
 mod claude;
+mod contract_tests;
 mod dirskills;
 mod shareddir;
 
@@ -222,6 +223,7 @@ pub fn remove_paths(paths: &[PathBuf]) -> Result<()> {
 /// the `targets` enum in `schema/ai.schema.json` by
 /// [`all_targets_match_schema_enum`](tests::all_targets_match_schema_enum), and
 /// with the targets table in `docs/guide/targets.md` by the CLI docs-drift tests.
+/// Every entry is held to the generic vendor contract by `contract_tests`.
 pub const ALL_TARGETS: &[&str] = &[
     "amp", "claude", "cline", "codex", "copilot", "cursor", "gemini", "windsurf",
 ];
