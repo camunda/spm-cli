@@ -167,6 +167,21 @@ jobs:
       - name: coverage
         run: make coverage-check
 
+  # Fails on a dependency declared in Cargo.toml that no code uses (dead
+  # weight in every build and in the supply-chain surface). `cargo-deny`
+  # (licenses, advisories, bans) runs in security.yml.
+  machete:
+    name: unused dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-machete
+      - name: cargo machete
+        run: make machete
+
   # Guards the `rust-version` (MSRV) we publish in Cargo.toml: the matrix above
   # only exercises `stable`, so without this a newer-than-1.97 API could slip in
   # and break `cargo install` for users on the declared minimum toolchain.

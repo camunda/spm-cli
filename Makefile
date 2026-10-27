@@ -6,7 +6,7 @@ PREFIX  ?= /usr/local
 BINDIR  ?= $(PREFIX)/bin
 
 .DEFAULT_GOAL := build
-.PHONY: build release test test-action fmt fmt-check lint commitlint check run install uninstall clean bump bump-pr coverage coverage-check
+.PHONY: build release test test-action fmt fmt-check lint machete commitlint check run install uninstall clean bump bump-pr coverage coverage-check
 
 # Minimum line coverage (%). CI fails if `cargo test` drops below this.
 COVERAGE_MIN ?= 95
@@ -38,6 +38,10 @@ fmt-check:
 ## lint:       clippy with warnings as errors
 lint:
 	$(CARGO) clippy --all-targets -- -D warnings
+
+## machete:    fail on unused dependencies (needs cargo-machete)
+machete:
+	$(CARGO) machete
 
 ## commitlint: lint this branch's commit messages (origin/main..HEAD) like CI (needs Node)
 commitlint:
