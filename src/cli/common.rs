@@ -3,9 +3,12 @@
 use crate::git;
 use crate::remote::Protocol;
 use crate::scope::Scope;
+use crate::vendor;
 use anyhow::Result;
+use clap::builder::{PossibleValue, StringValueParser, TypedValueParser};
 use clap::Args;
 use serde::Serialize;
+use std::ffi::OsStr;
 use std::path::Path;
 
 #[derive(Args)]
@@ -128,6 +131,29 @@ impl TransportArgs {
             force: self.protocol,
             fallback: self.protocol_fallback,
         });
+    }
+}
+
+/// Parses a target vendor name. Any string is accepted here, so an unknown name
+/// still gets spm's own `unknown target` error, but `--help` (and the generated
+/// command overview in the docs) lists [`vendor::ALL_TARGETS`] as the possible values.
+#[derive(Clone)]
+pub(crate) struct TargetParser;
+
+impl TypedValueParser for TargetParser {
+    type Value = String;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        arg: Option<&clap::Arg>,
+        value: &OsStr,
+    ) -> std::result::Result<String, clap::Error> {
+        StringValueParser::new().parse_ref(cmd, arg, value)
+    }
+
+    fn possible_values(&self) -> Option<Box<dyn Iterator<Item = PossibleValue> + '_>> {
+        Some(Box::new(vendor::ALL_TARGETS.iter().map(PossibleValue::new)))
     }
 }
 
