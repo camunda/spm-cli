@@ -1794,9 +1794,10 @@ fn diagram_span(doc: &str) -> std::ops::Range<usize> {
     open + 1..close
 }
 
-/// Parse the module-layering diagram in `doc`. Only a bare `flowchart`/`graph`
-/// header (keyword and direction alone), `%%` comments, `from --> to` edges and bare node names are
-/// accepted, so the diagram cannot hold anything this check would miss.
+/// Parse the module-layering diagram in `doc`. Exactly one bare `flowchart`/`graph`
+/// header (keyword and direction alone) must be the first statement; beyond it only `%%`
+/// comments, `from --> to` edges and bare node names are accepted, so the diagram cannot
+/// hold anything this check would miss.
 fn parse_diagram(doc: &str) -> Diagram {
     let lines: Vec<&str> = doc.lines().collect();
     let mut diagram = Diagram {
@@ -1811,11 +1812,25 @@ fn parse_diagram(doc: &str) -> Diagram {
             ["flowchart" | "graph", "TD" | "TB" | "BT" | "LR" | "RL"]
         )
     };
+    let mut seen_header = false;
     for line in &lines[diagram_span(doc)] {
         let line = line.trim();
-        if line.is_empty() || line.starts_with("%%") || is_header(line) {
+        if line.is_empty() || line.starts_with("%%") {
             continue;
         }
+        if is_header(line) {
+            assert!(
+                !seen_header,
+                "repeated header in the module diagram of {DIAGRAM_DOC}: `{line}`"
+            );
+            seen_header = true;
+            continue;
+        }
+        assert!(
+            seen_header,
+            "missing header in the module diagram of {DIAGRAM_DOC}: \
+             the first statement must be `flowchart TD`"
+        );
         match line.split_once("-->").map(|(f, t)| (f.trim(), t.trim())) {
             Some((from, to)) if is_name(from) && is_name(to) => {
                 diagram.nodes.extend([from.to_string(), to.to_string()]);
@@ -1830,6 +1845,11 @@ fn parse_diagram(doc: &str) -> Diagram {
             ),
         }
     }
+    assert!(
+        seen_header,
+        "missing header in the module diagram of {DIAGRAM_DOC}: \
+         the first statement must be `flowchart TD`"
+    );
     diagram
 }
 
@@ -1959,13 +1979,35 @@ after
 #[test]
 #[should_panic(expected = "unsupported line")]
 fn diagram_parser_rejects_lines_it_cannot_check() {
-    parse_diagram("<!-- module-graph: x -->\n```mermaid\n  cli -.-> paths\n```\n");
+    parse_diagram("<!-- module-graph: x -->\n```mermaid\nflowchart TD\n  cli -.-> paths\n```\n");
 }
 
 #[test]
 #[should_panic(expected = "unsupported line")]
 fn diagram_parser_rejects_statements_after_the_header() {
-    parse_diagram("<!-- module-graph: x -->\n```mermaid\nflowchart TD; cli --> paths\n```\n");
+    parse_diagram(
+        "<!-- module-graph: x -->\n```mermaid\nflowchart TD\nflowchart TD; cli --> paths\n```\n",
+    );
+}
+
+#[test]
+#[should_panic(expected = "missing header")]
+fn diagram_parser_rejects_a_missing_header() {
+    parse_diagram("<!-- module-graph: x -->\n```mermaid\n  cli --> paths\n```\n");
+}
+
+#[test]
+#[should_panic(expected = "missing header")]
+fn diagram_parser_rejects_an_empty_diagram() {
+    parse_diagram("<!-- module-graph: x -->\n```mermaid\n```\n");
+}
+
+#[test]
+#[should_panic(expected = "repeated header")]
+fn diagram_parser_rejects_a_repeated_header() {
+    parse_diagram(
+        "<!-- module-graph: x -->\n```mermaid\nflowchart TD\n  cli --> paths\nflowchart TD\n```\n",
+    );
 }
 
 #[test]

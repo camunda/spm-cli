@@ -151,8 +151,8 @@ flowchart TD
   end
 
   verdict --> manifest["write ai.json<br/>add / remove / target add only"]
-  verdict --> apply
-  manifest --> apply
+  verdict --> pending
+  manifest --> pending
   subgraph applyphase ["Plan::apply"]
     pending["write pending links file<br/>linked plugins' skills, before any vendor write"]
     apply["materialize into every target<br/>and record ownership"]
