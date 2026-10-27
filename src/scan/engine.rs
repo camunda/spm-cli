@@ -760,7 +760,9 @@ mod tests {
                 .collect();
             prop_oneof![
                 prop::sample::select(fixture_names),
-                "[a-z]{1,3}\\.(md|sh|txt)",
+                "[a-z]{1,3}\\.(md|sh|txt)".prop_filter("a Windows reserved device name", |n| {
+                    crate::ids::DepName::try_from(n.as_str()).is_ok()
+                }),
             ]
         }
 
@@ -802,6 +804,20 @@ mod tests {
             let out = scan_path(&dir).unwrap();
             std::fs::remove_dir_all(&dir).unwrap();
             out.iter().map(|f| (f.severity, f.render())).collect()
+        }
+
+        proptest! {
+            // Cheap (no filesystem), so enough cases to reach the rare
+            // reserved stems among the three-letter ones.
+            #![proptest_config(crate::proptest_config(100_000))]
+
+            /// Every generated file name can be created on every supported
+            /// platform (no Windows device names such as `con.md`), so a
+            /// failing case is a scanner defect, never a fixture-setup one.
+            #[test]
+            fn generated_names_are_portable(n in name()) {
+                prop_assert!(crate::ids::DepName::try_from(n.as_str()).is_ok(), "{n}");
+            }
         }
 
         proptest! {
