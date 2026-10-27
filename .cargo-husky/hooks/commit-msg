@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+#
+# spm commit-msg hook (installed automatically by cargo-husky on `cargo test`).
+# Runs the commitlint CI runs on the new message, so a bad header (e.g. over
+# 100 characters) is rejected at `git commit` instead of after the push.
+# Run `git commit --no-verify` to bypass in a pinch.
+set -euo pipefail
+
+exec "$(git rev-parse --show-toplevel)/scripts/commitlint.sh" --edit "$1"
