@@ -1,9 +1,11 @@
 import { defineConfig } from "vitepress";
+import { withMermaid } from "vitepress-plugin-mermaid";
 
 const description =
   "A skill package manager: declare AI skills as git dependencies in ai.json and materialize them for Claude Code and GitHub Copilot CLI — without committing skills to your repo.";
 
-export default defineConfig({
+// `withMermaid` renders ```mermaid blocks (e.g. the Architecture page).
+export default withMermaid(defineConfig({
   title: "spm",
   description,
   lang: "en-US",
@@ -15,6 +17,15 @@ export default defineConfig({
 
   // Docs are derived from README/schema; dead internal links must fail the build.
   ignoreDeadLinks: false,
+
+  // vitepress-plugin-mermaid bundles mermaid's core (~700 kB) into the app
+  // chunk; budget for it instead of warning on every build, while still
+  // flagging any further growth.
+  vite: {
+    build: {
+      chunkSizeWarningLimit: 800,
+    },
+  },
 
   head: [
     ["link", { rel: "icon", href: "/spm-cli/favicon.svg", type: "image/svg+xml" }],
@@ -67,6 +78,7 @@ export default defineConfig({
           { text: "CI & Automated Updates", link: "/guide/ci" },
           { text: "Agent Skill", link: "/guide/agent-skill" },
           { text: "Design Notes", link: "/guide/design-notes" },
+          { text: "Architecture", link: "/guide/architecture" },
         ],
       },
       {
@@ -99,4 +111,4 @@ export default defineConfig({
       copyright: "Copyright © Camunda",
     },
   },
-});
+}));
