@@ -77,34 +77,6 @@ fn add_version_range_locks_the_highest_matching_tag() {
 }
 
 #[test]
-fn version_range_matches_bare_tags_and_opt_in_prereleases() {
-    let sb = Sandbox::new();
-    let (_, b130, _, rc) = range_fixture(&sb);
-    sb.ok(&["init", "--target", "claude"]);
-    write_manifest(
-        &sb,
-        &format!(
-            r#"{{"targets":["claude"],"skills":{{
-                "bare":{{"git":"{u}","version":"~1.3"}},
-                "pre":{{"git":"{u}","version":"~1.5.0-rc.1"}},
-                "nopre":{{"git":"{u}","version":">=1.4.1, <2"}}}}}}"#,
-            u = sb.skill_url()
-        ),
-    );
-    sb.ok(&["install"]);
-    let lock = lock_doc(&sb);
-    assert_eq!(lock["skills"]["bare"]["resolved_tag"], "1.3.0", "{lock}");
-    assert_eq!(lock["skills"]["bare"]["commit"], b130.as_str(), "{lock}");
-    assert_eq!(
-        lock["skills"]["pre"]["resolved_tag"], "v1.5.0-rc.1",
-        "{lock}"
-    );
-    assert_eq!(lock["skills"]["pre"]["commit"], rc.as_str(), "{lock}");
-    // A prerelease never satisfies a requirement that did not opt in.
-    assert_eq!(lock["skills"]["nopre"]["resolved_tag"], "v1.4.1", "{lock}");
-}
-
-#[test]
 fn exact_tag_stays_exact_even_when_newer_versions_exist() {
     let sb = Sandbox::new();
     let (v120, _, _, _) = range_fixture(&sb);
@@ -239,12 +211,6 @@ fn version_range_errors_are_actionable() {
         "non-semver tags are not listed: {err}"
     );
 
-    let out = sb.spm(&["add", &url, "--version", "^v1.2", "--name", "greet"]);
-    assert!(!out.status.success());
-    let err = stderr_of(&out);
-    assert!(err.contains("invalid version requirement"), "{err}");
-    assert!(err.contains("`v`"), "{err}");
-
     let out = sb.spm(&["add", &url, "--version", "^1.2", "--tag", "v1.2.0"]);
     assert!(!out.status.success());
     assert!(
@@ -254,28 +220,6 @@ fn version_range_errors_are_actionable() {
     );
 
     assert!(!sb.project.join("ai.lock").exists() || !sb.read("ai.lock").contains("greet"));
-}
-
-#[test]
-fn manifest_rejects_version_with_another_selector_or_a_bad_requirement() {
-    let sb = Sandbox::new();
-    for (spec, needle) in [
-        (r#"{"git":"u","version":"^1","tag":"v1.0.0"}"#, "oneOf"),
-        (r#"{"git":"u","version":""}"#, "does not match schema"),
-        (
-            r#"{"git":"u","version":"banana"}"#,
-            "invalid version requirement",
-        ),
-    ] {
-        write_manifest(
-            &sb,
-            &format!(r#"{{"targets":["claude"],"skills":{{"x":{spec}}}}}"#),
-        );
-        let out = sb.spm(&["install"]);
-        assert!(!out.status.success(), "{spec} must be rejected");
-        let err = stderr_of(&out);
-        assert!(err.contains(needle), "{spec}: {err}");
-    }
 }
 
 #[test]

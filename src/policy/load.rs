@@ -23,9 +23,19 @@ impl Policy {
     /// the machine layer, if configured, plus the manifest's `allowedSources`
     /// (`allowed_sources`), if set.
     pub fn load(allowed_sources: Option<&[String]>, manifest_path: &Path) -> Result<Policy> {
-        let mut policy = Policy::machine()?;
+        Policy::machine()?.with_project(allowed_sources, manifest_path)
+    }
+
+    /// This policy plus the project layer `allowed_sources` of the `ai.json`
+    /// at `manifest_path`, if set: an empty list is a layer that allows
+    /// nothing, not the absence of one.
+    fn with_project(
+        mut self,
+        allowed_sources: Option<&[String]>,
+        manifest_path: &Path,
+    ) -> Result<Policy> {
         if let Some(raw) = allowed_sources {
-            policy.layers.push(Layer::new(
+            self.layers.push(Layer::new(
                 format!(
                     "project policy `allowedSources` in {}",
                     manifest_path.display()
@@ -33,7 +43,7 @@ impl Policy {
                 raw,
             )?);
         }
-        Ok(policy)
+        Ok(self)
     }
 
     /// Only the machine layer (`SPM_POLICY`, else `$SPM_HOME/policy.json`). A
@@ -65,5 +75,31 @@ impl Policy {
         Ok(Policy {
             layers: vec![Layer::new(origin, &file.allowed_sources)?],
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const URL: &str = "https://github.com/o/r";
+
+    #[test]
+    fn project_layer_is_added_only_when_set_and_an_empty_list_allows_nothing() {
+        let path = Path::new("p/ai.json");
+        let unset = Policy::default().with_project(None, path).unwrap();
+        assert!(unset.check(URL).is_ok());
+
+        let empty = Policy::default().with_project(Some(&[]), path).unwrap();
+        let err = format!("{:#}", empty.check(URL).unwrap_err());
+        assert!(err.contains("allows nothing"), "{err}");
+        assert!(
+            err.contains(&format!("`allowedSources` in {}", path.display())),
+            "{err}"
+        );
+
+        let bad = Policy::default().with_project(Some(&["*".to_string()]), path);
+        let err = format!("{:#}", bad.unwrap_err());
+        assert!(err.contains("project policy"), "{err}");
     }
 }

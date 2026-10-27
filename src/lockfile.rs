@@ -660,6 +660,12 @@ pub(crate) mod tests {
             ("ok", "commit", json!("abc123"), "invalid commit"),
             ("ok", "store", json!("../x"), "invalid store key"),
             ("ok", "store", json!("a/b@c"), "invalid store key"),
+            (
+                "ok",
+                "store",
+                json!("/home/victim/.config/autostart"),
+                "invalid store key",
+            ),
             ("ok", "store", json!("other-0@x"), "does not match"),
             (
                 "ok",
@@ -675,6 +681,9 @@ pub(crate) mod tests {
             let err = format!("{err:#}");
             assert!(err.contains(needle), "{key}/{field}: {err}");
         }
+        // The project id names a directory, so a forged one never loads.
+        let err = load_text(r#"{"id":"../../evil","skills":{}}"#).unwrap_err();
+        assert!(format!("{err:#}").contains("invalid project id"), "{err:#}");
     }
 
     #[test]

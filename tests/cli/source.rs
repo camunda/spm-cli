@@ -55,6 +55,13 @@ pub fn cfg_test(meta: &Meta) -> bool {
     name(meta).as_deref() == Some("cfg") && nested(meta).first().is_some_and(requires_test)
 }
 
+/// Whether `meta` (an attribute's content) makes its node test-only: a `cfg`
+/// requiring `test`, or `#[test]` itself (a test function is compiled only
+/// under test, with or without a surrounding `cfg(test)`).
+pub fn test_only(meta: &Meta) -> bool {
+    cfg_test(meta) || matches!(meta, Meta::Path(p) if p.is_ident("test"))
+}
+
 /// Implements, inside an `impl Visit<'ast>`, every visit method of a node
 /// that carries attributes so that a node gated on a `cfg` requiring `test`
 /// is skipped whole and anything else is walked as usual. With
@@ -63,11 +70,15 @@ macro_rules! skip_test_only {
     () => {
         $crate::source::skip_test_only!(except visit_item_mod);
         $crate::source::skip_test_only! {
-            visit_item_mod(syn::ItemMod) via visit_item_mod;
+            @skip visit_item_mod(syn::ItemMod) via visit_item_mod;
         }
     };
     (except visit_item_mod) => {
+        $crate::source::skip_test_only!(@nodes skip);
+    };
+    (@nodes $mode:ident) => {
         $crate::source::skip_test_only! {
+            @$mode
             visit_file(syn::File) via visit_file;
             visit_item_const(syn::ItemConst) via visit_item_const;
             visit_item_enum(syn::ItemEnum) via visit_item_enum;
@@ -161,15 +172,39 @@ macro_rules! skip_test_only {
             visit_stmt_macro(syn::StmtMacro) via visit_stmt_macro;
         }
     };
-    ($($method:ident($node:ty) via $walk:ident;)*) => {
+    (@skip $($method:ident($node:ty) via $walk:ident;)*) => {
         $(fn $method(&mut self, node: &'ast $node) {
             if !node.attrs.iter().any($crate::source::is_cfg_test) {
                 syn::visit::$walk(self, node);
             }
         })*
     };
+    (@track $($method:ident($node:ty) via $walk:ident;)*) => {
+        $(fn $method(&mut self, node: &'ast $node) {
+            let outer = self.in_test;
+            self.in_test |= node
+                .attrs
+                .iter()
+                .any(|a| $crate::source::test_only(&a.meta));
+            syn::visit::$walk(self, node);
+            self.in_test = outer;
+        })*
+    };
 }
 pub(crate) use skip_test_only;
+
+/// The converse of [`skip_test_only`]: implements the same visit methods so
+/// that every node is walked, with the implementor's `in_test: bool` set
+/// while inside one that is [`test_only`].
+macro_rules! track_test_only {
+    () => {
+        $crate::source::skip_test_only!(@nodes track);
+        $crate::source::skip_test_only! {
+            @track visit_item_mod(syn::ItemMod) via visit_item_mod;
+        }
+    };
+}
+pub(crate) use track_test_only;
 
 /// Parses a `src/` file, failing the guard on a syntax `syn` cannot read.
 pub fn parse(src: &str) -> syn::File {
@@ -294,6 +329,13 @@ fn macro_mod_decls(tokens: proc_macro2::TokenStream) -> Vec<String> {
 /// test-only items other than modules, or not at all) fails the guard rather
 /// than escape it.
 pub fn shipped_files(root: &Path) -> Vec<PathBuf> {
+    crate_files(root).0
+}
+
+/// The module files of the crate rooted at `root`, split as
+/// `(shipped, test_only)`: see [`shipped_files`], whose classification (and
+/// failure on an unclassifiable file) this is.
+pub fn crate_files(root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let (mut shipped, mut test_only) = (Vec::new(), Vec::new());
     let mut queue = vec![(root.to_path_buf(), false)];
     while let Some((file, test)) = queue.pop() {
@@ -342,7 +384,8 @@ pub fn shipped_files(root: &Path) -> Vec<PathBuf> {
         unknown.join("\n")
     );
     shipped.sort();
-    shipped
+    test_only.sort();
+    (shipped, test_only)
 }
 
 /// Every `.rs` file under `dir`, recursively.

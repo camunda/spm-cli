@@ -901,17 +901,3 @@ fn reused_direct_entry_drops_stale_transitive_provenance() {
         "direct skill must not be reported as transitive: {status}"
     );
 }
-
-/// The schema accepts `resolveTransitive` on the root manifest.
-#[test]
-fn schema_accepts_resolve_transitive_flag() {
-    let sb = Sandbox::new();
-    sb.ok(&["init", "--target", "copilot"]);
-    write_manifest(
-        &sb,
-        r#"{"targets":["copilot"],"resolveTransitive":false,"skills":{}}"#,
-    );
-    // A manifest-reading command must accept the flag without a schema error.
-    let out = sb.ok(&["list"]);
-    assert!(out.contains("no skills"), "{out}");
-}

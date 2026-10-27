@@ -99,30 +99,6 @@ fn doctor_reports_an_invalid_manifest() {
     assert!(c["message"].as_str().unwrap().contains("nope"), "{c}");
 }
 
-/// The lock verdict is exactly `install --locked`'s: same mismatch text.
-#[test]
-fn doctor_flags_a_lock_out_of_sync_and_a_missing_lock() {
-    let sb = Sandbox::new();
-    sb.ok(&["init", "--target", "copilot"]);
-    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
-    let manifest = sb.read("ai.json").replace("v0.1.0", "v0.2.0");
-    write_manifest(&sb, &manifest);
-
-    let (ok, doc) = doctor(&sb, &[]);
-    assert!(!ok);
-    let c = check(&doc, "lockfile", "error");
-    assert_eq!(c["fix"], "spm install and commit ai.lock");
-    let detail = c["details"][0].as_str().unwrap();
-    let err = fails(&sb, &["install", "--locked"]);
-    assert!(err.contains(detail), "{detail} vs {err}");
-
-    std::fs::remove_file(sb.project.join("ai.lock")).unwrap();
-    let (ok, doc) = doctor(&sb, &[]);
-    assert!(!ok);
-    let c = check(&doc, "lockfile", "error");
-    assert!(c["message"].as_str().unwrap().contains("no ai.lock"), "{c}");
-}
-
 /// Doctor and `install --locked` render one verdict: for every class of lock
 /// problem, both reject the lock and doctor details exactly the problems
 /// `install --locked` lists.
@@ -249,6 +225,14 @@ fn doctor_and_locked_install_report_the_same_lock_problem_class() {
     std::fs::remove_file(sb.project.join("ai.lock")).unwrap();
     let err = fails(&sb, &["install", "--locked"]);
     assert!(err.contains("ai.lock not found"), "{err}");
+    assert!(
+        err.contains("run `spm install` (without --locked)"),
+        "{err}"
+    );
+    assert!(
+        !sb.project.join("ai.lock").exists(),
+        "--locked never writes a lock"
+    );
     let (ok, doc) = doctor(&sb, &[]);
     assert!(!ok);
     assert_eq!(

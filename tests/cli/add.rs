@@ -747,22 +747,18 @@ fn add_full_https_url_is_stored_verbatim() {
     );
 }
 
+/// Wiring only: every selector flag and its message are
+/// `shorthand::ref_conflicts_with_explicit_version_flags`.
 #[test]
 fn add_github_shorthand_ref_conflicts_with_version_flags() {
-    for flag in [
-        ["--tag", "v0.1.0"],
-        ["--branch", "main"],
-        ["--commit", "abc"],
-    ] {
-        let sb = Sandbox::new();
-        sb.ok(&["init", "--target", "claude"]);
-        let before = sb.read("ai.json");
-        let out = sb.spm_github(&["add", "github.com/owner/repo@v0.1.0", flag[0], flag[1]]);
-        assert!(!out.status.success(), "{flag:?} must conflict with @ref");
-        let err = String::from_utf8_lossy(&out.stderr);
-        assert!(err.contains("already names a ref"), "{err}");
-        assert_eq!(sb.read("ai.json"), before);
-    }
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    let before = sb.read("ai.json");
+    let out = sb.spm_github(&["add", "github.com/owner/repo@v0.1.0", "--tag", "v0.1.0"]);
+    assert!(!out.status.success(), "--tag must conflict with @ref");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("already names a ref"), "{err}");
+    assert_eq!(sb.read("ai.json"), before);
 }
 
 #[test]
@@ -787,24 +783,18 @@ fn add_github_shorthand_rejects_unknown_and_ambiguous_refs() {
     assert_eq!(sb.read("ai.json"), before);
 }
 
+/// Wiring only: the malformed shapes are `shorthand::malformed_shorthand_is_rejected`.
 #[test]
 fn add_github_shorthand_rejects_malformed_input() {
-    for bad in [
-        "github.com/owner",
-        "github.com/owner/",
-        "github.com/owner/repo/tree/main",
-        "github.com/owner/repo@",
-    ] {
-        let sb = Sandbox::new();
-        sb.ok(&["init", "--target", "claude"]);
-        let before = sb.read("ai.json");
-        let out = sb.spm_github(&["add", bad, "--tag", "v0.1.0"]);
-        assert!(!out.status.success(), "{bad} must be rejected");
-        let err = String::from_utf8_lossy(&out.stderr);
-        assert!(err.contains("invalid GitHub shorthand"), "{bad}: {err}");
-        assert!(err.contains("github.com/<owner>/<repo>[@<ref>]"), "{err}");
-        assert_eq!(sb.read("ai.json"), before);
-    }
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "claude"]);
+    let before = sb.read("ai.json");
+    let out = sb.spm_github(&["add", "github.com/owner/repo/tree/main", "--tag", "v0.1.0"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("invalid GitHub shorthand"), "{err}");
+    assert!(err.contains("github.com/<owner>/<repo>[@<ref>]"), "{err}");
+    assert_eq!(sb.read("ai.json"), before);
 }
 
 #[test]

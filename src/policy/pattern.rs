@@ -203,6 +203,7 @@ mod tests {
     fn local_sources_need_the_explicit_file_pattern() {
         let remote_only = policy(&["github.com/*"]);
         let err = format!("{:#}", remote_only.check("file:///tmp/repo").unwrap_err());
+        assert!(err.contains("a local source"), "{err}");
         assert!(err.contains("file://*"), "{err}");
         assert!(remote_only.check("../work/repo").is_err());
         let local = policy(&["file://*"]);
