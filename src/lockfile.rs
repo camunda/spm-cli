@@ -687,4 +687,119 @@ pub(crate) mod tests {
         let lock = with_reference("tag:v1.4.1", None);
         assert_eq!(lock.skills["pdf"].display_reference(), "tag:v1.4.1");
     }
+
+    mod props {
+        use super::*;
+        use crate::manifest::testutil::{dep_name, edited, Scratch};
+        use proptest::prelude::*;
+
+        /// A selector label and the tag it needs: none, except a `version`
+        /// range, which records a tag satisfying it.
+        fn reference() -> impl Strategy<Value = (LockReference, Option<String>)> {
+            prop_oneof![
+                ("tag|branch|commit", ".{0,8}").prop_map(|(kind, value)| {
+                    let label = format!("{kind}:{value}");
+                    (LockReference::try_from(label).unwrap(), None)
+                }),
+                prop::sample::select(
+                    &[
+                        ("^1.2", "v1.4.1"),
+                        ("~1.4.0", "1.4.9"),
+                        (">=1.2, <2", "v1.2.0"),
+                        ("*", "0.1.0"),
+                    ][..]
+                )
+                .prop_map(|(req, tag)| {
+                    let label = format!("version:{req}");
+                    (LockReference::try_from(label).unwrap(), Some(tag.into()))
+                }),
+            ]
+        }
+
+        fn locked() -> impl Strategy<Value = LockedSkill> {
+            let names = || prop::collection::vec(dep_name(), 0..3);
+            (
+                (".{0,16}", "[0-9a-f]{40}", reference()),
+                (prop::option::of(".{1,8}"), names(), names()),
+                prop::collection::vec(reference(), 0..3),
+            )
+                .prop_map(
+                    |(
+                        (git, sha, (reference, resolved_tag)),
+                        (path, bundled_skills, requested_by),
+                        also,
+                    )| {
+                        let commit = CommitSha::try_from(sha).unwrap();
+                        LockedSkill {
+                            store: StoreKey::derive(&git, &commit),
+                            git,
+                            reference,
+                            commit,
+                            resolved_tag,
+                            path,
+                            bundled_skills,
+                            requested_by,
+                            also_satisfies: also
+                                .into_iter()
+                                .map(|(reference, resolved_tag)| Satisfied {
+                                    reference,
+                                    resolved_tag,
+                                })
+                                .collect(),
+                        }
+                    },
+                )
+        }
+
+        fn lockfile() -> impl Strategy<Value = Lockfile> {
+            let deps = || prop::collection::btree_map(dep_name(), locked(), 0..3);
+            (
+                prop_oneof![Just(String::new()), "[A-Za-z0-9_-]{1,10}"],
+                deps(),
+                deps(),
+            )
+                .prop_map(|(id, skills, plugins)| Lockfile {
+                    id,
+                    skills,
+                    plugins,
+                })
+        }
+
+        /// The text `save` writes for `lock`.
+        fn text(lock: &Lockfile) -> String {
+            crate::jsonfile::to_text(lock).unwrap()
+        }
+
+        /// Load `ai.lock` holding `contents`; an accepted lock saves and
+        /// reloads to the same text.
+        fn load_text(contents: &str) -> Option<Lockfile> {
+            let dir = Scratch::new();
+            std::fs::write(Lockfile::path_in(&dir.0), contents).unwrap();
+            let lock = Lockfile::load_or_default(&dir.0).ok()?;
+            lock.save(&dir.0).unwrap();
+            let reloaded = Lockfile::load_or_default(&dir.0).unwrap();
+            assert_eq!(text(&reloaded), text(&lock));
+            Some(lock)
+        }
+
+        proptest! {
+            #![proptest_config(crate::proptest_config(128))]
+
+            /// Every lock spm can write loads back unchanged.
+            #[test]
+            fn saved_locks_load_back(lock in lockfile()) {
+                let loaded = load_text(&text(&lock));
+                prop_assert_eq!(loaded.as_ref().map(text), Some(text(&lock)));
+            }
+
+            /// A hand-edited or hostile `ai.lock` is an error or a lock, never
+            /// a panic; whatever is accepted round-trips.
+            #[test]
+            fn edited_locks_load_or_fail_cleanly(
+                contents in lockfile().prop_flat_map(|lock| edited(text(&lock))),
+            ) {
+                load_text(&contents);
+            }
+        }
+    }
 }

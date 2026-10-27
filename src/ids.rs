@@ -241,11 +241,14 @@ impl StoreKey {
 impl TryFrom<String> for StoreKey {
     type Error = Error;
     fn try_from(key: String) -> Result<Self> {
+        // Only the alphabet `derive` writes: no separator, and nothing Windows
+        // reads as more than a file name (`C:` is a drive, `CON` a device).
         let bad = key.is_empty()
-            || key.contains('/')
-            || key.contains('\\')
-            || key.contains('\0')
-            || key.split('@').any(|seg| seg == "." || seg == "..");
+            || !key
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '@'))
+            || key.split('@').any(|seg| seg == "." || seg == "..")
+            || is_windows_reserved_device_name(key.split('.').next().unwrap_or(&key));
         if bad {
             bail!("invalid store key `{key}`: must be a single path component");
         }
@@ -477,6 +480,9 @@ mod tests {
         }
         for bad in [
             "", "a/b", "a\\b", "a\0b", ".", "..", "x@..", "..@x", "a@.@b",
+            // A drive prefix or device on Windows: `store_root.join("C:")`
+            // is `C:`.
+            "C:", "C:x", "a:b", "con", "aux.x", "a<b", "a b",
         ] {
             let err = StoreKey::try_from(bad).unwrap_err();
             assert!(
@@ -561,5 +567,85 @@ mod tests {
         refs.sort();
         let labels: Vec<String> = refs.iter().map(LockReference::label).collect();
         assert_eq!(labels, ["branch:z", "commit:a", "tag:v1", "version:^1"]);
+    }
+
+    use proptest::prelude::*;
+    use serde::de::DeserializeOwned;
+
+    /// Untrusted text for the validating constructors: anything, plus shapes
+    /// near their accept/reject boundaries.
+    fn text() -> impl Strategy<Value = String> {
+        prop_oneof![
+            any::<String>(),
+            "[a-zA-Z0-9./\\\\:@<>|?*\" \\x00-\\x1f-]{0,8}",
+            "(con|aux|NUL|Com1|lpt9|lpt0)(\\.[a-z. ]{0,3})?",
+            "[0-9a-fA-F]{38,42}",
+            "(tag|branch|commit|version|Tag|rev)?:?.{0,6}",
+            "[a-z]{0,3}(@\\.{0,3}){0,2}",
+        ]
+    }
+
+    /// `input` is accepted by `T::try_from` exactly when serde accepts it as a
+    /// JSON string, and an accepted value keeps `input` as its text (`text`)
+    /// and survives a serialize/deserialize round trip.
+    fn round_trips<T>(input: &str, text: impl Fn(&T) -> String) -> Option<T>
+    where
+        T: TryFrom<String, Error = Error> + Serialize + DeserializeOwned + PartialEq + fmt::Debug,
+    {
+        let parsed = T::try_from(input.to_string()).ok();
+        let via_serde: Option<T> =
+            serde_json::from_value(serde_json::Value::String(input.into())).ok();
+        assert_eq!(parsed, via_serde, "serde and TryFrom disagree on {input:?}");
+        let value = parsed?;
+        assert_eq!(text(&value), input);
+        let json = serde_json::to_string(&value).unwrap();
+        assert_eq!(serde_json::from_str::<T>(&json).unwrap(), value);
+        Some(value)
+    }
+
+    /// `name` is exactly one ordinary path component, so joining it onto a
+    /// directory can only ever name a direct child.
+    fn is_one_component(name: &str) -> bool {
+        let parts: Vec<_> = Path::new(name).components().collect();
+        matches!(parts[..], [std::path::Component::Normal(c)] if c == name)
+    }
+
+    proptest! {
+        #![proptest_config(crate::proptest_config(256))]
+
+        #[test]
+        fn dep_name_accepts_only_single_components(s in text()) {
+            if let Some(name) = round_trips::<DepName>(&s, |v| v.to_string()) {
+                prop_assert!(is_one_component(&name), "{name:?}");
+            }
+        }
+
+        #[test]
+        fn commit_sha_accepts_only_full_lowercase_hex(s in text()) {
+            if let Some(sha) = round_trips::<CommitSha>(&s, |v| v.to_string()) {
+                prop_assert!(sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit()));
+                prop_assert_eq!(sha.to_lowercase(), sha.as_str());
+                prop_assert!(sha.starts_with(sha.short()));
+            }
+        }
+
+        #[test]
+        fn store_key_accepts_only_single_components(s in text()) {
+            if let Some(key) = round_trips::<StoreKey>(&s, |v| v.to_string()) {
+                prop_assert!(is_one_component(&key), "{key:?}");
+            }
+        }
+
+        /// Every key spm derives passes the check it is re-read through.
+        #[test]
+        fn derived_store_keys_validate(url in text(), sha in "[0-9a-f]{40}") {
+            let key = StoreKey::derive(&url, &CommitSha::try_from(sha).unwrap());
+            prop_assert_eq!(round_trips::<StoreKey>(&key, |v| v.to_string()), Some(key));
+        }
+
+        #[test]
+        fn lock_reference_round_trips_its_label(s in text()) {
+            round_trips::<LockReference>(&s, LockReference::label);
+        }
     }
 }

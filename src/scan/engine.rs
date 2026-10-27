@@ -731,4 +731,114 @@ mod tests {
         std::fs::remove_dir_all(&checkout).unwrap();
         assert!(findings.is_empty(), "{findings:?}");
     }
+
+    mod props {
+        use super::*;
+        use crate::scan::rules::{Body, FIXTURES};
+        use proptest::prelude::*;
+        use std::collections::BTreeMap;
+
+        /// Directories files are placed in (`hooks` makes git-hook names fire).
+        const DIRS: &[&str] = &["", "a", "a/b", "hooks", "docs"];
+
+        /// The text bodies of the rule fixtures, triggering and benign.
+        fn bodies() -> Vec<&'static str> {
+            FIXTURES
+                .iter()
+                .filter_map(|f| match f.body {
+                    Body::Text(t) => Some(t),
+                    Body::PastCap => None,
+                })
+                .collect()
+        }
+
+        /// A file name the rules may react to: a fixture's, or a plain one.
+        fn name() -> impl Strategy<Value = String> {
+            let fixture_names: Vec<String> = FIXTURES
+                .iter()
+                .filter_map(|f| Path::new(f.path).file_name()?.to_str().map(String::from))
+                .collect();
+            prop_oneof![
+                prop::sample::select(fixture_names),
+                "[a-z]{1,3}\\.(md|sh|txt)".prop_filter("a Windows reserved device name", |n| {
+                    crate::ids::DepName::try_from(n.as_str()).is_ok()
+                }),
+            ]
+        }
+
+        /// File content: one or more fixture bodies (so a file can hold
+        /// several findings), or anything.
+        fn body() -> impl Strategy<Value = String> {
+            prop_oneof![
+                prop::collection::vec(prop::sample::select(bodies()), 1..4)
+                    .prop_map(|b| b.concat()),
+                any::<String>(),
+            ]
+        }
+
+        /// A tree (relative path → content) with its files in two creation
+        /// orders: path order and a shuffle of it.
+        fn tree() -> impl Strategy<Value = Vec<(String, String)>> {
+            prop::collection::btree_map(
+                (prop::sample::select(DIRS), name()).prop_map(|(d, n)| {
+                    if d.is_empty() {
+                        n
+                    } else {
+                        format!("{d}/{n}")
+                    }
+                }),
+                body(),
+                1..8,
+            )
+            .prop_map(|m: BTreeMap<String, String>| m.into_iter().collect())
+        }
+
+        /// Scan a fresh tree holding `files`, created in the given order.
+        fn scan(files: &[(String, String)]) -> Vec<(Severity, String)> {
+            let dir = tmp_dir();
+            for (rel, body) in files {
+                let file = dir.join(rel);
+                std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                std::fs::write(file, body).unwrap();
+            }
+            let out = scan_path(&dir).unwrap();
+            std::fs::remove_dir_all(&dir).unwrap();
+            out.iter().map(|f| (f.severity, f.render())).collect()
+        }
+
+        proptest! {
+            // Cheap (no filesystem), so enough cases to reach the rare
+            // reserved stems among the three-letter ones.
+            #![proptest_config(crate::proptest_config(100_000))]
+
+            /// Every generated file name can be created on every supported
+            /// platform (no Windows device names such as `con.md`), so a
+            /// failing case is a scanner defect, never a fixture-setup one.
+            #[test]
+            fn generated_names_are_portable(n in name()) {
+                prop_assert!(crate::ids::DepName::try_from(n.as_str()).is_ok(), "{n}");
+            }
+        }
+
+        proptest! {
+            #![proptest_config(crate::proptest_config(64))]
+
+            /// The findings for a tree are the same list however its files
+            /// were created (and so enumerated), sorted most severe first,
+            /// and exactly the findings of each file scanned on its own.
+            #[test]
+            fn findings_are_independent_of_file_order(
+                (files, shuffled) in tree().prop_flat_map(|f| (Just(f.clone()), Just(f).prop_shuffle())),
+            ) {
+                let found = scan(&files);
+                prop_assert_eq!(&scan(&shuffled), &found);
+                prop_assert!(found.windows(2).all(|w| w[0].0 >= w[1].0), "{found:?}");
+                let mut alone: Vec<_> = files.iter().flat_map(|f| scan(std::slice::from_ref(f))).collect();
+                let mut all = found.clone();
+                alone.sort();
+                all.sort();
+                prop_assert_eq!(all, alone);
+            }
+        }
+    }
 }

@@ -317,13 +317,16 @@ mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
 
+    /// A fresh directory, unique within the process by construction: the
+    /// clock alone is not (macOS ticks in microseconds), and parallel tests
+    /// such as the properties ask for the same `name`.
     fn scratch(name: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let p =
-            std::env::temp_dir().join(format!("spm-fsutil-{name}-{}-{nanos}", std::process::id()));
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let p = std::env::temp_dir().join(format!("spm-fsutil-{name}-{}-{n}", std::process::id()));
+        // A reused pid may meet a tree an earlier run left behind.
+        std::fs::remove_dir_all(&p).ok();
         std::fs::create_dir_all(&p).unwrap();
         p
     }
@@ -592,5 +595,133 @@ mod tests {
         assert!(!dst.join("pipe").exists());
         std::fs::remove_dir_all(&checkout).ok();
         std::fs::remove_dir_all(&dst_root).ok();
+    }
+
+    mod props {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// Real directories of the generated layout, relative to its root:
+        /// the boundary `in` (with a `.git`), a sibling sharing its name
+        /// prefix, and an outside tree.
+        const DIRS: &[&str] = &["in", "in/a", "in/a/b", "in/.git", "inx", "out", "out/c", ""];
+        const FILES: &[&str] = &["in/f", "in/a/g", "in/.git/config", "inx/f", "out/h"];
+        /// Path segments link targets and queries are built from: real names,
+        /// `.`/`..`, other links (so chains and cycles form) and a missing name.
+        const SEGMENTS: &[&str] = &[
+            "..", "..", ".", "a", "b", "c", "f", "g", "h", "in", "inx", "out", ".git", "config",
+            "l0", "l1", "l2", "l3", "l4", "l5", "nowhere",
+        ];
+
+        fn rel_path() -> impl Strategy<Value = String> {
+            prop::collection::vec(prop::sample::select(SEGMENTS), 1..5).prop_map(|s| s.join("/"))
+        }
+
+        /// A link target: relative, or absolute from the layout root (as
+        /// given, or canonical) or from `/`.
+        #[derive(Debug, Clone)]
+        enum Target {
+            Relative(String),
+            Absolute { anchor: u8, rel: String },
+        }
+
+        fn target() -> impl Strategy<Value = Target> {
+            prop_oneof![
+                rel_path().prop_map(Target::Relative),
+                (0u8..3, rel_path()).prop_map(|(anchor, rel)| Target::Absolute { anchor, rel }),
+            ]
+        }
+
+        /// Removes the scratch tree however the case ends.
+        struct Layout(PathBuf);
+
+        impl Drop for Layout {
+            fn drop(&mut self) {
+                std::fs::remove_dir_all(&self.0).ok();
+            }
+        }
+
+        /// Build the layout with link `l<i>` in `DIRS[dir]` pointing at
+        /// `target`, returning it with its canonical boundary (`in`).
+        fn build(links: &[(usize, Target)]) -> (Layout, PathBuf) {
+            let root = scratch("prop");
+            let layout = Layout(root.clone());
+            for d in DIRS {
+                std::fs::create_dir_all(root.join(d)).unwrap();
+            }
+            for f in FILES {
+                std::fs::write(root.join(f), f).unwrap();
+            }
+            let canon_root = std::fs::canonicalize(&root).unwrap();
+            for (i, (dir, t)) in links.iter().enumerate() {
+                let to = match t {
+                    Target::Relative(rel) => PathBuf::from(rel),
+                    Target::Absolute { anchor: 0, rel } => root.join(rel),
+                    Target::Absolute { anchor: 1, rel } => canon_root.join(rel),
+                    Target::Absolute { rel, .. } => Path::new("/").join(rel),
+                };
+                symlink(to, root.join(DIRS[*dir]).join(format!("l{i}"))).unwrap();
+            }
+            let boundary = std::fs::canonicalize(root.join("in")).unwrap();
+            (layout, boundary)
+        }
+
+        /// Inside `boundary` and out of its `.git`, judged by components.
+        fn inside(boundary: &Path, p: &Path) -> bool {
+            p.strip_prefix(boundary)
+                .is_ok_and(|rel| rel.components().all(|c| c.as_os_str() != ".git"))
+        }
+
+        fn links() -> impl Strategy<Value = Vec<(usize, Target)>> {
+            prop::collection::vec((0..DIRS.len(), target()), 1..7)
+        }
+
+        proptest! {
+            #![proptest_config(crate::proptest_config(128))]
+
+            /// Whatever the symlinks do (escape, chain, cycle, dangle, reach
+            /// into `.git`), a resolved path is the query's canonical target
+            /// and lies inside the boundary; and every query whose target does
+            /// is resolved.
+            #[test]
+            fn resolves_only_inside_the_boundary(
+                links in links(),
+                queries in prop::collection::vec((0..DIRS.len(), rel_path()), 1..8),
+            ) {
+                let (layout, boundary) = build(&links);
+                for (dir, rel) in &queries {
+                    let q = layout.0.join(DIRS[*dir]).join(rel);
+                    let canonical = std::fs::canonicalize(&q).ok();
+                    match resolve_within_canonical(&boundary, &q) {
+                        Some(t) => {
+                            prop_assert!(inside(&boundary, &t), "{q:?} -> {t:?}");
+                            prop_assert_eq!(Some(&t), canonical.as_ref());
+                        }
+                        None => prop_assert!(
+                            canonical.as_ref().is_none_or(|c| !inside(&boundary, c)),
+                            "{q:?} -> {canonical:?} refused"
+                        ),
+                    }
+                }
+            }
+
+            /// The traversal behind the copy and the scan terminates and only
+            /// ever reads files inside the boundary.
+            #[test]
+            fn walk_reads_only_inside_the_boundary(links in links()) {
+                let (layout, boundary) = build(&links);
+                let mut read = Vec::new();
+                walk_tree(&layout.0.join("in"), &boundary, &mut |entry| {
+                    if let Entry::File { from, .. } = entry {
+                        read.push(std::fs::canonicalize(from)?);
+                    }
+                    Ok(())
+                })
+                .unwrap();
+                for f in &read {
+                    prop_assert!(inside(&boundary, f), "read {f:?}");
+                }
+            }
+        }
     }
 }

@@ -8,6 +8,7 @@ mod de;
 mod dependency;
 mod load;
 mod model;
+pub(crate) mod testutil;
 mod validate;
 
 pub use dependency::DependencyManifest;
