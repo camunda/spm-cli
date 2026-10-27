@@ -4,8 +4,9 @@
 //! duration, or passes on a later attempt is non-deterministic; synchronize
 //! on an event instead (see the barriers in `concurrency.rs`).
 //!
-//! Test code is everything under `tests/` plus every `src/` node or file
-//! gated on a `cfg` requiring `test`. It is parsed with `syn`, so comments,
+//! Test code is everything under `tests/` plus every `src/` file or node
+//! that is test-only (gated on a `cfg` requiring `test`, or a `#[test]`
+//! function), including such items inside a shipped macro's body. It is parsed with `syn`, so comments,
 //! string literals and the names of `#[test]` functions (which may describe
 //! the product's own retry behavior) are never flagged; identifiers inside
 //! macro bodies (`assert!`, `proptest!`) are. CI workflows and a nextest
@@ -15,12 +16,12 @@
 
 use std::path::{Path, PathBuf};
 
-use proc_macro2::{Ident, TokenStream, TokenTree};
+use proc_macro2::{Delimiter, Ident, TokenStream, TokenTree};
 use syn::ext::IdentExt;
 use syn::visit::{self, Visit};
 use syn::{Attribute, Meta};
 
-use crate::source::{crate_files, parse, rust_files, track_test_only};
+use crate::source::{crate_files, parse, rust_files, test_only, track_test_only};
 
 /// Why `ident` may not appear in test code, if it may not.
 fn forbidden(ident: &Ident) -> Option<&'static str> {
@@ -56,12 +57,46 @@ impl Guard {
         }
     }
 
-    fn tokens(&mut self, tokens: TokenStream) {
-        for tree in tokens {
+    /// Judges the identifiers of a token stream (a macro body or an
+    /// attribute's arguments) if `in_test`, and in any case those of an item
+    /// following a [`test_only`] attribute, up to its `;` or braced body.
+    /// A `#[test]` function's own name is exempt, as in parsed code.
+    fn tokens(&mut self, tokens: TokenStream, in_test: bool) {
+        let mut gated = false;
+        let mut test_fn = false;
+        let mut skip_name = false;
+        let mut trees = tokens.into_iter().peekable();
+        while let Some(tree) = trees.next() {
+            let judged = in_test || gated;
             match tree {
-                TokenTree::Ident(i) => self.report(&i),
-                TokenTree::Group(g) => self.tokens(g.stream()),
-                _ => {}
+                TokenTree::Punct(p) if p.as_char() == '#' => {
+                    if let Some(TokenTree::Group(g)) = trees.peek() {
+                        let meta = (g.delimiter() == Delimiter::Bracket)
+                            .then(|| syn::parse2::<Meta>(g.stream()).ok())
+                            .flatten();
+                        if let Some(meta) = meta.filter(test_only) {
+                            gated = true;
+                            test_fn |= matches!(meta, Meta::Path(_));
+                        }
+                    }
+                }
+                TokenTree::Punct(p) if p.as_char() == ';' => gated = false,
+                TokenTree::Ident(i) => {
+                    if std::mem::take(&mut skip_name) {
+                        continue;
+                    }
+                    skip_name = i == "fn" && std::mem::take(&mut test_fn);
+                    if judged {
+                        self.report(&i);
+                    }
+                }
+                TokenTree::Group(g) => {
+                    self.tokens(g.stream(), judged);
+                    if g.delimiter() == Delimiter::Brace {
+                        gated = false;
+                    }
+                }
+                TokenTree::Punct(_) | TokenTree::Literal(_) => {}
             }
         }
     }
@@ -79,7 +114,7 @@ impl<'ast> Visit<'ast> for Guard {
             self.test_fn = true;
         }
         if let (true, Meta::List(list)) = (self.in_test, &attr.meta) {
-            self.tokens(list.tokens.clone());
+            self.tokens(list.tokens.clone(), true);
         }
         visit::visit_attribute(self, attr);
     }
@@ -96,9 +131,7 @@ impl<'ast> Visit<'ast> for Guard {
     }
 
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
-        if self.in_test {
-            self.tokens(mac.tokens.clone());
-        }
+        self.tokens(mac.tokens.clone(), self.in_test);
         visit::visit_macro(self, mac);
     }
 
@@ -222,6 +255,42 @@ mod tests {
 ";
     let lines: Vec<usize> = violations(src, false).iter().map(|v| v.0).collect();
     assert_eq!(lines, vec![8, 10]);
+}
+
+/// A `#[test]` function is test-only without a surrounding `cfg(test)`.
+#[test]
+fn violations_judge_a_standalone_test_fn_in_a_shipped_file() {
+    let src = "\
+fn live() {}
+#[test]
+fn waits() { std::thread::sleep(d); }
+";
+    let lines: Vec<usize> = violations(src, false).iter().map(|v| v.0).collect();
+    assert_eq!(lines, vec![3]);
+}
+
+/// A shipped macro's body is tokens, not items: the item after a test-gating
+/// attribute in it is test code up to its `;` or braced body, and only it.
+#[test]
+fn violations_judge_test_gated_items_inside_shipped_macros() {
+    let src = "\
+macro_rules! m {
+    () => {
+        fn live() { fallback_retry(); }
+        #[cfg(test)]
+        mod tests {
+            #[test]
+            fn retries_the_other_protocol() { std::thread::sleep(d); }
+        }
+        #[cfg(test)] use std::time::Instant;
+        #[test]
+        fn named_retry() { let t = Instant::now(); }
+        fn also_live() { retry(); }
+    };
+}
+";
+    let lines: Vec<usize> = violations(src, false).iter().map(|v| v.0).collect();
+    assert_eq!(lines, vec![7, 9, 11]);
 }
 
 #[test]

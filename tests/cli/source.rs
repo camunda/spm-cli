@@ -55,6 +55,13 @@ pub fn cfg_test(meta: &Meta) -> bool {
     name(meta).as_deref() == Some("cfg") && nested(meta).first().is_some_and(requires_test)
 }
 
+/// Whether `meta` (an attribute's content) makes its node test-only: a `cfg`
+/// requiring `test`, or `#[test]` itself (a test function is compiled only
+/// under test, with or without a surrounding `cfg(test)`).
+pub fn test_only(meta: &Meta) -> bool {
+    cfg_test(meta) || matches!(meta, Meta::Path(p) if p.is_ident("test"))
+}
+
 /// Implements, inside an `impl Visit<'ast>`, every visit method of a node
 /// that carries attributes so that a node gated on a `cfg` requiring `test`
 /// is skipped whole and anything else is walked as usual. With
@@ -175,7 +182,10 @@ macro_rules! skip_test_only {
     (@track $($method:ident($node:ty) via $walk:ident;)*) => {
         $(fn $method(&mut self, node: &'ast $node) {
             let outer = self.in_test;
-            self.in_test |= node.attrs.iter().any($crate::source::is_cfg_test);
+            self.in_test |= node
+                .attrs
+                .iter()
+                .any(|a| $crate::source::test_only(&a.meta));
             syn::visit::$walk(self, node);
             self.in_test = outer;
         })*
@@ -185,7 +195,7 @@ pub(crate) use skip_test_only;
 
 /// The converse of [`skip_test_only`]: implements the same visit methods so
 /// that every node is walked, with the implementor's `in_test: bool` set
-/// while inside one gated on a `cfg` requiring `test`.
+/// while inside one that is [`test_only`].
 macro_rules! track_test_only {
     () => {
         $crate::source::skip_test_only!(@nodes track);
