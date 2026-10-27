@@ -204,7 +204,7 @@ fn link_rejects_undeclared_names_and_bad_dirs_without_writing_anything() {
     assert!(err.contains("`greet` is not linked"), "{err}");
     assert!(sb.ok(&["unlink", "--all"]).contains("no links"));
     let err = fails(&sb, &["unlink"]);
-    assert!(err.contains("<NAME>"), "{err}");
+    assert!(err.contains("<NAME|--all>"), "{err}");
 }
 
 /// Linked content passes through the same pre-materialize content scan as

@@ -119,9 +119,9 @@ enum Command {
         transport: TransportArgs,
     },
     /// Drop a `spm link` override and re-materialize the locked version.
+    #[command(group(clap::ArgGroup::new("links").args(["name", "all"]).required(true)))]
     Unlink {
         /// Linked skill or plugin to restore.
-        #[arg(required_unless_present = "all", conflicts_with = "all")]
         name: Option<String>,
         /// Drop every link in this scope.
         #[arg(long)]

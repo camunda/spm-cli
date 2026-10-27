@@ -10,10 +10,10 @@ spm init [--target <amp|claude|cline|codex|copilot|cursor|gemini|windsurf>] \
     [-g]
 
 # Add a skill dependency and install it
-spm add <GIT> [--tag <TAG>] [--branch <BRANCH>] [--commit <COMMIT>] \
-    [--version <RANGE>] [--path <PATH>] [--name <NAME>] [--all] [--plugin] \
-    [--force] [--lock-only] [-g] [--protocol <ssh|https>] \
-    [--protocol-fallback]
+spm add <GIT> \
+    [--tag <TAG>|--branch <BRANCH>|--commit <COMMIT>|--version <RANGE>] \
+    [--path <PATH>] [[--name <NAME>] [--plugin]|--all] [--force] [--lock-only] \
+    [-g] [--protocol <ssh|https>] [--protocol-fallback]
 
 # Add target vendors to ai.json and materialize skills for them
 spm target add [amp|claude|cline|codex|copilot|cursor|gemini|windsurf]... [-g] \
@@ -31,7 +31,7 @@ spm remove <NAME> [--plugin] [-g] [--protocol <ssh|https>] \
 spm link <NAME> <DIR> [-g] [--protocol <ssh|https>] [--protocol-fallback]
 
 # Drop a `spm link` override and re-materialize the locked version
-spm unlink [NAME] [--all] [-g] [--protocol <ssh|https>] [--protocol-fallback]
+spm unlink <NAME|--all> [-g] [--protocol <ssh|https>] [--protocol-fallback]
 
 # Re-resolve branches/tags to latest commits (skills and plugins)
 spm update [NAME] [--lock-only] [-g] [--protocol <ssh|https>] \

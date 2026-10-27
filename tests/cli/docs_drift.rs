@@ -338,34 +338,273 @@ fn overview_block(doc: &str, file: &str) -> String {
         .collect()
 }
 
-/// How one positional argument or option of a leaf command reads in the
-/// overview: clap's own placeholder, with its possible values spelled out.
-fn overview_arg(entry: &HelpEntry) -> String {
-    // `<NAME>`, `[VENDORS]...`: swap the name inside the brackets for the values.
-    let with_values = |placeholder: &str| {
-        if entry.possible.is_empty() {
-            return placeholder.to_string();
-        }
-        let close = placeholder.find(['>', ']']).expect("bracketed placeholder");
-        format!(
-            "{}{}{}",
-            &placeholder[..1],
-            entry.possible.join("|"),
-            &placeholder[close..]
-        )
-    };
-    let Some(flag) = entry.short.as_ref().or(entry.long.as_ref()) else {
-        return with_values(entry.value.as_deref().expect("positional placeholder"));
-    };
-    match &entry.value {
-        Some(value) => format!("[{flag} {}]", with_values(value)),
-        None => format!("[{flag}]"),
+/// `<NAME>`, `[VENDORS]...`: clap's placeholder with the name inside the
+/// brackets swapped for the possible values, if any.
+fn with_values(entry: &HelpEntry, placeholder: &str) -> String {
+    if entry.possible.is_empty() {
+        return placeholder.to_string();
+    }
+    let close = placeholder.find(['>', ']']).expect("bracketed placeholder");
+    format!(
+        "{}{}{}",
+        &placeholder[..1],
+        entry.possible.join("|"),
+        &placeholder[close..]
+    )
+}
+
+/// How clap names an entry in its `Usage:` line and its errors: `NAME` for a
+/// positional `[NAME]`/`<NAME>...`, otherwise the long (or short) flag.
+fn entry_key(entry: &HelpEntry) -> String {
+    match entry.long.as_ref().or(entry.short.as_ref()) {
+        Some(flag) => flag.clone(),
+        None => entry
+            .value
+            .as_deref()
+            .expect("positional placeholder")
+            .trim_end_matches("...")
+            .trim_matches(['<', '>', '[', ']'])
+            .to_string(),
     }
 }
 
+/// An entry without its optional brackets: `--tag <TAG>`, `-g`, `NAME`. The
+/// form it takes as one alternative of a `[a|b]`/`<a|b>` choice.
+fn overview_bare(entry: &HelpEntry) -> String {
+    let Some(flag) = entry.short.as_ref().or(entry.long.as_ref()) else {
+        return entry_key(entry);
+    };
+    match &entry.value {
+        Some(value) => format!("{flag} {}", with_values(entry, value)),
+        None => flag.clone(),
+    }
+}
+
+/// How one positional argument or option of a leaf command reads in the
+/// overview on its own: clap's own placeholder, with its possible values
+/// spelled out.
+fn overview_arg(entry: &HelpEntry) -> String {
+    match (&entry.long, &entry.short) {
+        (None, None) => with_values(
+            entry,
+            entry.value.as_deref().expect("positional placeholder"),
+        ),
+        _ => format!("[{}]", overview_bare(entry)),
+    }
+}
+
+/// The required choices clap prints in a `Usage:` line (`<NAME|--all>` for an
+/// `ArgGroup` that must be given exactly once), as the keys of their members.
+fn usage_required_groups(help: &str) -> Vec<Vec<String>> {
+    let usage = help
+        .lines()
+        .find_map(|l| l.strip_prefix("Usage: "))
+        .unwrap_or_default();
+    let mut groups = Vec::new();
+    let (mut depth, mut start) = (0usize, 0usize);
+    for (i, c) in usage.char_indices() {
+        match c {
+            '<' | '[' => {
+                if depth == 0 {
+                    start = i;
+                }
+                depth += 1;
+            }
+            '>' | ']' => {
+                depth = depth.saturating_sub(1);
+                let token = &usage[start..=i];
+                if depth == 0 && token.starts_with('<') {
+                    let inner = &token[1..token.len() - 1];
+                    let mut members = Vec::new();
+                    let (mut d, mut from) = (0usize, 0usize);
+                    for (j, ch) in inner.char_indices() {
+                        match ch {
+                            '<' | '[' => d += 1,
+                            '>' | ']' => d = d.saturating_sub(1),
+                            '|' if d == 0 => {
+                                members.push(&inner[from..j]);
+                                from = j + 1;
+                            }
+                            _ => {}
+                        }
+                    }
+                    members.push(&inner[from..]);
+                    if members.len() > 1 {
+                        groups.push(
+                            members
+                                .iter()
+                                .map(|m| {
+                                    m.split_whitespace().next().unwrap_or_default().to_string()
+                                })
+                                .collect(),
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    groups
+}
+
+/// The pairs of options of `spm <path>` that clap refuses together ("the
+/// argument … cannot be used with …"), probed on the binary itself so the
+/// overview reads the real `conflicts_with`/`ArgGroup` rules. Conflicts are
+/// checked before required arguments, so a probe that clap accepts may run the
+/// command: `sb` should be a throwaway sandbox.
+fn option_conflicts(sb: &Sandbox, path: &[&str], help: &str) -> Vec<(String, String)> {
+    let options = help_options(help);
+    let probe = |e: &HelpEntry| -> Vec<String> {
+        let mut args = vec![entry_key(e)];
+        if e.value.is_some() {
+            args.push(e.possible.first().cloned().unwrap_or_else(|| "x".into()));
+        }
+        args
+    };
+    let mut conflicts = Vec::new();
+    for (i, a) in options.iter().enumerate() {
+        for b in &options[i + 1..] {
+            let args: Vec<String> = path
+                .iter()
+                .map(|s| s.to_string())
+                .chain(probe(a))
+                .chain(probe(b))
+                .collect();
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            let out = sb.spm(&args);
+            let err = stderr_of(&out);
+            if !out.status.success()
+                && err.starts_with("error: the argument '")
+                && err.contains("' cannot be used with '")
+            {
+                conflicts.push((entry_key(a), entry_key(b)));
+            }
+        }
+    }
+    conflicts
+}
+
+/// The overview words for a leaf's entries: one per entry, except that
+/// entries tied by a conflict or a required group collapse into one choice at
+/// the position of the first of them — `<a|b>` when clap requires exactly one,
+/// `[a|b]` otherwise, where an alternative of several mutually compatible
+/// options lists each in its own brackets (`[[--name <N>] [--plugin]|--all]`).
+fn overview_words(
+    entries: &[HelpEntry],
+    required: &[Vec<String>],
+    conflicts: &[(String, String)],
+) -> Vec<String> {
+    let keys: Vec<String> = entries.iter().map(entry_key).collect();
+    let index = |k: &str| {
+        keys.iter()
+            .position(|x| x == k)
+            .unwrap_or_else(|| panic!("`{k}` is not in the help screen: {keys:?}"))
+    };
+    let n = entries.len();
+    let mut conflict = vec![vec![false; n]; n];
+    let mut tie = |a: usize, b: usize| {
+        conflict[a][b] = true;
+        conflict[b][a] = true;
+    };
+    for group in required {
+        for (i, a) in group.iter().enumerate() {
+            for b in &group[i + 1..] {
+                tie(index(a), index(b));
+            }
+        }
+    }
+    for (a, b) in conflicts {
+        tie(index(a), index(b));
+    }
+    // Connected components of the conflict graph, in first-seen order.
+    let mut component = vec![usize::MAX; n];
+    for start in 0..n {
+        if component[start] != usize::MAX {
+            continue;
+        }
+        let mut stack = vec![start];
+        component[start] = start;
+        while let Some(x) = stack.pop() {
+            for y in 0..n {
+                if conflict[x][y] && component[y] == usize::MAX {
+                    component[y] = start;
+                    stack.push(y);
+                }
+            }
+        }
+    }
+    let mut words = Vec::new();
+    for first in 0..n {
+        if component[first] != first {
+            continue;
+        }
+        let members: Vec<usize> = (0..n).filter(|&i| component[i] == first).collect();
+        if members.len() == 1 {
+            words.push(overview_arg(&entries[first]));
+            continue;
+        }
+        // The members must split into alternatives: options within one are
+        // compatible, options across two conflict. Anything else needs a
+        // richer synopsis than `[a|b]` can say.
+        let mut alternatives: Vec<Vec<usize>> = Vec::new();
+        for &m in &members {
+            match alternatives.iter_mut().find(|alt| !conflict[alt[0]][m]) {
+                Some(alt) => alt.push(m),
+                None => alternatives.push(vec![m]),
+            }
+        }
+        for (i, a) in alternatives.iter().enumerate() {
+            for (j, b) in alternatives.iter().enumerate() {
+                for &x in a {
+                    for &y in b {
+                        assert!(
+                            x == y || conflict[x][y] == (i != j),
+                            "`{}` and `{}` cannot be rendered as a choice between \
+                             alternatives {:?}: extend the overview renderer",
+                            keys[x],
+                            keys[y],
+                            members.iter().map(|&m| &keys[m]).collect::<Vec<_>>()
+                        );
+                    }
+                }
+            }
+        }
+        let names: Vec<&String> = members.iter().map(|&m| &keys[m]).collect();
+        let is_required = match required
+            .iter()
+            .find(|g| g.iter().any(|k| names.contains(&k)))
+        {
+            Some(group) => {
+                assert!(
+                    group.len() == names.len() && alternatives.iter().all(|a| a.len() == 1),
+                    "required group {group:?} is tied to other conflicts {names:?}: \
+                     extend the overview renderer"
+                );
+                true
+            }
+            None => false,
+        };
+        let body: Vec<String> = alternatives
+            .iter()
+            .map(|alt| match alt.as_slice() {
+                [one] => overview_bare(&entries[*one]),
+                many => many
+                    .iter()
+                    .map(|&m| overview_arg(&entries[m]))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            })
+            .collect();
+        let (open, close) = if is_required { ('<', '>') } else { ('[', ']') };
+        words.push(format!("{open}{}{close}", body.join("|")));
+    }
+    words
+}
+
 /// `# <summary>` and the wrapped `spm <command> <args> <options>` line(s) for
-/// one leaf command, from its compact help screen (`help`).
-fn overview_entry(leaf: &Leaf, help: &str) -> String {
+/// one leaf command, from its compact help screen (`help`) and the pairs of
+/// its options clap refuses together (`conflicts`, by [`entry_key`]).
+fn overview_entry(leaf: &Leaf, help: &str, conflicts: &[(String, String)]) -> String {
     let summary = help.lines().next().unwrap_or_default().trim();
     let mut out = format!("# {summary}");
     match leaf.aliases.as_slice() {
@@ -374,10 +613,17 @@ fn overview_entry(leaf: &Leaf, help: &str) -> String {
         many => out.push_str(&format!(" (aliases: {})", many.join(", "))),
     }
     out.push('\n');
+    let entries: Vec<HelpEntry> = help_entries(help, "Arguments:")
+        .into_iter()
+        .chain(help_options(help))
+        .collect();
     let words: Vec<String> = std::iter::once("spm".to_string())
         .chain(leaf.path.iter().cloned())
-        .chain(help_entries(help, "Arguments:").iter().map(overview_arg))
-        .chain(help_options(help).iter().map(overview_arg))
+        .chain(overview_words(
+            &entries,
+            &usage_required_groups(help),
+            conflicts,
+        ))
         .collect();
     let mut line = String::new();
     for word in words {
@@ -398,13 +644,16 @@ fn overview_entry(leaf: &Leaf, help: &str) -> String {
 
 /// The command overview: a ```bash block with every leaf command, its
 /// arguments and options and its one-line summary, all read from the CLI's
-/// own help, so it can't drift from the clap definitions.
+/// own help and argument rules, so it can't drift from the clap definitions.
 fn cli_overview(sb: &Sandbox) -> String {
+    // Conflict probes clap accepts may run the command: keep them out of `sb`.
+    let probes = Sandbox::new();
     let entries: Vec<String> = all_leaf_commands(sb)
         .iter()
         .map(|leaf| {
             let path: Vec<&str> = leaf.path.iter().map(String::as_str).collect();
-            overview_entry(leaf, &short_help(sb, &path))
+            let help = short_help(sb, &path);
+            overview_entry(leaf, &help, &option_conflicts(&probes, &path, &help))
         })
         .collect();
     format!("```bash\n{}```\n", entries.join("\n"))
@@ -496,7 +745,7 @@ Options:
         aliases: vec!["a".into()],
     };
     assert_eq!(
-        overview_entry(&leaf, help),
+        overview_entry(&leaf, help, &[]),
         "# Add things (alias: a)\n\
          spm thing add <NAME> [a|b]... [--tag <TAG>] [--protocol <ssh|https>] [-g]\n"
     );
@@ -505,12 +754,84 @@ Options:
         aliases: vec![],
     };
     assert_eq!(
-        overview_entry(&long, help),
+        overview_entry(&long, help, &[]),
         format!(
             "# Add things\nspm {} <NAME> \\\n    [a|b]... [--tag <TAG>] \
              [--protocol <ssh|https>] [-g]\n",
             "x".repeat(60)
         )
+    );
+}
+
+#[test]
+fn overview_entry_renders_required_alternatives_and_exclusive_options() {
+    let help = "\
+Drop things
+
+Usage: spm.exe thing drop [OPTIONS] <NAME|--all>
+
+Arguments:
+  [NAME]  The name
+
+Options:
+      --all              Every thing
+      --tag <TAG>        Tag
+      --branch <BRANCH>  Branch
+      --name <NAME>      Name
+      --each             Each
+      --plugin           Plugin
+  -g, --global           Global
+  -h, --help             Print help
+";
+    assert_eq!(
+        usage_required_groups(help),
+        vec![vec!["NAME".to_string(), "--all".to_string()]]
+    );
+    let leaf = Leaf {
+        path: vec!["drop".into()],
+        aliases: vec![],
+    };
+    let pair = |a: &str, b: &str| (a.to_string(), b.to_string());
+    let conflicts = [
+        pair("--tag", "--branch"),
+        pair("--name", "--each"),
+        pair("--plugin", "--each"),
+    ];
+    // A required group reads as clap's `<NAME|--all>`, never `[NAME] [--all]`
+    // (neither, or both); exclusive options read as one choice.
+    assert_eq!(
+        overview_entry(&leaf, help, &conflicts),
+        "# Drop things\n\
+         spm drop <NAME|--all> [--tag <TAG>|--branch <BRANCH>] \\\n    \
+         [[--name <NAME>] [--plugin]|--each] [-g]\n"
+    );
+}
+
+#[test]
+#[should_panic(expected = "cannot be rendered as a choice")]
+fn overview_entry_rejects_conflicts_it_cannot_render() {
+    let help = "\
+X
+
+Usage: spm.exe x [OPTIONS]
+
+Options:
+      --a  A
+      --b  B
+      --c  C
+      --d  D
+";
+    let leaf = Leaf {
+        path: vec!["x".into()],
+        aliases: vec![],
+    };
+    // A path of conflicts (A-B, B-C, C-D): C and D conflict, yet both combine
+    // with A, so no `[a|b]` choice of compatible alternatives says that.
+    let pair = |a: &str, b: &str| (a.to_string(), b.to_string());
+    overview_entry(
+        &leaf,
+        help,
+        &[pair("--a", "--b"), pair("--b", "--c"), pair("--c", "--d")],
     );
 }
 
