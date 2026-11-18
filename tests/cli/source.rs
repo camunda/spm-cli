@@ -431,20 +431,39 @@ fn skip_test_only_covers_every_node_with_attributes() {
 /// The `src` directory of the `syn` this crate builds against, as the cargo
 /// running this test resolves it (`--offline`: the sources are already there
 /// for the build), independent of where it lays out its build directory.
+/// Filtered to the host platform, the only one whose packages the build
+/// downloaded: an unfiltered `--offline` resolve needs every platform's.
 fn syn_sources() -> PathBuf {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
-    let out = std::process::Command::new(env!("CARGO"))
-        .args(["metadata", "--format-version", "1", "--offline", "--locked"])
-        .arg("--manifest-path")
-        .arg(&manifest)
-        .output()
+    let cargo = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out.stdout
+    };
+    let version = String::from_utf8(cargo(&["-vV"])).unwrap();
+    let host = version
+        .lines()
+        .find_map(|l| l.strip_prefix("host: "))
         .unwrap();
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let meta: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    let stdout = cargo(&[
+        "metadata",
+        "--format-version",
+        "1",
+        "--offline",
+        "--locked",
+        "--filter-platform",
+        host,
+        "--manifest-path",
+        manifest.to_str().unwrap(),
+    ]);
+    let meta: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
     let ours = meta["resolve"]["root"].as_str().unwrap();
     let syn = meta["resolve"]["nodes"]
         .as_array()
