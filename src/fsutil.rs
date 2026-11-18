@@ -108,7 +108,7 @@ pub fn remove_managed_path(path: &Path) -> std::io::Result<bool> {
 /// compares canonical paths, which is cross-platform safe.
 pub fn copy_tree(src: &Path, dst: &Path, boundary: &Path) -> Result<()> {
     walk_tree(src, boundary, &mut |entry| match entry {
-        Entry::Dir(rel) => Ok(std::fs::create_dir_all(dst.join(rel))?),
+        Entry::Dir { rel, .. } => Ok(std::fs::create_dir_all(dst.join(rel))?),
         Entry::File { from, rel } => {
             std::fs::copy(from, dst.join(rel))?;
             Ok(())
@@ -130,7 +130,7 @@ pub fn check_readable(src: &Path, boundary: &Path) -> Result<()> {
                     .with_context(|| format!("reading `{}`", from.display()))?;
             }
             Entry::Skipped { path, why } => warn_skipped(path, why),
-            Entry::Dir(_) => {}
+            Entry::Dir { .. } => {}
         }
         Ok(())
     })
@@ -138,8 +138,9 @@ pub fn check_readable(src: &Path, boundary: &Path) -> Result<()> {
 
 /// What [`walk_tree`] reaches, with paths relative to the walk's root.
 pub enum Entry<'a> {
-    /// A directory to materialize (the root itself is `""`).
-    Dir(&'a Path),
+    /// A directory to materialize (the root itself is `""`), listed through
+    /// its checked `canonical` path.
+    Dir { rel: &'a Path, canonical: &'a Path },
     /// A regular file to materialize, read from `from` (a symlink's target).
     File { from: &'a Path, rel: &'a Path },
     /// Something deliberately not traversed, at `path` as reached.
@@ -223,7 +224,10 @@ fn walk_dir(
             why: Skip::Cycle,
         });
     }
-    visit(Entry::Dir(rel))?;
+    visit(Entry::Dir {
+        rel,
+        canonical: &src_canon,
+    })?;
     let entries = std::fs::read_dir(&src_canon)
         .with_context(|| format!("listing `{}`", src_canon.display()))?;
     stack.push(src_canon);

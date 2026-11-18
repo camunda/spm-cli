@@ -210,7 +210,9 @@ flowchart LR
    `spm link` is read from a private snapshot of its working copy instead.
 3. **Scan.** Every skill and plugin passes the `scan` content gate before it can
    be materialized: a vendor only accepts content built from the gate's
-   `Scanned` proof (a plugin's bundled skills from their scanned plugin). With `resolveTransitive` on, each fetched skill's own
+   `Scanned` proof (a plugin's bundled skills from their scanned plugin, and
+   only from a directory that scan walked). With `resolveTransitive` on, each
+   fetched skill's own
    `ai.json` is read too, and its dependencies go through the same
    resolve → fetch → scan steps (see
    [Transitive Dependencies](/guide/transitive-dependencies)).

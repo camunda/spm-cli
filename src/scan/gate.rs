@@ -2,9 +2,10 @@
 //! command on a blocking finding unless the operator opted out.
 
 use anyhow::{bail, Result};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use super::engine::scan_within;
+use super::engine::{scan_tree, Walked};
 
 /// Set `SPM_ALLOW_SUSPICIOUS=1` to downgrade the pre-materialize gate from
 /// blocking to warn-only (for CI on known-good, or to unblock a false positive).
@@ -38,6 +39,7 @@ fn value_enables_override(v: &std::ffi::OsStr) -> bool {
 pub struct Scanned {
     path: PathBuf,
     root: PathBuf,
+    dirs: BTreeSet<PathBuf>,
 }
 
 impl Scanned {
@@ -50,6 +52,25 @@ impl Scanned {
     pub fn root(&self) -> &Path {
         &self.root
     }
+
+    /// Whether the directory at `path` was walked by this scan, and so its
+    /// whole subtree as a copy from it within [`Scanned::root`] reads it. A
+    /// path merely *under* [`Scanned::path`] may not be: the walk skips `.git`
+    /// by name and symlinks resolving out of the checkout or into `.git`.
+    /// A proof for content that was never scanned, covering no directory, for
+    /// vendor tests only.
+    #[cfg(test)]
+    pub fn assumed(path: PathBuf, root: PathBuf) -> Self {
+        Self {
+            path,
+            root,
+            dirs: BTreeSet::new(),
+        }
+    }
+
+    pub fn covers(&self, path: &Path) -> bool {
+        std::fs::canonicalize(path).is_ok_and(|canonical| self.dirs.contains(&canonical))
+    }
 }
 
 /// Scan a freshly-fetched skill/plugin at `root` and enforce the gate: print
@@ -58,10 +79,11 @@ impl Scanned {
 /// always surfaced as warnings but never fail the command. Passing returns the
 /// [`Scanned`] proof for exactly this `root` and `boundary`.
 pub fn enforce(label: &str, root: &Path, boundary: &Path) -> Result<Scanned> {
-    let findings = scan_within(root, boundary)?;
+    let Walked { findings, dirs } = scan_tree(root, boundary)?;
     let scanned = Scanned {
         path: root.to_path_buf(),
         root: boundary.to_path_buf(),
+        dirs,
     };
     if findings.is_empty() {
         return Ok(scanned);

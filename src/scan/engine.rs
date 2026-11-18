@@ -3,6 +3,7 @@
 //! line rules to its text, reporting [`Rule`]s from the rule table.
 
 use anyhow::{bail, Context, Result};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use super::decode::encoded_shell_payload;
@@ -36,7 +37,20 @@ pub fn scan_path(root: &Path) -> Result<Vec<Finding>> {
 /// symlinks may legitimately resolve elsewhere in that checkout). Used by the
 /// pre-materialize gate ([`enforce`]).
 pub fn scan_within(root: &Path, boundary: &Path) -> Result<Vec<Finding>> {
+    scan_tree(root, boundary).map(|walked| walked.findings)
+}
+
+/// What [`scan_tree`] read: its findings and the canonical path of every
+/// directory it walked, each one with its whole subtree.
+pub(super) struct Walked {
+    pub findings: Vec<Finding>,
+    pub dirs: BTreeSet<PathBuf>,
+}
+
+/// [`scan_within`], also reporting the directories the scan covered.
+pub(super) fn scan_tree(root: &Path, boundary: &Path) -> Result<Walked> {
     let mut findings = Vec::new();
+    let mut dirs = BTreeSet::new();
     // Canonicalize the boundary once up front (fail closed on an unreadable
     // boundary) so the per-directory containment checks below only canonicalize
     // the directory being visited, not the boundary each time.
@@ -68,7 +82,11 @@ pub fn scan_within(root: &Path, boundary: &Path) -> Result<Vec<Finding>> {
         // materializes the tree warns about them.
         crate::fsutil::walk_tree(root, &boundary, &mut |entry| match entry {
             crate::fsutil::Entry::File { from, rel } => scan_file(rel, from, &mut findings),
-            crate::fsutil::Entry::Dir(_) | crate::fsutil::Entry::Skipped { .. } => Ok(()),
+            crate::fsutil::Entry::Dir { canonical, .. } => {
+                dirs.insert(canonical.to_path_buf());
+                Ok(())
+            }
+            crate::fsutil::Entry::Skipped { .. } => Ok(()),
         })?;
     }
     findings.sort_by(|a, b| {
@@ -77,7 +95,7 @@ pub fn scan_within(root: &Path, boundary: &Path) -> Result<Vec<Finding>> {
             .then_with(|| a.path.cmp(&b.path))
             .then_with(|| a.line.cmp(&b.line))
     });
-    Ok(findings)
+    Ok(Walked { findings, dirs })
 }
 
 fn scan_file(rel: &Path, path: &Path, out: &mut Vec<Finding>) -> Result<()> {
