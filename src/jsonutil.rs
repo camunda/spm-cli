@@ -15,18 +15,25 @@ pub fn serialize_path<S: Serializer>(p: &Path, s: S) -> std::result::Result<S::O
 }
 
 /// Read a JSON object from `path`, returning an empty object if it is missing or blank.
+/// Only a missing file counts as absent: one that can't be read is an error.
 pub fn read_object(path: &Path) -> Result<Value> {
-    if !path.exists() {
-        return Ok(Value::Object(Map::new()));
-    }
-    let text = crate::jsonfile::load_text(path)?;
-    if text.trim().is_empty() {
-        return Ok(Value::Object(Map::new()));
-    }
-    crate::jsonfile::parse(&text, path)
+    Ok(read_existing_object(path)?.unwrap_or_else(|| Value::Object(Map::new())))
 }
 
-/// Write `value` as pretty JSON, creating parent dirs as needed.
+/// Read a JSON object from `path` (an empty one if it is blank), or `None` if
+/// it is missing.
+pub fn read_existing_object(path: &Path) -> Result<Option<Value>> {
+    let Some(text) = crate::jsonfile::read(path)? else {
+        return Ok(None);
+    };
+    if text.trim().is_empty() {
+        return Ok(Some(Value::Object(Map::new())));
+    }
+    crate::jsonfile::parse(&text, path).map(Some)
+}
+
+/// Write `value` as pretty JSON all at once (see [`crate::jsonfile::save`]),
+/// creating parent dirs as needed.
 pub fn write(path: &Path, value: &Value) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -106,6 +113,29 @@ mod tests {
         let path = dir.join("blank.json");
         std::fs::write(&path, "   \n\t \n").unwrap();
         assert_eq!(read_object(&path).unwrap(), Value::Object(Map::new()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A file that exists but can't be read is an error naming it, never an
+    /// empty object (which the next write would clobber the user's file with).
+    /// (Here a parent that is a file: `exists()` says no, reading says why.)
+    #[cfg(unix)]
+    #[test]
+    fn read_object_surfaces_an_unreadable_file() {
+        let dir = scratch("unreadable");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("claude"), "").unwrap();
+        let path = dir.join("claude").join("settings.json");
+        for err in [
+            read_object(&path).unwrap_err(),
+            read_existing_object(&path).unwrap_err(),
+        ] {
+            let err = format!("{err:#}");
+            assert!(
+                err.starts_with(&format!("reading {}", path.display())),
+                "{err}"
+            );
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

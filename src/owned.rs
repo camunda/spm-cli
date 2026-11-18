@@ -431,7 +431,7 @@ impl Ownership {
         };
         // The record is the sole history of what spm installed, so a failed
         // write (e.g. a full disk) must leave the previous one intact.
-        crate::jsonfile::save_atomic(&p, &record)
+        crate::jsonfile::save(&p, &record)
     }
 }
 
@@ -550,7 +550,7 @@ mod tests {
         let path = Ownership::path(&scope).unwrap();
         let before = std::fs::read(&path).unwrap();
 
-        let err = crate::jsonfile::replace_with(&path, |f| {
+        let err = crate::atomic::replace(&path, |f| {
             f.write_all(&b"{\"targets\":{}}\n"[..3])?;
             Err(std::io::Error::other("disk full"))
         })

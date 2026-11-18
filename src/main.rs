@@ -1,3 +1,4 @@
+mod atomic;
 mod cli;
 mod fetch;
 mod fsutil;

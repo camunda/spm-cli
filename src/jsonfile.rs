@@ -1,14 +1,14 @@
 //! Reading and writing spm's JSON files (`ai.json`, `ai.lock`, the links file,
 //! the ownership record, vendor config): one place for the error context
-//! naming the file, the pretty format with its trailing newline, and the one
-//! atomic-replace implementation.
+//! naming the file, the pretty format with its trailing newline, and saving
+//! through [`atomic`], so no JSON file is ever written in place.
 
+use crate::atomic::{self, Staged};
 use anyhow::{Context, Result};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use std::fs::File;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// The text of `path`, or `None` if it does not exist.
 pub fn read(path: &Path) -> Result<Option<String>> {
@@ -44,101 +44,29 @@ pub fn to_text<T: Serialize + ?Sized>(value: &T) -> Result<String> {
     Ok(serde_json::to_string_pretty(value)? + "\n")
 }
 
-/// Write `value` to `path` (see [`to_text`]) in place.
+/// Replace `path` with `value` (see [`to_text`]) all at once, writing
+/// through a symlink at `path` (see [`atomic::replace`]): a failed write
+/// leaves the previous file intact and a concurrent reader sees either the
+/// old or the new one, never a truncated one.
 pub fn save<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
-    std::fs::write(path, to_text(value)?).with_context(|| format!("writing {}", path.display()))
-}
-
-/// Replace the entry at `path` with `value` (see [`to_text`]) all at once
-/// (see [`Staged`]), so a failed write leaves the previous file intact and a
-/// concurrent reader sees either the old or the new one, never a truncated
-/// one. A symlink at `path` is replaced, not followed: resolve it first to
-/// write through it.
-pub fn save_atomic<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<()> {
     let text = to_text(value)?;
-    replace_with(path, |f| f.write_all(text.as_bytes()))
+    atomic::replace(path, |f| f.write_all(text.as_bytes()))
         .with_context(|| format!("writing {}", path.display()))
 }
 
-/// [`Staged::write`] then [`Staged::publish`].
-pub fn replace_with(
-    path: &Path,
-    write: impl FnOnce(&mut File) -> std::io::Result<()>,
-) -> std::io::Result<()> {
-    Staged::write(path, write)?.publish()
-}
-
-/// A complete replacement for a file, staged beside it as a hidden `.tmp`
-/// file (which readers listing the directory for `.json` files skip) until
-/// [`Staged::publish`] renames it over the destination. Dropped unpublished,
-/// it is removed.
-#[must_use = "a staged file is removed unless published"]
-pub struct Staged {
-    tmp: PathBuf,
-    dest: PathBuf,
-    published: bool,
-}
-
-impl Staged {
-    /// Stage what `write` writes as the next content of `dest`, flushed to
-    /// disk. `dest`'s directory must exist.
-    pub fn write(
-        dest: &Path,
-        write: impl FnOnce(&mut File) -> std::io::Result<()>,
-    ) -> std::io::Result<Self> {
-        let (Some(dir), Some(name)) = (dest.parent(), dest.file_name()) else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("{} is not a file path", dest.display()),
-            ));
-        };
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        let tmp = dir.join(format!(
-            ".{}.{}-{nanos}.tmp",
-            name.to_string_lossy(),
-            std::process::id()
-        ));
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)?;
-        let staged = Self {
-            tmp,
-            dest: dest.to_path_buf(),
-            published: false,
-        };
-        write(&mut file)?;
-        file.sync_all()?;
-        Ok(staged)
-    }
-
-    /// Atomically replace the destination with the staged file.
-    pub fn publish(mut self) -> std::io::Result<()> {
-        std::fs::rename(&self.tmp, &self.dest)?;
-        self.published = true;
-        Ok(())
-    }
-
-    /// Where the replacement is staged.
-    #[cfg(test)]
-    pub fn path(&self) -> &Path {
-        &self.tmp
-    }
-}
-
-impl Drop for Staged {
-    fn drop(&mut self) {
-        if !self.published {
-            let _ = std::fs::remove_file(&self.tmp);
-        }
-    }
+/// Stage `value` (see [`to_text`]) as the next content of `path`, written
+/// through a symlink at `path`, for the caller to publish (see [`save`]).
+pub fn stage<T: Serialize + ?Sized>(path: &Path, value: &T) -> Result<Staged> {
+    let text = to_text(value)?;
+    atomic::resolve(path)
+        .and_then(|dest| Staged::write(&dest, |f| f.write_all(text.as_bytes())))
+        .with_context(|| format!("writing {}", path.display()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn scratch(tag: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -163,13 +91,11 @@ mod tests {
     fn saves_pretty_with_a_trailing_newline_and_loads_it_back() {
         let dir = scratch("roundtrip");
         let value = serde_json::json!({"b": [1], "a": {}});
-        for (i, save) in [save::<serde_json::Value>, save_atomic].iter().enumerate() {
-            let p = dir.join(format!("{i}.json"));
-            save(&p, &value).unwrap();
-            let text = std::fs::read_to_string(&p).unwrap();
-            assert_eq!(text, serde_json::to_string_pretty(&value).unwrap() + "\n");
-            assert_eq!(load::<serde_json::Value>(&p).unwrap(), value);
-        }
+        let p = dir.join("value.json");
+        save(&p, &value).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert_eq!(text, serde_json::to_string_pretty(&value).unwrap() + "\n");
+        assert_eq!(load::<serde_json::Value>(&p).unwrap(), value);
         assert!(tmp_files(&dir).is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -203,53 +129,20 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// A failed write (e.g. a full disk) or an abandoned stage leaves the
-    /// previous file intact and no staging file behind.
-    #[test]
-    fn a_failed_replacement_keeps_the_previous_file() {
-        let dir = scratch("failed");
-        let p = dir.join("state.json");
-        std::fs::write(&p, "old").unwrap();
-        let err = replace_with(&p, |f| {
-            f.write_all(b"ne")?;
-            Err(std::io::Error::other("disk full"))
-        })
-        .unwrap_err();
-        assert_eq!(err.to_string(), "disk full");
-        drop(Staged::write(&p, |f| f.write_all(b"new")).unwrap());
-        assert_eq!(std::fs::read_to_string(&p).unwrap(), "old");
-        assert!(tmp_files(&dir).is_empty(), "{:?}", tmp_files(&dir));
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// Until published, readers see the old file and the staged one beside
-    /// it; publishing replaces the entry at the destination.
-    #[test]
-    fn publishing_replaces_the_destination_at_once() {
-        let dir = scratch("publish");
-        let p = dir.join("state.json");
-        std::fs::write(&p, "old").unwrap();
-        let staged = Staged::write(&p, |f| f.write_all(b"new")).unwrap();
-        assert!(staged.path().is_file());
-        assert_eq!(std::fs::read_to_string(&p).unwrap(), "old");
-        staged.publish().unwrap();
-        assert_eq!(std::fs::read_to_string(&p).unwrap(), "new");
-        assert!(tmp_files(&dir).is_empty());
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// A symlink at the destination is replaced, not written through.
+    /// A symlinked file (e.g. a shared `ai.json`) is written through: the
+    /// link stays and what it points at is replaced.
     #[cfg(unix)]
     #[test]
-    fn save_atomic_replaces_a_symlink_rather_than_following_it() {
+    fn save_writes_through_a_symlink() {
         let dir = scratch("symlink");
         let real = dir.join("real.json");
         let link = dir.join("link.json");
         std::fs::write(&real, "{}").unwrap();
         std::os::unix::fs::symlink(&real, &link).unwrap();
-        save_atomic(&link, &1).unwrap();
-        assert!(!std::fs::symlink_metadata(&link).unwrap().is_symlink());
-        assert_eq!(std::fs::read_to_string(&real).unwrap(), "{}");
+        save(&link, &1).unwrap();
+        assert!(std::fs::symlink_metadata(&link).unwrap().is_symlink());
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "1\n");
+        assert!(tmp_files(&dir).is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -107,6 +107,7 @@ const ALLOWED_EDGES: &[(&str, &[&str])] = &[
     (
         "vendor",
         &[
+            "atomic",
             "fsutil",
             "gitignore",
             "ids",
@@ -124,7 +125,9 @@ const ALLOWED_EDGES: &[(&str, &[&str])] = &[
     ),
     (
         "links",
-        &["ids", "jsonfile", "lockfile", "paths", "scope", "shell"],
+        &[
+            "atomic", "ids", "jsonfile", "lockfile", "paths", "scope", "shell",
+        ],
     ),
     ("lockfile", &["ids", "jsonfile", "manifest", "version"]),
     ("materialized", &["ids", "scan"]),
@@ -139,12 +142,14 @@ const ALLOWED_EDGES: &[(&str, &[&str])] = &[
     ("scan", &["fsutil", "jsonutil"]),
     ("skillcheck", &["fsutil"]),
     ("jsonutil", &["jsonfile"]),
+    ("jsonfile", &["atomic"]),
+    ("gitignore", &["atomic"]),
     ("scope", &["paths"]),
 ];
 
 /// Modules that must depend on no other module of the crate.
 const LEAVES: &[&str] = &[
-    "fsutil", "jsonfile", "pathid", "paths", "remote", "schema", "shell", "version",
+    "atomic", "fsutil", "pathid", "paths", "remote", "schema", "shell", "version",
 ];
 
 /// The only modules allowed to depend on `cli`: it is the top of the stack.

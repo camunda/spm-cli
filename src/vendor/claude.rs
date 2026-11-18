@@ -2,7 +2,7 @@ use super::{Claim, PluginHost, Registration, Vendor};
 use crate::ids::DepName;
 use crate::materialized::{MaterializedPlugin, MaterializedSkill};
 use crate::scope::Scope;
-use crate::{fsutil, gitignore, jsonutil, paths};
+use crate::{atomic, fsutil, gitignore, jsonutil, paths};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -69,31 +69,33 @@ impl Vendor for Claude {
     ) -> Result<()> {
         let market = marketplace(scope);
         let market_dir = managed_dir(scope)?;
-        // Rebuild from scratch so removed skills disappear (dir is spm-owned).
-        fsutil::remove_path_if_present(&market_dir)?;
-        let plugin_dir = market_dir.join("plugin");
-        let skills_dir = plugin_dir.join("skills");
-        std::fs::create_dir_all(&skills_dir)?;
+        // Rebuild from scratch so removed skills disappear (dir is spm-owned),
+        // published whole so a failure keeps the previous marketplace.
+        atomic::publish_dir(&market_dir, |market_dir| {
+            let plugin_dir = market_dir.join("plugin");
+            let skills_dir = plugin_dir.join("skills");
+            std::fs::create_dir_all(&skills_dir)?;
 
-        for s in skills {
-            claim(s.name())?;
-            let dest = skills_dir.join(s.name());
-            fsutil::copy_tree(s.path(), &dest, s.root())
-                .with_context(|| format!("copying skill `{}` into plugin", s.name()))?;
-        }
+            for s in skills {
+                claim(s.name())?;
+                let dest = skills_dir.join(s.name());
+                fsutil::copy_tree(s.path(), &dest, s.root())
+                    .with_context(|| format!("copying skill `{}` into plugin", s.name()))?;
+            }
 
-        jsonutil::write(
-            &plugin_dir.join(".claude-plugin/plugin.json"),
-            &json!({ "name": market }),
-        )?;
-        jsonutil::write(
-            &market_dir.join(".claude-plugin/marketplace.json"),
-            &json!({
-                "name": market,
-                "owner": { "name": "spm" },
-                "plugins": [ { "name": market, "source": "./plugin" } ],
-            }),
-        )?;
+            jsonutil::write(
+                &plugin_dir.join(".claude-plugin/plugin.json"),
+                &json!({ "name": market }),
+            )?;
+            jsonutil::write(
+                &market_dir.join(".claude-plugin/marketplace.json"),
+                &json!({
+                    "name": market,
+                    "owner": { "name": "spm" },
+                    "plugins": [ { "name": market, "source": "./plugin" } ],
+                }),
+            )
+        })?;
 
         patch_settings(scope, &market_dir, skills)?;
         if let Scope::Project { root } = scope {
@@ -167,8 +169,7 @@ impl Registration for Claude {
 
     fn deregister(&self, scope: &Scope) -> Result<()> {
         let path = settings_path(scope)?;
-        if path.exists() {
-            let mut root = jsonutil::read_object(&path)?;
+        if let Some(mut root) = jsonutil::read_existing_object(&path)? {
             jsonutil::remove_nested(&mut root, "extraKnownMarketplaces", marketplace(scope));
             jsonutil::remove_nested(&mut root, "enabledPlugins", &plugin_key(scope));
             jsonutil::write(&path, &root)?;
@@ -187,9 +188,6 @@ impl PluginHost for Claude {
     ) -> Result<()> {
         let market = plugins_marketplace(scope);
         let market_dir = plugins_managed_dir(scope)?;
-        // The plugins marketplace dir is entirely spm-owned: rebuild from scratch
-        // so removed plugins disappear.
-        fsutil::remove_path_if_present(&market_dir)?;
 
         // Deregister first, then re-add: this drops stale marketplace/enabled
         // entries in one pass and cleanly handles the "no plugins left" case.
@@ -198,38 +196,54 @@ impl PluginHost for Claude {
         jsonutil::remove_nested(&mut root, "extraKnownMarketplaces", market);
         jsonutil::remove_nested_by_suffix(&mut root, "enabledPlugins", &format!("@{market}"));
 
+        // The plugins marketplace dir is entirely spm-owned: rebuild from scratch
+        // so removed plugins disappear.
         if plugins.is_empty() {
+            fsutil::remove_path_if_present(&market_dir)?;
             jsonutil::write(&settings, &root)?;
             return Ok(());
         }
 
-        std::fs::create_dir_all(&market_dir)?;
-        let mut entries: Vec<Value> = Vec::new();
-        for p in plugins {
-            let dest = market_dir.join(p.name());
-            fsutil::copy_tree(p.path(), &dest, p.root())
-                .with_context(|| format!("copying plugin `{}` into marketplace", p.name()))?;
-            // The plugin's bundled skills are already served through the `spm`
-            // skills marketplace (flattened into the ordinary skills list), so
-            // strip the `skills` pointer from this copy to avoid exposing them
-            // twice — this registration contributes only agents/MCP/hooks/scripts.
-            strip_bundled_skills(&dest)?;
-
-            let plugin_name = crate::plugin::plugin_name(&dest, p.name())?;
-            entries.push(json!({ "name": plugin_name, "source": format!("./{}", p.name()) }));
-            jsonutil::object_mut(&mut root, "enabledPlugins")
-                .with_context(|| format!("updating {}", settings.display()))?
-                .insert(format!("{plugin_name}@{market}"), Value::Bool(true));
+        // Both entries are inserted below; a user value in the way fails
+        // before the marketplace changes.
+        for key in ["enabledPlugins", "extraKnownMarketplaces"] {
+            jsonutil::object_mut(&mut root, key)
+                .with_context(|| format!("updating {}", settings.display()))?;
         }
+        let mut names = Vec::new();
+        // Published whole, so a failure keeps the previous marketplace.
+        atomic::publish_dir(&market_dir, |market_dir| {
+            let mut entries: Vec<Value> = Vec::new();
+            for p in plugins {
+                let dest = market_dir.join(p.name());
+                fsutil::copy_tree(p.path(), &dest, p.root())
+                    .with_context(|| format!("copying plugin `{}` into marketplace", p.name()))?;
+                // The plugin's bundled skills are already served through the
+                // `spm` skills marketplace (flattened into the ordinary skills
+                // list), so strip the `skills` pointer from this copy to avoid
+                // exposing them twice — this registration contributes only
+                // agents/MCP/hooks/scripts.
+                strip_bundled_skills(&dest)?;
 
-        jsonutil::write(
-            &market_dir.join(".claude-plugin/marketplace.json"),
-            &json!({
-                "name": market,
-                "owner": { "name": "spm" },
-                "plugins": entries,
-            }),
-        )?;
+                let plugin_name = crate::plugin::plugin_name(&dest, p.name())?;
+                entries.push(json!({ "name": plugin_name, "source": format!("./{}", p.name()) }));
+                names.push(plugin_name);
+            }
+
+            jsonutil::write(
+                &market_dir.join(".claude-plugin/marketplace.json"),
+                &json!({
+                    "name": market,
+                    "owner": { "name": "spm" },
+                    "plugins": entries,
+                }),
+            )
+        })?;
+        let enabled = jsonutil::object_mut(&mut root, "enabledPlugins")
+            .with_context(|| format!("updating {}", settings.display()))?;
+        for plugin_name in names {
+            enabled.insert(format!("{plugin_name}@{market}"), Value::Bool(true));
+        }
         jsonutil::object_mut(&mut root, "extraKnownMarketplaces")
             .with_context(|| format!("updating {}", settings.display()))?
             .insert(
@@ -284,8 +298,7 @@ impl PluginHost for Claude {
     fn deregister_plugins(&self, scope: &Scope) -> Result<()> {
         let market = plugins_marketplace(scope);
         let settings = settings_path(scope)?;
-        if settings.exists() {
-            let mut root = jsonutil::read_object(&settings)?;
+        if let Some(mut root) = jsonutil::read_existing_object(&settings)? {
             jsonutil::remove_nested(&mut root, "extraKnownMarketplaces", market);
             jsonutil::remove_nested_by_suffix(&mut root, "enabledPlugins", &format!("@{market}"));
             jsonutil::write(&settings, &root)?;
@@ -318,10 +331,9 @@ fn plugins_managed_dir(scope: &Scope) -> Result<PathBuf> {
 /// must not also advertise those same skills.
 fn strip_bundled_skills(plugin_dir: &Path) -> Result<()> {
     let pj = plugin_dir.join(".claude-plugin").join("plugin.json");
-    if !pj.exists() {
+    let Some(mut v) = jsonutil::read_existing_object(&pj)? else {
         return Ok(());
-    }
-    let mut v = jsonutil::read_object(&pj)?;
+    };
     if let Some(obj) = v.as_object_mut() {
         obj.remove("skills");
     }
@@ -465,6 +477,55 @@ mod tests {
             .unwrap()
             .contains(".spm/"));
 
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    /// A materialize failing part-way (here: the second skill's claim)
+    /// leaves the previous marketplace and settings exactly as they were,
+    /// with nothing staged left beside them.
+    #[test]
+    fn a_failed_materialize_keeps_the_previous_marketplace() {
+        let tmp = scratch("failed-mat");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let scope = Scope::Project { root: tmp.clone() };
+        let greet = make_skill(&tmp, "greet");
+        Claude
+            .materialize(
+                &scope,
+                "spm-1234",
+                std::slice::from_ref(&greet),
+                &[],
+                &mut |_| Ok(()),
+            )
+            .unwrap();
+        let settings = tmp.join(".claude/settings.local.json");
+        let before = std::fs::read(&settings).unwrap();
+
+        std::fs::write(greet.path().join("SKILL.md"), "v2\n").unwrap();
+        let other = make_skill(&tmp, "other");
+        let err = Claude
+            .materialize(&scope, "spm-1234", &[greet, other], &[], &mut |n| {
+                anyhow::ensure!(n.as_str() != "other", "boom");
+                Ok(())
+            })
+            .unwrap_err();
+        assert_eq!(format!("{err:#}"), "boom");
+
+        let skills = tmp.join(".spm/claude/plugin/skills");
+        assert_eq!(
+            std::fs::read_to_string(skills.join("greet/SKILL.md")).unwrap(),
+            "---\nname: greet\n---\n"
+        );
+        assert!(!skills.join("other").exists());
+        assert!(tmp
+            .join(".spm/claude/.claude-plugin/marketplace.json")
+            .is_file());
+        assert_eq!(std::fs::read(&settings).unwrap(), before);
+        let names: Vec<_> = std::fs::read_dir(tmp.join(".spm"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["claude"]);
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 }

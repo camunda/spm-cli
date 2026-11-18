@@ -210,6 +210,25 @@ mod tests {
         assert_eq!(m.allowed_sources, Some(Vec::new()));
     }
 
+    /// A symlinked `ai.json` (e.g. shared across checkouts) is saved through
+    /// the link: the link stays and the file it points at is updated.
+    #[cfg(unix)]
+    #[test]
+    fn save_writes_through_a_symlinked_manifest() {
+        let dir = crate::manifest::testutil::Scratch::new();
+        let shared = dir.0.join("shared.json");
+        std::fs::write(&shared, "{}\n").unwrap();
+        std::os::unix::fs::symlink(&shared, Manifest::path_in(&dir.0)).unwrap();
+        let m = Manifest::parse(r#"{"targets":["copilot"]}"#, &shared).unwrap();
+        m.save(&dir.0).unwrap();
+        let link = std::fs::symlink_metadata(Manifest::path_in(&dir.0)).unwrap();
+        assert!(link.is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(&shared).unwrap(),
+            m.to_text().unwrap()
+        );
+    }
+
     mod props {
         use super::*;
         use crate::manifest::testutil::{dep_name, edited, Scratch};

@@ -53,8 +53,11 @@ flowchart TD
   git --> ids
   git --> policy
   git --> remote
+  gitignore --> atomic
   ids --> version
+  jsonfile --> atomic
   jsonutil --> jsonfile
+  links --> atomic
   links --> ids
   links --> jsonfile
   links --> lockfile
@@ -113,6 +116,7 @@ flowchart TD
   transitive --> resolver
   transitive --> scan
   transitive --> skillcheck
+  vendor --> atomic
   vendor --> fsutil
   vendor --> gitignore
   vendor --> ids
