@@ -4,7 +4,7 @@
 
 use super::guard::{guard_working_copies, Writes};
 use super::{resolve, Mode};
-use crate::cli::verdict::{LockFindings, LockVerdict};
+use crate::cli::verdict::{LockFindings, LockProblem, LockVerdict, Rewrite};
 use crate::ids::DepName;
 use crate::links::{Linked, Links};
 use crate::lockfile::{LockedSkill, Lockfile};
@@ -294,15 +294,11 @@ pub(super) fn backstop(
     // An unverified transitive subtree was not walked, so the lock built here
     // lacks it: only the entries it did build are compared.
     if resolve_transitive && !unwalked.is_empty() {
-        findings
-            .rewritten
-            .extend(verified_lock_drift(&on_disk, lock, unwalked)?);
+        for rewrite in verified_lock_drift(&on_disk, lock, unwalked)? {
+            findings.push(LockProblem::Rewritten(rewrite));
+        }
     } else if on_disk != serde_json::to_value(lock)? {
-        findings.rewritten.push(
-            "ai.lock differs from what spm would write (e.g. a plugin's bundled skills \
-             or a transitive skill's requesters changed)"
-                .to_string(),
-        );
+        findings.push(LockProblem::Rewritten(Rewrite::Lock));
     }
     Ok(())
 }
@@ -318,7 +314,7 @@ fn verified_lock_drift(
     on_disk: &serde_json::Value,
     lock: &Lockfile,
     unverified: &[DepName],
-) -> Result<Vec<String>> {
+) -> Result<Vec<Rewrite>> {
     use serde_json::Value;
     let mut drift = Vec::new();
     // An unwalked subtree only adds skill entries: every other top-level field
@@ -342,9 +338,7 @@ fn verified_lock_drift(
             continue;
         }
         if key != "plugins" {
-            drift.push(format!(
-                "ai.lock top-level `{key}` differs from what spm would write"
-            ));
+            drift.push(Rewrite::TopLevel(key.clone()));
             continue;
         }
         // Name the plugins that differ; only a shape difference (e.g. an
@@ -356,13 +350,10 @@ fn verified_lock_drift(
         names.dedup();
         let before = drift.len();
         for name in names.into_iter().filter(|n| ours.get(*n) != theirs.get(*n)) {
-            drift.push(format!(
-                "ai.lock entry for plugin `{name}` differs from what spm would write (e.g. \
-                 its bundled skills changed)"
-            ));
+            drift.push(Rewrite::Plugin(name.clone()));
         }
         if drift.len() == before {
-            drift.push("ai.lock `plugins` differs from what spm would write".to_string());
+            drift.push(Rewrite::Plugins);
         }
     }
     let unwalked = |r: &str| {
@@ -425,10 +416,7 @@ fn verified_lock_drift(
             }
         }
         if disk != entry {
-            drift.push(format!(
-                "ai.lock entry for skill `{name}` differs from what spm would write (e.g. \
-                 a transitive skill's requesters changed)"
-            ));
+            drift.push(Rewrite::Skill(name.clone()));
         }
     }
     Ok(drift)

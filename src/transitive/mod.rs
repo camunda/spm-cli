@@ -157,10 +157,10 @@ pub struct Output {
     /// other selectors nested edges requested for a root's identity that
     /// resolved to the root's commit. Transitive entries carry theirs in place.
     pub direct_also_satisfies: BTreeMap<DepName, Vec<Satisfied>>,
-    /// `--locked` only: `(synthesized name, description)` for each transitive
+    /// `--locked` only: every transitive
     /// edge that would have needed a fresh resolution because `ai.lock` has no
     /// matching pin for it. That edge's subtree is not walked.
-    pub lock_misses: Vec<(DepName, String)>,
+    pub lock_misses: Vec<LockMiss>,
     /// [`Mode::Check`] only: skills whose store checkout is missing, so they
     /// (and their nested dependencies) could not be verified offline.
     pub unverified: Vec<DepName>,
@@ -170,4 +170,27 @@ pub struct Output {
     /// reached, so the unwalked subtree could claim it first, under that name.
     /// These are not in `lock_misses`.
     pub uncertain_misses: Vec<DepName>,
+}
+
+/// A transitive edge `--locked` refused to resolve: `ai.lock` has no pin for
+/// it that can be reused.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LockMiss {
+    /// The edge's synthesized name.
+    pub name: DepName,
+    /// The name its requester declares it under.
+    pub declared: DepName,
+    /// Its requester.
+    pub parent: DepName,
+    pub why: MissedPin,
+}
+
+/// Why `ai.lock` has no reusable pin for a [`LockMiss`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MissedPin {
+    /// No entry under the synthesized name.
+    Missing,
+    /// The entry pins another request; the changes as `Pin::drift_from`
+    /// describes them.
+    Changed(String),
 }
