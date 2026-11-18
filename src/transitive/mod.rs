@@ -160,14 +160,14 @@ pub struct Output {
     /// `--locked` only: `(synthesized name, description)` for each transitive
     /// edge that would have needed a fresh resolution because `ai.lock` has no
     /// matching pin for it. That edge's subtree is not walked.
-    pub lock_misses: Vec<(String, String)>,
+    pub lock_misses: Vec<(DepName, String)>,
     /// [`Mode::Check`] only: skills whose store checkout is missing, so they
     /// (and their nested dependencies) could not be verified offline.
-    pub unverified: Vec<String>,
+    pub unverified: Vec<DepName>,
     /// [`Mode::Check`] only: synthesized names of misses that may be artifacts
     /// of an [`Output::unverified`] subtree. The lock has no entry under the
     /// miss's own name but pins the same identity under a name this walk never
     /// reached, so the unwalked subtree could claim it first, under that name.
     /// These are not in `lock_misses`.
-    pub uncertain_misses: Vec<String>,
+    pub uncertain_misses: Vec<DepName>,
 }

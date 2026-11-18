@@ -4,7 +4,7 @@
 //! reports through ([`Reporter`]), silent in a read-only check.
 
 use crate::ids::DepName;
-use crate::lockfile::LockedSkill;
+use crate::lockfile::Pin;
 use crate::manifest::DependencyKind;
 use crate::store::{self, Ensured};
 use anyhow::{Context, Result};
@@ -60,7 +60,7 @@ impl Fetch<'_> {
         self,
         kind: DependencyKind,
         name: &DepName,
-        locked: &LockedSkill,
+        locked: &Pin,
         report: Reporter,
     ) -> Result<Checkout> {
         match self {

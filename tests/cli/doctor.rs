@@ -638,6 +638,11 @@ fn doctor_keeps_a_diamond_miss_whose_selector_the_unreached_pin_does_not_cover()
     assert!(!sb.spm(&["install", "--locked"]).status.success());
 }
 
+/// A field of the other kind (a skill's `bundled_skills`, a plugin's
+/// `requested_by` or `also_satisfies`) is dropped on load, yet it is still
+/// drift on a verified entry: the whole-lock backstop of `install --locked`
+/// compares the lock as written, so doctor must flag it too — with every
+/// root cached and with an independent skill root missing from the store.
 #[test]
 fn doctor_compares_verified_lock_entries_when_another_root_is_not_in_the_store() {
     let sb = Sandbox::new();
@@ -647,8 +652,8 @@ fn doctor_compares_verified_lock_entries_when_another_root_is_not_in_the_store()
     write_manifest(
         &sb,
         &format!(
-            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{"alpha":{{"git":"{alpha}","branch":"main"}}}},"plugins":{{"ds":{{"git":"{}","branch":"main","path":"pkg"}}}}}}"#,
-            sb.skill_url()
+            r#"{{"targets":["copilot"],"resolveTransitive":true,"skills":{{"alpha":{{"git":"{alpha}","branch":"main"}},"greet":{{"git":"{url}","branch":"main"}}}},"plugins":{{"ds":{{"git":"{url}","branch":"main","path":"pkg"}}}}}}"#,
+            url = sb.skill_url()
         ),
     );
     sb.ok(&["install"]);
@@ -657,19 +662,46 @@ fn doctor_compares_verified_lock_entries_when_another_root_is_not_in_the_store()
     let (ok, doc) = doctor(&sb, &[]);
     assert!(ok, "only unverified: {doc:#}");
 
-    // Plugins are never walked, so no unwalked subtree explains a difference.
-    for (key, value) in [
-        ("bundled_skills", serde_json::json!([])),
-        ("also_satisfies", serde_json::json!(["branch:dev"])),
+    // A plugin is never walked and `greet` has no dependencies, so alpha's
+    // unwalked subtree explains no difference in either entry.
+    for (kind, name, key, value) in [
+        ("plugins", "ds", "bundled_skills", serde_json::json!([])),
+        (
+            "plugins",
+            "ds",
+            "also_satisfies",
+            serde_json::json!(["branch:dev"]),
+        ),
+        (
+            "plugins",
+            "ds",
+            "requested_by",
+            serde_json::json!(["alpha"]),
+        ),
+        (
+            "skills",
+            "greet",
+            "bundled_skills",
+            serde_json::json!(["x"]),
+        ),
     ] {
-        std::fs::write(sb.project.join("ai.lock"), &installed).unwrap();
-        edit_lock(&sb, |l| l["plugins"]["ds"][key] = value);
-        let (ok, doc) = doctor(&sb, &[]);
-        assert!(!ok, "{key}: {doc:#}");
-        let c = check(&doc, "lockfile", "error");
-        assert!(c["details"].to_string().contains("`ds`"), "{c}");
-        assert!(!sb.spm(&["install", "--locked"]).status.success());
-        remove_store_checkout(&sb, "alpha-");
+        for cached in [true, false] {
+            std::fs::write(sb.project.join("ai.lock"), &installed).unwrap();
+            if cached {
+                sb.ok(&["install", "--locked"]);
+            } else {
+                remove_store_checkout(&sb, "alpha-");
+            }
+            edit_lock(&sb, |l| l[kind][name][key] = value.clone());
+            let what = format!("{name}.{key} (cached: {cached})");
+            let (ok, doc) = doctor(&sb, &[]);
+            assert!(!ok, "{what}: {doc:#}");
+            let c = check(&doc, "lockfile", "error");
+            // Fully cached, only the whole-lock comparison sees it.
+            let named = c["details"].to_string().contains(&format!("`{name}`"));
+            assert!(cached || named, "{what}: {c}");
+            assert!(!sb.spm(&["install", "--locked"]).status.success(), "{what}");
+        }
     }
 }
 

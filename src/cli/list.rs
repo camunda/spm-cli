@@ -3,7 +3,7 @@ use super::index::DependencyIndex;
 use super::session::{Access, ScopeSession};
 use crate::ids::DepName;
 use crate::links::Links;
-use crate::lockfile::{LockedSkill, Lockfile};
+use crate::lockfile::{LockEntry, Lockfile, Pin};
 use crate::manifest::{DependencyKind, Manifest};
 use crate::scope::Scope;
 use crate::version::Version;
@@ -40,7 +40,7 @@ struct SkillRow<'a> {
     /// from instead of its locked commit; `null` when not linked.
     linked: Option<&'a str>,
     #[serde(skip)]
-    lock: Option<&'a LockedSkill>,
+    lock: Option<&'a Pin>,
 }
 
 #[derive(Serialize)]
@@ -58,7 +58,7 @@ struct PluginRow<'a> {
     /// from instead of its locked commit; `null` when not linked.
     linked: Option<&'a str>,
     #[serde(skip)]
-    lock: Option<&'a LockedSkill>,
+    lock: Option<&'a Pin>,
 }
 
 pub(super) fn list(scope: &Scope, json: bool) -> Result<()> {
@@ -87,24 +87,25 @@ fn collect<'a>(
     }
     let index = DependencyIndex::new(manifest, lock);
     for d in index.direct(DependencyKind::Skill) {
+        let pin = d.locked.map(LockEntry::pin);
         report.skills.push(SkillRow {
             name: d.name,
             git: &d.spec.git,
             path: d.spec.path.as_deref(),
             selector: Some(d.spec.version()?),
-            resolved_tag: d.locked.and_then(|l| l.resolved_tag.as_deref()),
-            commit: d.locked.map(|l| l.commit.as_str()),
-            installed: d.locked.is_some(),
+            resolved_tag: pin.and_then(|l| l.resolved_tag.as_deref()),
+            commit: pin.map(|l| l.commit.as_str()),
+            installed: pin.is_some(),
             transitive: false,
             requested_by: &[],
             linked: linked(d.name),
-            lock: d.locked,
+            lock: pin,
         });
     }
     // Transitively-resolved skills live in `ai.lock` but not the manifest; list
     // them under their direct requester(s) so the dependency graph is visible.
     for t in index.transitive() {
-        let l = t.locked;
+        let l = t.locked.pin();
         report.skills.push(SkillRow {
             name: t.name,
             git: &l.git,
@@ -114,23 +115,24 @@ fn collect<'a>(
             commit: Some(&l.commit),
             installed: true,
             transitive: true,
-            requested_by: &l.requested_by,
+            requested_by: t.locked.requested_by(),
             linked: None,
             lock: Some(l),
         });
     }
     for d in index.direct(DependencyKind::Plugin) {
+        let pin = d.locked.map(LockEntry::pin);
         report.plugins.push(PluginRow {
             name: d.name,
             git: &d.spec.git,
             path: d.spec.path.as_deref(),
             selector: Some(d.spec.version()?),
-            resolved_tag: d.locked.and_then(|l| l.resolved_tag.as_deref()),
-            commit: d.locked.map(|l| l.commit.as_str()),
-            installed: d.locked.is_some(),
-            bundled_skills: d.locked.map(|l| l.bundled_skills.as_slice()).unwrap_or(&[]),
+            resolved_tag: pin.and_then(|l| l.resolved_tag.as_deref()),
+            commit: pin.map(|l| l.commit.as_str()),
+            installed: pin.is_some(),
+            bundled_skills: d.locked.map_or(&[], LockEntry::bundled_skills),
             linked: linked(d.name),
-            lock: d.locked,
+            lock: pin,
         });
     }
     Ok(report)
@@ -182,14 +184,14 @@ fn render_text(report: &ListReport) {
         let pinned = row
             .lock
             .map(|l| {
-                if l.bundled_skills.is_empty() {
+                if row.bundled_skills.is_empty() {
                     format!("{} @ {}", l.display_reference(), l.commit.short())
                 } else {
                     format!(
                         "{} @ {}, skills: {}",
                         l.display_reference(),
                         l.commit.short(),
-                        l.bundled_skills.join(", ")
+                        row.bundled_skills.join(", ")
                     )
                 }
             })

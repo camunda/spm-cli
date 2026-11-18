@@ -442,7 +442,7 @@ fn check_policy(root: &Path, manifest: &Manifest, links: &Links, lock: Option<&L
     // unreadable lock is reported by the lockfile check.
     if let Some(lock) = lock {
         for l in DependencyIndex::new(manifest, lock).undeclared() {
-            if let Err(e) = policy.check(&l.locked.git) {
+            if let Err(e) = policy.check(&l.locked.pin().git) {
                 denied.push(format!("locked {} `{}`: {e:#}", l.kind, l.name));
             }
         }
@@ -807,7 +807,7 @@ fn remote_urls(manifest: &Manifest, lock: Option<&Lockfile>) -> BTreeSet<String>
         .map(|(_, _, s)| s.git.clone())
         .collect();
     if let Some(lock) = lock {
-        urls.extend(lock.dependencies().map(|(_, _, l)| l.git.clone()));
+        urls.extend(lock.dependencies().map(|(_, l)| l.pin().git.clone()));
     }
     urls
 }

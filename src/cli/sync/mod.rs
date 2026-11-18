@@ -411,7 +411,9 @@ fn plan<'a>(session: &ScopeSession, req: Request<'a>) -> Result<Plan<'a>> {
     // Only skill subtrees are walked: a plugin missing from the store keeps
     // its locked entry, so it never makes the built lock partial.
     let unwalked_skills = expansion.unverified.clone();
-    findings.unverified.extend(expansion.unverified);
+    findings
+        .unverified
+        .extend(expansion.unverified.iter().map(ToString::to_string));
     let mut selected = expansion.selected;
     let mut lock = res.lock;
     resolve::fold_transitive(&mut lock, expansion.transitive, run.report)?;

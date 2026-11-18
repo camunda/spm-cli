@@ -38,7 +38,7 @@ impl Upgrade {
                 continue;
             }
             let locked = lock.get_dependency(req);
-            let selector = locked.map(|q| q.reference.version());
+            let selector = locked.map(|q| q.pin().reference.version());
             let requesters = index.requesters(req);
             match selector {
                 Some(Version::Branch(_)) => up.via_branch = true,
@@ -69,15 +69,15 @@ mod tests {
     #[test]
     fn upgrade_walk_stops_at_a_name_declared_as_any_kind() {
         use crate::cli::index::DependencyIndex;
-        use crate::lockfile::{tests::entry, Lockfile};
+        use crate::lockfile::tests::{entry, requested};
+        use crate::lockfile::Lockfile;
         use crate::manifest::Manifest;
         let manifest = Manifest::parse(
             r#"{"targets":["claude"],"plugins":{"mid":{"git":"u","tag":"v1"}}}"#,
             std::path::Path::new("ai.json"),
         )
         .unwrap();
-        let mut mid = entry("https://h/mid.git", 'a', "tag:v1");
-        mid.requested_by = vec![dep("top")];
+        let mid = requested(entry("https://h/mid.git", 'a', "tag:v1"), &["top"]);
         let lock = Lockfile {
             skills: BTreeMap::from([(dep("mid"), mid)]),
             ..Default::default()

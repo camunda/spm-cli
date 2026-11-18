@@ -7,7 +7,7 @@ use super::lock::{lock_miss, resolve_child, sort_misses, sort_provenance, Miss};
 use super::{Ctx, Output, MAX_DEPTH, MAX_EDGES, MAX_NODES};
 use crate::fetch::Checkout;
 use crate::ids::{CommitSha, DepName, LockReference};
-use crate::lockfile::{LockedSkill, Satisfied};
+use crate::lockfile::{LockedSkill, Pin, Requesters, Satisfied};
 use crate::manifest::{DependencyKind, DependencyManifest, Manifest};
 use crate::materialized::{MaterializedSkill, Selected};
 use anyhow::{bail, Context, Result};
@@ -22,8 +22,8 @@ struct Resolved {
     /// render a readable requester chain in a conflict error.
     chain: Vec<String>,
     /// Index into [`Output::transitive`] for a transitive node, so a later
-    /// diamond edge can append its requester to `requested_by`. `None` for a
-    /// directly-declared skill (those keep an empty `requested_by`).
+    /// diamond edge can append its requester to its requesters. `None` for a
+    /// directly-declared skill (those have none).
     out_idx: Option<usize>,
 }
 
@@ -94,6 +94,7 @@ pub fn expand(direct: &BTreeMap<DepName, LockedSkill>, ctx: &Ctx) -> Result<Outp
     // identities reaches the stack guard and hard-errors.
     if ctx.resolve_transitive {
         for (name, locked) in direct {
+            let locked = &locked.pin;
             let key = key_of(&locked.git, &locked.path);
             if let Some(existing) = resolved.get(&key) {
                 if existing.commit != locked.commit {
@@ -145,7 +146,7 @@ pub fn expand(direct: &BTreeMap<DepName, LockedSkill>, ctx: &Ctx) -> Result<Outp
         edges: 0,
     };
     for (name, locked) in direct {
-        visit(&mut w, name, locked, 0, direct, ctx)?;
+        visit(&mut w, name, &locked.pin, 0, direct, ctx)?;
     }
 
     let mut out = w.out;
@@ -157,7 +158,7 @@ pub fn expand(direct: &BTreeMap<DepName, LockedSkill>, ctx: &Ctx) -> Result<Outp
 fn visit(
     w: &mut Walk,
     name: &DepName,
-    locked: &LockedSkill,
+    locked: &Pin,
     depth: usize,
     direct: &BTreeMap<DepName, LockedSkill>,
     ctx: &Ctx,
@@ -204,7 +205,7 @@ fn visit(
             .checkout(DependencyKind::Skill, name, locked, ctx.report)?
         {
             Checkout::Unverified => {
-                w.out.unverified.push(name.to_string());
+                w.out.unverified.push(name.clone());
                 return Ok(());
             }
             // A check materializes nothing, so it has nothing to gate: only the
@@ -305,7 +306,8 @@ fn visit(
         // Deterministic materialized name for *this* edge. Computed up front so
         // both the version-conflict re-resolve and the fresh-node branch key
         // lockfile reuse on the same stable identity (see `resolve_child`).
-        let synth = synth_name(name, declared, &ckey);
+        let synth = DepName::try_from(synth_name(name, declared, &ckey))
+            .with_context(|| format!("synthesized name for nested skill `{declared}`"))?;
 
         // Cycle: the child identity is an ancestor still on the current branch.
         // A back-edge whose identity is on the active DFS branch is a cycle —
@@ -359,7 +361,7 @@ fn visit(
                     None => direct.get(existing.chain[0].as_str()),
                 };
                 let evidence = pinned
-                    .filter(|p| !ctx.mode.refresh() && p.commit == existing.commit)
+                    .filter(|p| !ctx.mode.refresh() && p.pin.commit == existing.commit)
                     .and_then(|p| p.also_satisfies.iter().find(|s| s.reference == requested));
                 let (child_commit, resolved_tag) = if let Some(e) = evidence {
                     (existing.commit.clone(), e.resolved_tag.clone())
@@ -414,21 +416,19 @@ fn visit(
             // that lands on a *pre-seeded direct root*: the root is a fixed
             // install point that satisfies the back-edge, so it dedups here
             // rather than tripping the DFS-stack cycle guard above. Record this
-            // requester on the shared transitive entry (directs keep an empty
-            // requested_by — a root is pre-seeded with `out_idx: None`, so a
-            // root diamond appends nothing).
+            // requester on the shared transitive entry (a direct root stays
+            // direct — it is pre-seeded with `out_idx: None`, so a root diamond
+            // records nothing).
             if let Some(idx) = existing.out_idx {
-                w.out.transitive[idx].1.requested_by.push(name.clone());
+                w.out.transitive[idx].1.add_requester(name.clone());
             }
             continue;
         }
 
-        // Fresh node: validate the (already-computed) synthesized name *before*
-        // resolving, so a collision or bad name fails fast without a needless
-        // remote lookup. The synthesized name also scopes lockfile reuse to this
-        // exact edge (see `resolve_child`).
-        let synth = DepName::try_from(synth)
-            .with_context(|| format!("synthesized name for nested skill `{declared}`"))?;
+        // Fresh node: the synthesized name (validated above) is checked for a
+        // collision *before* resolving, so it fails fast without a needless
+        // remote lookup. It also scopes lockfile reuse to this exact edge (see
+        // `resolve_child`).
         // Node budget: a fresh node is the expensive unit (remote resolve,
         // checkout, scan, materialize). Refuse before resolving it once the
         // whole-walk cap is hit, so a wide fan-out cannot exhaust time/disk.
@@ -449,18 +449,17 @@ fn visit(
                  dependencies to a version that does not ship it"
             );
         }
-        let Some(mut child) = resolve_child(spec, &synth, ctx)
+        let Some(child) = resolve_child(spec, &synth, ctx)
             .with_context(|| format!("resolving nested skill `{declared}` of `{name}`"))?
         else {
             w.misses.push(Miss {
                 key: ckey,
-                name: synth.to_string(),
+                name: synth.clone(),
                 requested: LockReference::from(spec.version()?),
                 problem: lock_miss(&synth, declared, name, spec, ctx)?,
             });
             continue;
         };
-        child.requested_by = vec![name.clone()];
 
         let mut child_chain: Vec<String> = w.stack.iter().map(|(_, n)| n.clone()).collect();
         child_chain.push(synth.to_string());
@@ -474,7 +473,8 @@ fn visit(
                 out_idx: Some(idx),
             },
         );
-        w.out.transitive.push((synth.clone(), child.clone()));
+        let locked = LockedSkill::transitive(child.clone(), Requesters::new(name.clone()));
+        w.out.transitive.push((synth.clone(), locked));
         visit(w, &synth, &child, depth + 1, direct, ctx)?;
     }
 

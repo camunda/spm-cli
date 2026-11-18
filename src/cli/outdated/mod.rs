@@ -12,7 +12,7 @@ mod upgrade;
 use super::common::render_report;
 use super::index::DependencyIndex;
 use super::session::{Access, ScopeSession};
-use crate::lockfile::LockedSkill;
+use crate::lockfile::Pin;
 use crate::manifest::DependencyKind;
 use crate::scope::Scope;
 use anyhow::{bail, Result};
@@ -44,7 +44,7 @@ pub(super) fn outdated(
     let wanted = |n: &str| name.is_none_or(|want| want == n);
     // The same comparison `spm install` uses to decide whether a pin can be
     // reused for its `ai.json` request.
-    let drift = |l: &LockedSkill, spec: Option<&crate::manifest::SkillSpec>| {
+    let drift = |l: &Pin, spec: Option<&crate::manifest::SkillSpec>| {
         spec.map(|s| l.drift_from(s))
             .transpose()
             .map(Option::flatten)
@@ -54,19 +54,13 @@ pub(super) fn outdated(
     let mut plugins = Vec::new();
     let index = DependencyIndex::new(&manifest, &lock);
     for e in index.locked().filter(|e| wanted(e.name)) {
-        let (kind, l) = (e.kind, e.locked);
-        let mut row = check(
-            e.name,
-            l,
-            kind == DependencyKind::Plugin,
-            e.transitive,
-            &mut remotes,
-        );
+        let l = e.locked;
+        let mut row = check(e.name, l, e.transitive, &mut remotes);
         if e.transitive {
-            row.upgrade = Upgrade::plan(&l.requested_by, &lock, &index);
+            row.upgrade = Upgrade::plan(l.requested_by(), &lock, &index);
         }
-        row.drift = drift(l, e.spec)?;
-        match kind {
+        row.drift = drift(l.pin(), e.spec)?;
+        match e.kind {
             DependencyKind::Skill => skills.push(row),
             DependencyKind::Plugin => plugins.push(row),
         }

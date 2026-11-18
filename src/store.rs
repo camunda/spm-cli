@@ -1,4 +1,4 @@
-use crate::{git, lockfile::LockedSkill, paths};
+use crate::{git, lockfile::Pin, paths};
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -20,7 +20,7 @@ pub struct Ensured {
 }
 
 /// Ensure the repo@commit for `locked` is present in the global store, fetching if needed.
-pub fn ensure(locked: &LockedSkill) -> Result<Ensured> {
+pub fn ensure(locked: &Pin) -> Result<Ensured> {
     let checkout = Checkout::of(locked)?;
     let fetched = !checkout.is_current(locked);
     if fetched {
@@ -46,7 +46,7 @@ pub fn ensure(locked: &LockedSkill) -> Result<Ensured> {
 /// The store checkout for `locked` when it is already there and usable exactly
 /// as [`ensure`] would reuse it, else `None`. Never fetches nor modifies the
 /// store: for read-only diagnostics (`spm doctor`).
-pub fn cached(locked: &LockedSkill) -> Result<Option<Ensured>> {
+pub fn cached(locked: &Pin) -> Result<Option<Ensured>> {
     let checkout = Checkout::of(locked)?;
     if !checkout.is_current(locked) {
         return Ok(None);
@@ -62,7 +62,7 @@ struct Checkout {
 }
 
 impl Checkout {
-    fn of(locked: &LockedSkill) -> Result<Self> {
+    fn of(locked: &Pin) -> Result<Self> {
         // `store` and `commit` are appended into filesystem paths that get
         // recursively removed and rewritten by `ensure`; their types
         // (`StoreKey`, `CommitSha`) guarantee neither can carry a separator or
@@ -88,12 +88,12 @@ impl Checkout {
     /// reuse a checkout that was itself made under the restricted git rules; any
     /// other is rebuilt. Such a checkout is valid for unrestricted use too, since
     /// under a policy a checkout needing a filter fails instead of skipping it.
-    fn is_current(&self, locked: &LockedSkill) -> bool {
+    fn is_current(&self, locked: &Pin) -> bool {
         git::is_at_commit(&self.repo_dir, &locked.commit)
             && (!self.restricted || self.marker.exists())
     }
 
-    fn content(self, locked: &LockedSkill, fetched: bool) -> Result<Ensured> {
+    fn content(self, locked: &Pin, fetched: bool) -> Result<Ensured> {
         let repo_dir = self.repo_dir;
         let content = match &locked.path {
             Some(sub) => repo_dir.join(sub),
@@ -333,7 +333,7 @@ mod tests {
         let src = scratch("stale-refetch-src");
         let sha = make_skill_repo(&src);
 
-        let locked = LockedSkill {
+        let locked = Pin {
             git: format!("file://{}", src.display()),
             reference: LockReference::try_from("branch:main").unwrap(),
             commit: CommitSha::try_from(sha.as_str()).unwrap(),
@@ -343,9 +343,6 @@ mod tests {
                 &format!("file://{}", src.display()),
                 &CommitSha::try_from(sha.as_str()).unwrap(),
             ),
-            bundled_skills: Vec::new(),
-            requested_by: Vec::new(),
-            also_satisfies: Vec::new(),
         };
 
         with_spm_home(&home, || {
@@ -375,16 +372,13 @@ mod tests {
         let sha = make_skill_repo(&src);
         let git_url = format!("file://{}", src.display());
 
-        let locked = LockedSkill {
+        let locked = Pin {
             git: git_url.clone(),
             reference: LockReference::try_from("branch:main").unwrap(),
             commit: CommitSha::try_from(sha.as_str()).unwrap(),
             resolved_tag: None,
             path: Some("does/not/exist".into()),
             store: StoreKey::derive(&git_url, &CommitSha::try_from(sha.as_str()).unwrap()),
-            bundled_skills: Vec::new(),
-            requested_by: Vec::new(),
-            also_satisfies: Vec::new(),
         };
 
         with_spm_home(&home, || {
@@ -439,16 +433,13 @@ mod tests {
         let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
         let git_url = format!("file://{}", src.display());
 
-        let locked = LockedSkill {
+        let locked = Pin {
             git: git_url.clone(),
             reference: LockReference::try_from("branch:main").unwrap(),
             commit: CommitSha::try_from(sha.as_str()).unwrap(),
             resolved_tag: None,
             path: Some("escape".into()),
             store: StoreKey::derive(&git_url, &CommitSha::try_from(sha.as_str()).unwrap()),
-            bundled_skills: Vec::new(),
-            requested_by: Vec::new(),
-            also_satisfies: Vec::new(),
         };
 
         with_spm_home(&home, || {
