@@ -269,7 +269,7 @@ impl Ownership {
     /// `targets` with `install(index, prior ownership, claim)`, keeping the
     /// record true at every step: a failure part-way leaves nothing spm
     /// touched unrecorded, and claims nothing it did not touch. A skill name is
-    /// recorded when the vendor `claim`s it, right before modifying its entry;
+    /// recorded when the vendor `claim`s it (see `Vendor::materialize`);
     /// plugin output lives only in spm-owned locations, so the new plugins are
     /// recorded up front. Once a target is written it holds exactly the new
     /// set. Targets not installed now (e.g. ones another branch's `ai.json`
@@ -431,7 +431,7 @@ impl Ownership {
         };
         // The record is the sole history of what spm installed, so a failed
         // write (e.g. a full disk) must leave the previous one intact.
-        crate::jsonfile::save_atomic(&p, &record)
+        crate::jsonfile::save(&p, &record)
     }
 }
 
@@ -550,7 +550,7 @@ mod tests {
         let path = Ownership::path(&scope).unwrap();
         let before = std::fs::read(&path).unwrap();
 
-        let err = crate::jsonfile::replace_with(&path, |f| {
+        let err = crate::atomic::replace(&path, |f| {
             f.write_all(&b"{\"targets\":{}}\n"[..3])?;
             Err(std::io::Error::other("disk full"))
         })

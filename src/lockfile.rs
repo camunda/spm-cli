@@ -451,10 +451,10 @@ impl Lockfile {
 
     pub fn load_or_default(dir: &Path) -> Result<Self> {
         let p = Self::path_in(dir);
-        if !p.exists() {
+        let Some(text) = crate::jsonfile::read(&p)? else {
             return Ok(Self::default());
-        }
-        let lock: Self = crate::jsonfile::load(&p)?;
+        };
+        let lock: Self = crate::jsonfile::parse(&text, &p)?;
         lock.validate()
             .with_context(|| format!("in {}", p.display()))?;
         Ok(lock)
