@@ -22,8 +22,29 @@ pub struct Lockfile {
     /// Pinned full-plugin dependencies, parallel to `skills`. A plugin
     /// resolves to a single commit + store checkout like a skill; its `path`
     /// just points at a plugin root rather than a single skill folder.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "plugins_from_repr"
+    )]
     pub plugins: BTreeMap<DepName, LockedPlugin>,
+}
+
+/// Plugins are read as raw entries so that the skill-only evidence a plugin
+/// cannot carry (a hand-edited `also_satisfies`) is held to a skill's rule
+/// while the plugin's name is still at hand to report, then dropped.
+fn plugins_from_repr<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<BTreeMap<DepName, LockedPlugin>, D::Error> {
+    BTreeMap::<DepName, EntryRepr>::deserialize(d)?
+        .into_iter()
+        .map(|(name, r)| {
+            validate_evidence(&r.also_satisfies).map_err(|e| {
+                serde::de::Error::custom(format!("{} `{name}`: {e:#}", DependencyKind::Plugin))
+            })?;
+            Ok((name, LockedPlugin::from(r)))
+        })
+        .collect()
 }
 
 /// Generate a fresh, kebab-safe project id. Called once when a lockfile has none;
@@ -117,9 +138,10 @@ impl Requesters {
     }
 }
 
-/// A pinned full-plugin dependency.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "EntryRepr", into = "EntryRepr")]
+/// A pinned full-plugin dependency. Read only through [`Lockfile`], which
+/// validates the fields it drops (see `plugins_from_repr`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(into = "EntryRepr")]
 pub struct LockedPlugin {
     pub pin: Pin,
     /// The names of the skills the plugin bundles, recorded at install time so
@@ -216,16 +238,12 @@ impl From<LockedSkill> for EntryRepr {
     }
 }
 
-impl TryFrom<EntryRepr> for LockedPlugin {
-    type Error = anyhow::Error;
-    fn try_from(r: EntryRepr) -> Result<Self> {
-        // Dropped evidence is held to the rule it would be as a skill's. Serde
-        // renders the error with `{}`, so the chain is flattened here.
-        validate_evidence(&r.also_satisfies).map_err(|e| anyhow::anyhow!("{e:#}"))?;
-        Ok(Self {
+impl From<EntryRepr> for LockedPlugin {
+    fn from(r: EntryRepr) -> Self {
+        Self {
             pin: r.pin(),
             bundled_skills: r.bundled_skills,
-        })
+        }
     }
 }
 
@@ -900,8 +918,14 @@ pub(crate) mod tests {
                 "has no resolved_tag",
             ),
         ] {
-            let err = load_text(&as_plugin(entry_json("ok", field, value))).unwrap_err();
-            assert!(format!("{err:#}").contains(needle), "{field}: {err:#}");
+            let err = format!(
+                "{:#}",
+                load_text(&as_plugin(entry_json("ok", field, value))).unwrap_err()
+            );
+            assert!(err.contains(needle), "{field}: {err}");
+            if field == "also_satisfies" {
+                assert!(err.contains("plugin `ok`: also_satisfies entry"), "{err}");
+            }
         }
     }
 
