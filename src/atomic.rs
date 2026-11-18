@@ -20,15 +20,17 @@ const MAX_LINKS: usize = 40;
 /// would) instead of replacing the link itself. A missing `path` is itself.
 pub fn resolve(path: &Path) -> std::io::Result<PathBuf> {
     let mut p = path.to_path_buf();
-    for _ in 0..MAX_LINKS {
+    // One more inspection than links followed: the last link's target too.
+    for followed in 0..=MAX_LINKS {
         match std::fs::symlink_metadata(&p) {
-            Ok(m) if m.file_type().is_symlink() => {
+            Ok(m) if m.file_type().is_symlink() && followed < MAX_LINKS => {
                 let target = std::fs::read_link(&p)?;
                 p = match p.parent() {
                     Some(dir) => dir.join(target),
                     None => target,
                 };
             }
+            Ok(m) if m.file_type().is_symlink() => break,
             Ok(_) => return Ok(p),
             Err(e) if e.kind() == ErrorKind::NotFound => return Ok(p),
             Err(e) => return Err(e),
@@ -404,6 +406,25 @@ mod tests {
         }
         assert_eq!(std::fs::read_to_string(&real).unwrap(), "new");
         assert_eq!(entries(&dir), ["chain.json", "link.json", "real.json"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A chain of exactly [`MAX_LINKS`] symlinks resolves to its target; one
+    /// more is too many.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_follows_up_to_max_links() {
+        let dir = scratch("max-links");
+        let mut next = PathBuf::from("real.json");
+        for i in 0..=MAX_LINKS {
+            let link = PathBuf::from(format!("l{i}"));
+            std::os::unix::fs::symlink(&next, dir.join(&link)).unwrap();
+            next = link;
+        }
+        let longest = dir.join(format!("l{}", MAX_LINKS - 1));
+        assert_eq!(resolve(&longest).unwrap(), dir.join("real.json"));
+        let err = resolve(&dir.join(format!("l{MAX_LINKS}"))).unwrap_err();
+        assert!(err.to_string().contains("too many levels"), "{err}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
