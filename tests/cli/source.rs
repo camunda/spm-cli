@@ -428,81 +428,40 @@ fn skip_test_only_covers_every_node_with_attributes() {
     assert!(missing.is_empty(), "skip_test_only! misses {missing:?}");
 }
 
-/// The `src` directory of the `syn` this crate builds against: its version
-/// from `Cargo.lock`, its location from the dep-info files the build wrote
-/// next to this test binary (no registry or network access needed).
+/// The `src` directory of the `syn` this crate builds against, as the cargo
+/// running this test resolves it (`--offline`: the sources are already there
+/// for the build), independent of where it lays out its build directory.
 fn syn_sources() -> PathBuf {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let lock = std::fs::read_to_string(manifest.join("Cargo.lock")).unwrap();
-    let field = |pkg: &str, key: &str| -> Option<String> {
-        let line = pkg.lines().find(|l| l.starts_with(&format!("{key} = ")))?;
-        Some(line.split('"').nth(1)?.to_string())
-    };
-    let packages: Vec<&str> = lock.split("[[package]]").collect();
-    let ours = packages
-        .iter()
-        .find(|p| field(p, "name").as_deref() == Some(env!("CARGO_PKG_NAME")))
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    let out = std::process::Command::new(env!("CARGO"))
+        .args(["metadata", "--format-version", "1", "--offline", "--locked"])
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .output()
         .unwrap();
-    // `"syn"`, or `"syn 2.0.1"` when the lockfile holds several versions.
-    let dep = ours
-        .lines()
-        .map(|l| l.trim().trim_end_matches(',').trim_matches('"'))
-        .find(|d| *d == "syn" || d.starts_with("syn "))
-        .expect("syn among this crate's dependencies");
-    let version = match dep.strip_prefix("syn ") {
-        Some(v) => v.to_string(),
-        None => packages
-            .iter()
-            .find(|p| field(p, "name").as_deref() == Some("syn"))
-            .and_then(|p| field(p, "version"))
-            .unwrap(),
-    };
-    let dir = format!("syn-{version}");
-    let deps = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
-    for entry in std::fs::read_dir(&deps).unwrap() {
-        let path = entry.unwrap().path();
-        if !path.extension().is_some_and(|e| e == "d") {
-            continue;
-        }
-        let info = std::fs::read_to_string(&path).unwrap_or_default();
-        if let Some(src) = crate_sources(&info, &dir) {
-            return src;
-        }
-    }
-    panic!("no dep-info in {} names {dir}'s sources", deps.display());
-}
-
-/// The `src` directory of the crate in directory `dir` (`syn-2.0.1`) that the
-/// dep-info file `info` lists, if any. Each source has its own `path:` line,
-/// with spaces escaped as `\ `.
-fn crate_sources(info: &str, dir: &str) -> Option<PathBuf> {
-    info.lines().find_map(|line| {
-        let file = PathBuf::from(line.strip_suffix(':')?.replace("\\ ", " "));
-        let found = file.ends_with(Path::new("src").join("lib.rs"))
-            && file.components().any(|c| c.as_os_str() == dir);
-        found
-            .then(|| file.parent().map(Path::to_path_buf))
-            .flatten()
-    })
-}
-
-#[test]
-fn crate_sources_decodes_escaped_spaces() {
-    let lib = Path::new("cargo home")
-        .join("syn-2.0.1")
-        .join("src")
-        .join("lib.rs");
-    let escaped = lib.display().to_string().replace(' ', "\\ ");
-    let info = format!("out.rmeta: {escaped} other.rs\n\n{escaped}:\nother.rs:\n");
-    assert_eq!(
-        crate_sources(&info, "syn-2.0.1"),
-        lib.parent().map(Path::to_path_buf)
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(crate_sources(&info, "syn-2.0.2"), None);
+    let meta: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let ours = meta["resolve"]["root"].as_str().unwrap();
+    let syn = meta["resolve"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == ours)
+        .and_then(|n| n["deps"].as_array()?.iter().find(|d| d["name"] == "syn"))
+        .and_then(|d| d["pkg"].as_str())
+        .expect("syn among this crate's dependencies");
+    let lib = meta["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == syn)
+        .and_then(|p| p["manifest_path"].as_str())
+        .unwrap();
+    Path::new(lib).parent().unwrap().join("src")
 }
 
 /// The structs `src` declares with a `pub attrs: Vec<Attribute>` field.
