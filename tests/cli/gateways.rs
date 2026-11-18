@@ -182,7 +182,7 @@ const GUARDS: &[Guard] = &[
             ),
             (
                 "src/atomic.rs",
-                "one level: what an interrupted publish left beside a directory",
+                "one level: what an interrupted publish left in `.spm-staging`",
             ),
             ("src/links.rs", "one level: the per-project links files"),
             (
