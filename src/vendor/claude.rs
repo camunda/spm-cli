@@ -76,10 +76,10 @@ impl Vendor for Claude {
         std::fs::create_dir_all(&skills_dir)?;
 
         for s in skills {
-            claim(&s.name)?;
-            let dest = skills_dir.join(&s.name);
-            fsutil::copy_tree(&s.path, &dest, &s.root)
-                .with_context(|| format!("copying skill `{}` into plugin", s.name))?;
+            claim(s.name())?;
+            let dest = skills_dir.join(s.name());
+            fsutil::copy_tree(s.path(), &dest, s.root())
+                .with_context(|| format!("copying skill `{}` into plugin", s.name()))?;
         }
 
         jsonutil::write(
@@ -206,17 +206,17 @@ impl PluginHost for Claude {
         std::fs::create_dir_all(&market_dir)?;
         let mut entries: Vec<Value> = Vec::new();
         for p in plugins {
-            let dest = market_dir.join(&p.name);
-            fsutil::copy_tree(&p.path, &dest, &p.root)
-                .with_context(|| format!("copying plugin `{}` into marketplace", p.name))?;
+            let dest = market_dir.join(p.name());
+            fsutil::copy_tree(p.path(), &dest, p.root())
+                .with_context(|| format!("copying plugin `{}` into marketplace", p.name()))?;
             // The plugin's bundled skills are already served through the `spm`
             // skills marketplace (flattened into the ordinary skills list), so
             // strip the `skills` pointer from this copy to avoid exposing them
             // twice — this registration contributes only agents/MCP/hooks/scripts.
             strip_bundled_skills(&dest)?;
 
-            let plugin_name = crate::plugin::plugin_name(&dest, &p.name)?;
-            entries.push(json!({ "name": plugin_name, "source": format!("./{}", p.name) }));
+            let plugin_name = crate::plugin::plugin_name(&dest, p.name())?;
+            entries.push(json!({ "name": plugin_name, "source": format!("./{}", p.name()) }));
             jsonutil::object_mut(&mut root, "enabledPlugins")
                 .with_context(|| format!("updating {}", settings.display()))?
                 .insert(format!("{plugin_name}@{market}"), Value::Bool(true));
@@ -426,11 +426,7 @@ mod tests {
         let src = root.join("src").join(name);
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(src.join("SKILL.md"), format!("---\nname: {name}\n---\n")).unwrap();
-        MaterializedSkill {
-            name: DepName::try_from(name).unwrap(),
-            path: src,
-            root: root.to_path_buf(),
-        }
+        MaterializedSkill::unscanned(DepName::try_from(name).unwrap(), src, root.to_path_buf())
     }
 
     #[test]

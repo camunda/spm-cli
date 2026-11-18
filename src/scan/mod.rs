@@ -31,4 +31,4 @@ mod testutil;
 
 pub use engine::{scan_path, scan_within};
 pub use finding::Finding;
-pub use gate::{allow_suspicious, enforce, ALLOW_ENV};
+pub use gate::{allow_suspicious, enforce, Scanned, ALLOW_ENV};

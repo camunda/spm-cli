@@ -7,14 +7,15 @@
 //!
 //! 1. The plugin's own declared **name** (for the Claude marketplace entry and
 //!    the `<name>@<marketplace>` enabled-plugins key).
-//! 2. The plugin's **bundled skills**, extracted as ordinary
-//!    [`MaterializedSkill`]s so that *every* target — even the ones that only
-//!    understand `SKILL.md` and cannot register agents/MCP/hooks — still gets
-//!    the plugin's skills (a graceful, skills-only degradation).
+//! 2. The plugin's **bundled skills**, enumerated as [`BundledSkill`]s and,
+//!    once the plugin tree is scanned, materialized as ordinary skills (see
+//!    [`crate::materialized::MaterializedPlugin::bundled_skill`]) so that
+//!    *every* target — even the ones that only understand `SKILL.md` and cannot
+//!    register agents/MCP/hooks — still gets the plugin's skills (a graceful,
+//!    skills-only degradation).
 
 use crate::ids::DepName;
 use crate::manifest::validate_subpath;
-use crate::materialized::MaterializedSkill;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -61,13 +62,20 @@ pub fn plugin_name(root: &Path, fallback: &DepName) -> Result<DepName> {
         .unwrap_or_else(|| fallback.clone()))
 }
 
-/// Enumerate the plugin's bundled skills as [`MaterializedSkill`]s: every
-/// immediate subdirectory of the plugin's skills dir that contains a `SKILL.md`.
+/// A skill a plugin bundles: its name and its directory under the plugin root.
+#[derive(Debug)]
+pub struct BundledSkill {
+    pub name: DepName,
+    pub path: PathBuf,
+}
+
+/// Enumerate the plugin's bundled skills: every immediate subdirectory of the
+/// plugin's skills dir that contains a `SKILL.md`.
 ///
 /// The skills dir is taken from `plugin.json`'s `skills` field (default
 /// `skills`) and validated to stay inside the plugin root. Returns an empty vec
 /// when the plugin declares no skills dir or it holds none.
-pub fn plugin_skills(root: &Path, boundary: &Path) -> Result<Vec<MaterializedSkill>> {
+pub fn plugin_skills(root: &Path, boundary: &Path) -> Result<Vec<BundledSkill>> {
     let meta = read_plugin_json(root)?;
     // Normalize the declared skills path (strip a leading `./`, trailing `/`).
     let rel = meta.skills.as_deref().unwrap_or("skills");
@@ -141,11 +149,7 @@ pub fn plugin_skills(root: &Path, boundary: &Path) -> Result<Vec<MaterializedSki
         // so it must pass the same escape checks as a manifest skill name.
         let name = DepName::try_from(name)
             .with_context(|| format!("bundled skill in plugin at {}", root.display()))?;
-        out.push(MaterializedSkill {
-            name,
-            path,
-            root: boundary.to_path_buf(),
-        });
+        out.push(BundledSkill { name, path });
     }
     Ok(out)
 }

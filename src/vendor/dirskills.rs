@@ -25,12 +25,12 @@ use crate::materialized::MaterializedSkill;
 pub fn copy_skills_into(dir: &Path, skills: &[MaterializedSkill], claim: Claim) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     for s in skills {
-        claim(&s.name)?;
-        let dest = dir.join(&s.name);
+        claim(s.name())?;
+        let dest = dir.join(s.name());
         fsutil::remove_path_if_present(&dest)
             .with_context(|| format!("clearing {}", dest.display()))?;
-        fsutil::copy_tree(&s.path, &dest, &s.root)
-            .with_context(|| format!("copying skill `{}` into {}", s.name, dir.display()))?;
+        fsutil::copy_tree(s.path(), &dest, s.root())
+            .with_context(|| format!("copying skill `{}` into {}", s.name(), dir.display()))?;
     }
     Ok(())
 }
@@ -77,11 +77,7 @@ mod tests {
         let src = root.join("src").join(name);
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(src.join("SKILL.md"), format!("---\nname: {name}\n---\n")).unwrap();
-        MaterializedSkill {
-            name: DepName::try_from(name).unwrap(),
-            path: src,
-            root: root.to_path_buf(),
-        }
+        MaterializedSkill::unscanned(DepName::try_from(name).unwrap(), src, root.to_path_buf())
     }
 
     /// Re-materializing the same skill name overwrites its content (idempotent).
@@ -91,7 +87,7 @@ mod tests {
         let dir = tmp.join("skills");
         let s = make_skill(&tmp, "greet");
         copy_skills_into(&dir, std::slice::from_ref(&s), &mut |_| Ok(())).unwrap();
-        std::fs::write(s.path.join("SKILL.md"), "v2\n").unwrap();
+        std::fs::write(s.path().join("SKILL.md"), "v2\n").unwrap();
         copy_skills_into(&dir, &[s], &mut |_| Ok(())).unwrap();
         let got = std::fs::read_to_string(dir.join("greet").join("SKILL.md")).unwrap();
         assert_eq!(got, "v2\n");

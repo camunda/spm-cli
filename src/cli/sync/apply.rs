@@ -46,8 +46,8 @@ impl Plan {
             }
         }
         let desired = Owned {
-            skills: self.materialized.iter().map(|m| m.name.clone()).collect(),
-            plugins: self.plugins.iter().map(|p| p.name.clone()).collect(),
+            skills: self.materialized.iter().map(|m| m.name().clone()).collect(),
+            plugins: self.plugins.iter().map(|p| p.name().clone()).collect(),
         };
         self.previously_owned
             .install(scope, &self.targets, &desired, |i, owned, claim| {

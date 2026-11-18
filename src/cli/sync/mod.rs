@@ -16,7 +16,7 @@ use super::verdict::{Enforcer, LockFindings, LockVerdict};
 use crate::links::Links;
 use crate::lockfile::Lockfile;
 use crate::manifest::Manifest;
-use crate::materialized::{MaterializedPlugin, MaterializedSkill};
+use crate::materialized::{MaterializedPlugin, MaterializedSkill, Selected};
 use crate::owned::Ownership;
 use crate::scope::Scope;
 use crate::vendor::Vendor;
@@ -299,10 +299,15 @@ fn plan(
     // its locked entry, so it never makes the built lock partial.
     let unwalked_skills = expansion.unverified.clone();
     findings.unverified.extend(expansion.unverified);
-    let mut materialized = expansion.materialized;
+    let mut selected = expansion.selected;
     let mut lock = res.lock;
     resolve::fold_transitive(&mut lock, expansion.transitive, run)?;
-    validate::collisions(&mut materialized, fetched.skills, &lock)?;
+    validate::collisions(&mut selected, fetched.skills, &lock)?;
+    // Only scanned content reaches the targets; a check selects names only.
+    let materialized: Vec<MaterializedSkill> = selected
+        .into_iter()
+        .filter_map(Selected::materialized)
+        .collect();
     // A check writes nothing, so it has nothing to guard.
     if !run.check {
         let out = validate::Output {

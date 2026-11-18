@@ -106,11 +106,7 @@ impl Sandbox {
             &path.join("references/notes.md"),
             &format!("{name} notes\n"),
         );
-        MaterializedSkill {
-            name: dep(name),
-            path,
-            root: self.store.clone(),
-        }
+        MaterializedSkill::unscanned(dep(name), path, self.store.clone())
     }
 
     /// A store plugin carrying agents and a bundled skill.
@@ -125,11 +121,7 @@ impl Sandbox {
             &path.join("skills/inner/SKILL.md"),
             "---\nname: inner\n---\n",
         );
-        MaterializedPlugin {
-            name: dep(name),
-            path,
-            root: self.store.clone(),
-        }
+        MaterializedPlugin::unscanned(dep(name), path, self.store.clone())
     }
 }
 
@@ -154,7 +146,7 @@ fn user_config() -> Value {
 const USER_GITIGNORE: &str = "# user\nnode_modules/\n";
 
 fn names(v: &[MaterializedSkill]) -> Vec<DepName> {
-    v.iter().map(|s| s.name.clone()).collect()
+    v.iter().map(|s| s.name().clone()).collect()
 }
 
 /// Every path the vendor declares it may write to in `scope` for `skills` and
@@ -254,7 +246,7 @@ fn check_contract(target: &str, global: bool, settings: Settings) {
     let skills = [sb.skill("alpha"), sb.skill("beta")];
     let plugins: Vec<_> = v.plugins().map(|_| sb.plugin("plug")).into_iter().collect();
     let skill_names = names(&skills);
-    let plugin_names: Vec<DepName> = plugins.iter().map(|p| p.name.clone()).collect();
+    let plugin_names: Vec<DepName> = plugins.iter().map(|p| p.name().clone()).collect();
     let declared = declared_outputs(v, &scope, &skill_names, &plugin_names);
 
     // The user's own content, which spm must never touch. A hand-authored

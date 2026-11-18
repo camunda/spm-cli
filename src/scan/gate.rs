@@ -2,9 +2,10 @@
 //! command on a blocking finding unless the operator opted out.
 
 use anyhow::{bail, Result};
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
-use super::engine::scan_within;
+use super::engine::{scan_tree, Walked};
 
 /// Set `SPM_ALLOW_SUSPICIOUS=1` to downgrade the pre-materialize gate from
 /// blocking to warn-only (for CI on known-good, or to unblock a false positive).
@@ -30,25 +31,73 @@ fn value_enables_override(v: &std::ffi::OsStr) -> bool {
         .unwrap_or(false)
 }
 
+/// Proof that the tree at [`Scanned::path`], bounded by [`Scanned::root`], passed
+/// the pre-materialize gate. Only [`enforce`] makes one, so content handed to a
+/// vendor (see [`crate::materialized`]) is scanned by construction.
+#[derive(Debug)]
+#[must_use]
+pub struct Scanned {
+    path: PathBuf,
+    root: PathBuf,
+    dirs: BTreeSet<PathBuf>,
+}
+
+impl Scanned {
+    /// The scanned tree.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The checkout boundary symlinks were followed within while scanning.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Whether the directory at `path` was walked by this scan, and so its
+    /// whole subtree as a copy from it within [`Scanned::root`] reads it. A
+    /// path merely *under* [`Scanned::path`] may not be: the walk skips `.git`
+    /// by name and symlinks resolving out of the checkout or into `.git`.
+    /// A proof for content that was never scanned, covering no directory, for
+    /// vendor tests only.
+    #[cfg(test)]
+    pub fn assumed(path: PathBuf, root: PathBuf) -> Self {
+        Self {
+            path,
+            root,
+            dirs: BTreeSet::new(),
+        }
+    }
+
+    pub fn covers(&self, path: &Path) -> bool {
+        std::fs::canonicalize(path).is_ok_and(|canonical| self.dirs.contains(&canonical))
+    }
+}
+
 /// Scan a freshly-fetched skill/plugin at `root` and enforce the gate: print
 /// every finding, and return an error if any is blocking (High/Critical) unless
 /// the operator opted out via `SPM_ALLOW_SUSPICIOUS`. Non-blocking findings are
-/// always surfaced as warnings but never fail the command.
-pub fn enforce(label: &str, root: &Path, boundary: &Path) -> Result<()> {
-    let findings = scan_within(root, boundary)?;
+/// always surfaced as warnings but never fail the command. Passing returns the
+/// [`Scanned`] proof for exactly this `root` and `boundary`.
+pub fn enforce(label: &str, root: &Path, boundary: &Path) -> Result<Scanned> {
+    let Walked { findings, dirs } = scan_tree(root, boundary)?;
+    let scanned = Scanned {
+        path: root.to_path_buf(),
+        root: boundary.to_path_buf(),
+        dirs,
+    };
     if findings.is_empty() {
-        return Ok(());
+        return Ok(scanned);
     }
     let blocking = findings.iter().filter(|f| f.severity.blocks()).count();
     for f in &findings {
         eprintln!("  {}: {}", label, f.render());
     }
     if blocking == 0 {
-        return Ok(());
+        return Ok(scanned);
     }
     if allow_suspicious() {
         eprintln!("  {label}: {blocking} blocking finding(s) allowed via {ALLOW_ENV} — proceeding");
-        return Ok(());
+        return Ok(scanned);
     }
     bail!(
         "`{label}` failed the content scan: {blocking} blocking finding(s) above. \
@@ -85,6 +134,19 @@ mod tests {
         // hard-code "skill" in the failure message.
         assert!(!err.contains("skill `"), "{err}");
         assert!(err.contains("`bad`"), "{err}");
+    }
+
+    /// The proof names exactly the tree and boundary that were scanned, so a
+    /// materialized value built from it points at scanned content.
+    #[test]
+    fn enforce_proves_the_scanned_path_and_boundary() {
+        let root = tmp_dir();
+        let skill = root.join("skill");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "Greet warmly.\n").unwrap();
+        let scanned = enforce("skill", &skill, &root).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!((scanned.path(), scanned.root()), (&*skill, &*root));
     }
 
     #[test]

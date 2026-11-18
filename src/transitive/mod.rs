@@ -50,7 +50,7 @@ mod walk;
 
 use crate::ids::DepName;
 use crate::lockfile::{LockedSkill, Satisfied};
-use crate::materialized::MaterializedSkill;
+use crate::materialized::Selected;
 use std::collections::BTreeMap;
 
 pub use walk::expand;
@@ -119,7 +119,9 @@ pub struct Ctx<'a> {
 /// Result of the walk: the flattened, deduplicated skill list to hand to the
 /// vendors, plus the transitive lock entries to fold into `ai.lock`.
 pub struct Output {
-    pub materialized: Vec<MaterializedSkill>,
+    /// Every skill selected for the targets: materialized from its scan, or —
+    /// in a check — only named.
+    pub selected: Vec<Selected>,
     /// Synthesized-name → locked entry for every transitively-resolved skill.
     pub transitive: Vec<(DepName, LockedSkill)>,
     /// `also_satisfies` evidence recorded for *direct* roots (by name): the

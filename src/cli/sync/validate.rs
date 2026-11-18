@@ -9,7 +9,7 @@ use crate::ids::DepName;
 use crate::links::{Linked, Links};
 use crate::lockfile::{LockedSkill, Lockfile};
 use crate::manifest::Manifest;
-use crate::materialized::{MaterializedPlugin, MaterializedSkill};
+use crate::materialized::{MaterializedPlugin, MaterializedSkill, Selected};
 use crate::owned::{Owned, Ownership};
 use crate::policy::Policy;
 use crate::scope::Scope;
@@ -135,19 +135,19 @@ pub(in crate::cli) fn denied_sources<'a>(
 /// just some plugins, so the names it carries over unfetched are checked from
 /// the lock.
 pub(super) fn collisions(
-    materialized: &mut Vec<MaterializedSkill>,
-    plugin_skills: Vec<MaterializedSkill>,
+    selected: &mut Vec<Selected>,
+    plugin_skills: Vec<Selected>,
     lock: &Lockfile,
 ) -> Result<()> {
     for s in plugin_skills {
-        if materialized.iter().any(|m| m.name == s.name) {
+        if selected.iter().any(|m| m.name() == s.name()) {
             bail!(
                 "skill name collision: `{}` is provided by more than one skill/plugin — \
                  rename the conflicting skill or plugin-bundled skill",
-                s.name
+                s.name()
             );
         }
-        materialized.push(s);
+        selected.push(s);
     }
 
     // Vendor skill AND plugin directories are case-insensitive on Windows and
@@ -158,7 +158,7 @@ pub(super) fn collisions(
     // canonical backstop that rejects *case-folding* collisions across the whole
     // materialized set (direct, transitive, and plugin-bundled skills) and,
     // separately, across plugins — before any vendor writes a byte.
-    reject_case_folding_collisions("skill", materialized.iter().map(|m| m.name.as_str()))?;
+    reject_case_folding_collisions("skill", selected.iter().map(|m| m.name().as_str()))?;
     // From the lock, not the fetched plugins: a lock-only sync fetches only
     // the plugins it (re)resolves, yet must not write a lock an install rejects.
     reject_case_folding_collisions("plugin", lock.plugins.keys().map(DepName::as_str))?;
@@ -254,10 +254,10 @@ pub(super) fn guard(
                 let mut owned = out.previously_owned.for_target(t);
                 owned
                     .skills
-                    .extend(out.materialized.iter().map(|m| m.name.clone()));
+                    .extend(out.materialized.iter().map(|m| m.name().clone()));
                 owned
                     .plugins
-                    .extend(out.plugins.iter().map(|p| p.name.clone()));
+                    .extend(out.plugins.iter().map(|p| p.name().clone()));
                 owned
             })
             .collect();

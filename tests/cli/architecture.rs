@@ -115,10 +115,7 @@ const ALLOWED_EDGES: &[(&str, &[&str])] = &[
             "scope",
         ],
     ),
-    (
-        "plugin",
-        &["fsutil", "ids", "manifest", "materialized", "skillcheck"],
-    ),
+    ("plugin", &["fsutil", "ids", "manifest", "skillcheck"]),
     (
         "resolver",
         &["git", "ids", "lockfile", "manifest", "version"],
@@ -128,7 +125,7 @@ const ALLOWED_EDGES: &[(&str, &[&str])] = &[
         &["ids", "jsonfile", "lockfile", "paths", "scope", "shell"],
     ),
     ("lockfile", &["ids", "jsonfile", "manifest", "version"]),
-    ("materialized", &["ids"]),
+    ("materialized", &["ids", "scan"]),
     (
         "manifest",
         &["ids", "jsonfile", "policy", "schema", "scope", "version"],
