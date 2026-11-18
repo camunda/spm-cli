@@ -367,7 +367,7 @@ pub fn run() -> Result<()> {
         } => {
             transport.apply();
             let scope = scope.resolve(&cwd);
-            let n = sync::sync(&scope, false, None, locked, sync::Apply::Install)?;
+            let n = sync::sync(&scope, sync::Mode::install(locked))?;
             let noun = if n == 1 { "dependency" } else { "dependencies" };
             println!("installed {n} {noun}");
             Ok(())

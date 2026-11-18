@@ -6,43 +6,17 @@
 
 use super::{unlink_command, Run};
 use crate::cli::verdict::LockFindings;
+use crate::fetch::{Checkout, Reporter};
 use crate::ids::DepName;
 use crate::links::{Linked, Links};
 use crate::lockfile::{LockedSkill, Lockfile, Satisfied};
 use crate::manifest::{DependencyKind, Manifest, SkillSpec};
 use crate::materialized::{MaterializedPlugin, Selected};
 use crate::scope::Scope;
-use crate::{resolver, store, transitive};
+use crate::{resolver, transitive};
 use anyhow::{bail, Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-
-/// Which pins a sync re-resolves although `ai.lock` still matches them.
-#[derive(Clone, Copy)]
-pub(super) struct Refresh<'a> {
-    /// Re-resolve refs to their latest commit (`spm update`).
-    pub(super) force: bool,
-    /// Limit `force` to this one direct dependency (`spm update <name>`).
-    pub(super) only: Option<&'a str>,
-}
-
-impl Refresh<'_> {
-    fn direct(self, name: &str) -> bool {
-        self.force && self.only.is_none_or(|o| o == name)
-    }
-
-    /// Only a bare `spm update` (no name) refreshes the transitive frontier.
-    /// `spm update <name>` (`only = Some(..)`) is deliberately surgical: it
-    /// re-resolves the named direct root and re-reads its nested manifest, but
-    /// does NOT cascade a moving-ref refresh into that root's unchanged
-    /// transitive children — because those children are deduplicated across
-    /// roots, so refreshing one root's subtree could advance an unrelated
-    /// root's dependency. See `resolve_child` and
-    /// docs/guide/transitive-dependencies.md.
-    fn transitive(self) -> bool {
-        self.force && self.only.is_none()
-    }
-}
 
 /// The direct dependencies pinned by [`direct`].
 pub(super) struct Resolution {
@@ -72,15 +46,14 @@ pub(super) fn direct(
     manifest: &Manifest,
     mut prev: Lockfile,
     dir: &Path,
-    refresh: Refresh,
     run: Run,
     linked: &BTreeMap<DepName, Linked>,
     findings: &mut LockFindings,
 ) -> Result<Resolution> {
-    let (quiet, width) = (run.quiet(), run.width);
+    let (mode, report) = (run.mode, run.report);
     // Stable, path-independent project id: reuse the locked one, else mint & persist.
     let id = if prev.id.is_empty() {
-        if run.locked {
+        if mode.locked() {
             findings.missing_id = true;
         }
         crate::lockfile::generate_id(dir)
@@ -93,15 +66,14 @@ pub(super) fn direct(
     };
 
     if !manifest.declares_any() {
-        say!(quiet, "no skills or plugins declared");
+        report.say(format_args!("no skills or plugins declared"));
     } else {
-        say!(
-            quiet,
+        report.say(format_args!(
             "resolving {} skill(s) + {} plugin(s) for: {}",
             manifest.skills.len(),
             manifest.plugins.len(),
             manifest.targets.join(", ")
-        );
+        ));
     }
 
     let mut fresh: BTreeSet<DepName> = BTreeSet::new();
@@ -116,8 +88,8 @@ pub(super) fn direct(
             name,
             spec,
             prev_entry,
-            refresh.direct(name),
-            run.locked,
+            mode.refresh().direct(name),
+            mode.locked(),
         )? {
             Ok(entry) => entry,
             Err(mismatch) => {
@@ -164,10 +136,10 @@ pub(super) fn direct(
                 // checkout below, so a stale one is never carried forward. A
                 // reused pin is the same commit, so its bundled skills are too.
                 // They are carried forward rather than re-enumerated from a
-                // checkout when that checkout is not used: by a lock-only sync
-                // (which does not fetch the plugin again) or for a linked plugin
-                // (keeping `ai.lock` unaffected by the link).
-                if entry.fresh || !(run.lock_only || run.check || linked.contains_key(name)) {
+                // checkout when that checkout may go unread (see
+                // `Mode::carries_reused_pins`) or for a linked plugin (keeping
+                // `ai.lock` unaffected by the link).
+                if entry.fresh || !(mode.carries_reused_pins() || linked.contains_key(name)) {
                     locked.bundled_skills.clear();
                 } else if linked.contains_key(name) {
                     reused_linked_plugins.insert(name.clone());
@@ -178,14 +150,14 @@ pub(super) fn direct(
         };
         let short = locked.commit.short();
         let reference = locked.display_reference();
-        say!(quiet, "  {name:<width$}  {reference} @ {short}  ({status})");
+        report.entry(name, format_args!("{reference} @ {short}  ({status})"));
         lock.deps_mut(kind).insert(name.clone(), locked);
     }
 
     // Direct entries left in the previous lock are no longer declared. Skills
     // with a non-empty `requested_by` are transitive; they are judged after the
     // walk (see [`judge_transitive`]).
-    if run.locked {
+    if mode.locked() {
         for (kind, name, _) in prev
             .dependencies()
             .filter(|(kind, _, l)| *kind == DependencyKind::Plugin || l.requested_by.is_empty())
@@ -227,57 +199,49 @@ pub(super) fn plugins(
     run: Run,
     findings: &mut LockFindings,
 ) -> Result<Plugins> {
-    let (quiet, width, check) = (run.quiet(), run.width, run.check);
+    let report = run.report;
+    let fetch = run.mode.fetch(&res.fresh);
     let mut out = Plugins {
         plugins: Vec::new(),
         skills: Vec::new(),
         linked_skills: Vec::new(),
     };
     if !manifest.plugins.is_empty() {
-        say!(quiet, "fetching plugins into store");
+        report.say(format_args!("fetching plugins into store"));
     }
     for (name, locked) in &mut res.lock.plugins {
-        if run.lock_only && !res.fresh.contains(name) {
-            say!(
-                quiet,
-                "  {name:<width$}  unchanged (lock only, not fetched)"
-            );
+        if fetch.skips(name) {
+            report.unchanged(name);
             continue;
         }
         let link = linked.get(name);
         // A linked plugin only needs its locked checkout to record the commit's
         // bundled skills in `ai.lock` when its pin was freshly resolved.
-        let ensured = if link.is_some() && res.reused_linked_plugins.contains(name) {
+        let checkout = if link.is_some() && res.reused_linked_plugins.contains(name) {
             None
-        } else if check {
-            // Not in the store: keep the locked bundled skills (carried over
-            // above), unverified.
-            match store::cached(locked).with_context(|| format!("inspecting plugin `{name}`"))? {
-                Some(ensured) => Some(ensured),
-                None => {
+        } else {
+            match fetch.checkout(DependencyKind::Plugin, name, locked, report)? {
+                // Not in the store: keep the locked bundled skills (carried
+                // over above), unverified.
+                Checkout::Unverified => {
                     findings.unverified.push(name.to_string());
                     continue;
                 }
+                checkout => Some(checkout),
             }
-        } else {
-            let ensured =
-                store::ensure(locked).with_context(|| format!("fetching plugin `{name}`"))?;
-            say!(
-                quiet,
-                "  {name:<width$}  {}",
-                if ensured.fetched { "fetched" } else { "cached" }
-            );
-            Some(ensured)
         };
+        let ensured = checkout.as_ref().and_then(Checkout::ensured);
+        // A check only inspects the store: it gates and materializes nothing.
+        let inspect = matches!(checkout, Some(Checkout::Inspect(_)));
         let (path, root) = if let Some(l) = link {
-            say!(quiet, "  {name:<width$}  linked → {}", l.display);
+            report.entry(name, format_args!("linked → {}", l.display));
             (l.content.clone(), l.content.clone())
-        } else if let Some(e) = &ensured {
+        } else if let Some(e) = ensured {
             (e.path.clone(), e.root.clone())
         } else {
             bail!("plugin `{name}` was neither linked nor fetched");
         };
-        if !check {
+        if !inspect {
             warn_unless_plugin(name, &path, link, locked);
         }
         let bundled = crate::plugin::plugin_skills(&path, &root)
@@ -297,8 +261,7 @@ pub(super) fn plugins(
             out.linked_skills
                 .extend(bundled.iter().map(|s| s.name.clone()));
         }
-        // A check materializes nothing: only the bundled names are selected.
-        if check {
+        if inspect {
             out.skills
                 .extend(bundled.into_iter().map(|s| Selected::Named(s.name)));
             continue;
@@ -353,43 +316,36 @@ fn warn_unless_plugin(name: &DepName, path: &Path, link: Option<&Linked>, locked
 pub(super) fn skills(
     manifest: &Manifest,
     res: &mut Resolution,
-    refresh: Refresh,
     run: Run,
     policy: &crate::policy::Policy,
     linked: &BTreeMap<DepName, Linked>,
 ) -> Result<transitive::Output> {
-    let (quiet, width) = (run.quiet(), run.width);
+    let report = run.report;
     if !manifest.skills.is_empty() {
-        say!(quiet, "fetching skills into store");
+        report.say(format_args!("fetching skills into store"));
     }
     // Lock-only without transitive resolution: a reused skill is a leaf whose
     // pin is carried over as is, so only the (re)resolved ones are walked. With
     // it on, every skill is walked: its nested `ai.json` shapes the lock.
-    let walked: BTreeMap<DepName, LockedSkill> = if run.lock_only && !manifest.resolve_transitive {
-        for name in res.lock.skills.keys().filter(|n| !res.fresh.contains(*n)) {
-            say!(
-                quiet,
-                "  {name:<width$}  unchanged (lock only, not fetched)"
-            );
-        }
-        res.lock
-            .skills
-            .iter()
-            .filter(|(n, _)| res.fresh.contains(*n))
-            .map(|(n, l)| (n.clone(), l.clone()))
-            .collect()
-    } else {
-        res.lock.skills.clone()
-    };
+    let fetch = run.mode.fetch(&res.fresh);
+    let skips = |name: &DepName| !manifest.resolve_transitive && fetch.skips(name);
+    for name in res.lock.skills.keys().filter(|n| skips(n)) {
+        report.unchanged(name);
+    }
+    let walked: BTreeMap<DepName, LockedSkill> = res
+        .lock
+        .skills
+        .iter()
+        .filter(|(n, _)| !skips(n))
+        .map(|(n, l)| (n.clone(), l.clone()))
+        .collect();
     let mut expansion = transitive::expand(
         &walked,
         &transitive::Ctx {
             prev: &res.prev.skills,
             resolve_transitive: manifest.resolve_transitive,
-            refresh: refresh.transitive(),
-            locked: run.locked,
-            check: run.check,
-            width,
+            mode: run.mode.walk(),
+            report,
             policy,
             links: linked,
         },
@@ -443,9 +399,8 @@ pub(super) fn judge_transitive(
 pub(super) fn fold_transitive(
     lock: &mut Lockfile,
     transitive: Vec<(DepName, LockedSkill)>,
-    run: Run,
+    report: Reporter,
 ) -> Result<()> {
-    let (quiet, width) = (run.quiet(), run.width);
     for (tname, tlocked) in transitive {
         if lock.contains_dependency(&tname) {
             bail!(
@@ -454,10 +409,9 @@ pub(super) fn fold_transitive(
                  brings it in"
             );
         }
-        say!(
-            quiet,
-            "  {tname:<width$}  transitive (via {})",
-            tlocked.requested_by.join(", ")
+        report.entry(
+            &tname,
+            format_args!("transitive (via {})", tlocked.requested_by.join(", ")),
         );
         lock.skills.insert(tname, tlocked);
     }
@@ -604,6 +558,7 @@ pub(super) fn stale_transitive_pins(
 
 #[cfg(test)]
 mod tests {
+    use super::super::Mode;
     use super::*;
     use crate::ids::dep;
 
@@ -711,34 +666,11 @@ mod tests {
         Manifest::parse(json, Path::new("ai.json")).unwrap()
     }
 
-    fn run(check: bool) -> Run {
+    fn run(mode: Mode<'static>) -> Run<'static> {
         Run {
-            locked: true,
-            check,
-            lock_only: false,
-            width: 0,
+            mode,
+            report: Reporter::silent(),
         }
-    }
-
-    /// Without a refresh nothing is re-resolved; `spm update <name>` refreshes
-    /// only that direct root and never the transitive frontier.
-    #[test]
-    fn refresh_is_surgical_for_a_named_update() {
-        let named = Refresh {
-            force: true,
-            only: Some("a"),
-        };
-        assert!(named.direct("a") && !named.direct("b") && !named.transitive());
-        let bare = Refresh {
-            force: true,
-            only: None,
-        };
-        assert!(bare.direct("a") && bare.direct("b") && bare.transitive());
-        let none = Refresh {
-            force: false,
-            only: None,
-        };
-        assert!(!none.direct("a") && !none.transitive());
     }
 
     /// `--locked` resolves nothing: matching pins are reused (with direct-only
@@ -771,11 +703,7 @@ mod tests {
             &m,
             prev,
             Path::new("."),
-            Refresh {
-                force: false,
-                only: None,
-            },
-            run(false),
+            run(Mode::Locked),
             &BTreeMap::new(),
             &mut findings,
         )
@@ -825,11 +753,7 @@ mod tests {
             &m,
             prev,
             Path::new("."),
-            Refresh {
-                force: false,
-                only: None,
-            },
-            run(true),
+            run(Mode::Check),
             &BTreeMap::new(),
             &mut findings,
         )
@@ -848,15 +772,24 @@ mod tests {
             plugins: BTreeMap::from([(dep("x"), main.clone())]),
             ..Default::default()
         };
-        let err = fold_transitive(&mut lock, vec![(dep("x"), main.clone())], run(true))
-            .unwrap_err()
-            .to_string();
+        let err = fold_transitive(
+            &mut lock,
+            vec![(dep("x"), main.clone())],
+            Reporter::silent(),
+        )
+        .unwrap_err()
+        .to_string();
         assert!(
             err.starts_with("transitive skill name collision: `x`"),
             "{err}"
         );
         assert!(lock.skills.is_empty());
-        fold_transitive(&mut lock, vec![(dep("y"), main.clone())], run(true)).unwrap();
+        fold_transitive(
+            &mut lock,
+            vec![(dep("y"), main.clone())],
+            Reporter::silent(),
+        )
+        .unwrap();
         assert_eq!(lock.skills["y"].commit, main.commit);
     }
 

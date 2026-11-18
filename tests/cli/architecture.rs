@@ -53,6 +53,7 @@ const ALLOWED_EDGES: &[(&str, &[&str])] = &[
     (
         "cli",
         &[
+            "fetch",
             "fsutil",
             "git",
             "gitignore",
@@ -82,6 +83,7 @@ const ALLOWED_EDGES: &[(&str, &[&str])] = &[
     (
         "transitive",
         &[
+            "fetch",
             "fsutil",
             "ids",
             "links",
@@ -93,9 +95,9 @@ const ALLOWED_EDGES: &[(&str, &[&str])] = &[
             "resolver",
             "scan",
             "skillcheck",
-            "store",
         ],
     ),
+    ("fetch", &["ids", "lockfile", "manifest", "store"]),
     (
         "owned",
         &[

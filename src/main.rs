@@ -1,4 +1,5 @@
 mod cli;
+mod fetch;
 mod fsutil;
 mod git;
 mod gitignore;

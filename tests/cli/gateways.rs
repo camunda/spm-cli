@@ -199,6 +199,38 @@ const GUARDS: &[Guard] = &[
             ),
         ],
     },
+    Guard {
+        // The sync pipeline (`cli/sync`, `transitive`) reports progress only
+        // through `Reporter`, so a read-only check can never print.
+        name: "standard output",
+        gateway: "`fetch::Reporter` (src/fetch.rs) in the sync pipeline",
+        patterns: &["println", "print", "io::stdout"],
+        imports: &[],
+        opaque: &[],
+        allowed: &[
+            (
+                "src/fetch.rs",
+                "`Reporter`, the sync pipeline's progress (silent in a check)",
+            ),
+            ("src/cli/mod.rs", "`spm install`'s summary line"),
+            ("src/cli/add.rs", "`spm add`'s summary line"),
+            ("src/cli/remove.rs", "`spm remove`'s summary line"),
+            ("src/cli/update.rs", "`spm update`'s summary line"),
+            ("src/cli/link.rs", "`spm link`/`unlink`'s summary lines"),
+            ("src/cli/init.rs", "`spm init`'s summary lines"),
+            ("src/cli/clean.rs", "`spm clean`/`prune`'s report"),
+            ("src/cli/target.rs", "`spm target`'s report and prompt"),
+            (
+                "src/cli/common.rs",
+                "JSON documents and confirmation prompts",
+            ),
+            ("src/cli/list.rs", "`spm list`'s report"),
+            ("src/cli/status.rs", "`spm status`'s report"),
+            ("src/cli/doctor.rs", "`spm doctor`'s report"),
+            ("src/cli/scan.rs", "`spm scan`'s report"),
+            ("src/cli/outdated/render.rs", "`spm outdated`'s table"),
+        ],
+    },
 ];
 
 /// Where an identifier starts: `(line, column)`, the same in every parse of

@@ -2,7 +2,7 @@
 //! `ai.lock` and the links file — and the private snapshot linked content is
 //! materialized from.
 
-use super::{install_command, Apply, Plan};
+use super::{install_command, Plan};
 use crate::ids::DepName;
 use crate::links::{Linked, Links};
 use crate::owned::Owned;
@@ -11,24 +11,28 @@ use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-impl Plan {
+impl Plan<'_> {
     /// Project the planned skills + plugins into every configured target, then
     /// persist `ai.lock`. Returns the number of locked skills + plugins.
     pub(super) fn apply(self, scope: &Scope) -> Result<usize> {
         let lock = &self.lock;
-        if self.apply == Apply::LockOnly {
+        if self.mode.check() {
+            bail!("internal error: a check applies nothing");
+        }
+        if self.mode.lock_only() {
             // Nothing is installed or removed now: the targets keep what they
             // hold, and the next install or clean must still know it is spm's.
             self.previously_owned.freeze(scope, &self.targets)?;
             lock.save(&self.dir)?;
-            println!(
+            self.report.say(format_args!(
                 "wrote ai.lock only; run `{}` to install into the targets",
                 install_command(scope)
-            );
+            ));
             return Ok(lock.dependencies().count());
         }
         if self.declares_any {
-            println!("materializing: {}", self.targets.join(", "));
+            self.report
+                .say(format_args!("materializing: {}", self.targets.join(", ")));
         }
         // Skills copied from a linked plugin's working tree are listed in the
         // links file (an spm without an ownership record falls back to it).
@@ -71,7 +75,7 @@ impl Plan {
         // otherwise a failed `install` could leave behind a lockfile pointing at
         // state that was never actually materialized. `--locked` never writes
         // it: it already matches (checked in `plan`).
-        if !self.locked {
+        if !self.mode.locked() {
             lock.save(&self.dir)?;
         }
         if let Some(links) = &self.links {
