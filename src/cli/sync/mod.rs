@@ -413,7 +413,7 @@ fn plan<'a>(session: &ScopeSession, req: Request<'a>) -> Result<Plan<'a>> {
     let unwalked_skills = expansion.unverified.clone();
     findings
         .unverified
-        .extend(expansion.unverified.iter().map(ToString::to_string));
+        .extend(expansion.unverified.iter().cloned());
     let mut selected = expansion.selected;
     let mut lock = res.lock;
     resolve::fold_transitive(&mut lock, expansion.transitive, run.report)?;
