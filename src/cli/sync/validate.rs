@@ -286,7 +286,7 @@ pub(super) fn backstop(
     dir: &Path,
     resolve_transitive: bool,
     lock: &Lockfile,
-    unwalked: &[String],
+    unwalked: &[DepName],
     findings: &mut LockFindings,
 ) -> Result<()> {
     let on_disk: serde_json::Value =
@@ -317,7 +317,7 @@ pub(super) fn backstop(
 fn verified_lock_drift(
     on_disk: &serde_json::Value,
     lock: &Lockfile,
-    unverified: &[String],
+    unverified: &[DepName],
 ) -> Result<Vec<String>> {
     use serde_json::Value;
     let mut drift = Vec::new();
@@ -366,7 +366,7 @@ fn verified_lock_drift(
         }
     }
     let unwalked = |r: &str| {
-        unverified.iter().any(|u| u == r)
+        unverified.iter().any(|u| u.as_str() == r)
             || (on_disk["skills"].get(r).is_some() && !lock.skills.contains_key(r))
     };
     let list = |v: &Value, key: &str| {
@@ -389,7 +389,7 @@ fn verified_lock_drift(
         });
         !present_empty
             && serde_json::from_value::<LockedSkill>(disk.clone())
-                .is_ok_and(|l| strict(&l.requested_by) && strict(&l.also_satisfies))
+                .is_ok_and(|l| strict(l.requested_by()) && strict(&l.also_satisfies))
     };
     for (name, entry) in &lock.skills {
         let Some(disk) = on_disk["skills"].get(name.as_str()) else {

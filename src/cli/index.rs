@@ -3,7 +3,7 @@
 //! transitive or plugins, and who requested a transitive skill.
 
 use crate::ids::DepName;
-use crate::lockfile::{LockedSkill, Lockfile};
+use crate::lockfile::{LockEntry, Lockfile};
 use crate::manifest::{DependencyKind, Manifest, SkillSpec};
 
 /// `ai.json` and `ai.lock`, read together.
@@ -16,17 +16,17 @@ pub(super) struct DependencyIndex<'a> {
 pub(super) struct Direct<'a> {
     pub(super) name: &'a DepName,
     pub(super) spec: &'a SkillSpec,
-    pub(super) locked: Option<&'a LockedSkill>,
+    pub(super) locked: Option<LockEntry<'a>>,
 }
 
 /// An `ai.lock` entry, classified against `ai.json`.
 pub(super) struct Locked<'a> {
     pub(super) kind: DependencyKind,
     pub(super) name: &'a DepName,
-    pub(super) locked: &'a LockedSkill,
+    pub(super) locked: LockEntry<'a>,
     /// Its `ai.json` request, when declared there as this kind.
     pub(super) spec: Option<&'a SkillSpec>,
-    /// Pulled in by the direct skills in its `requested_by`, not declared.
+    /// A transitive skill `ai.json` does not declare.
     pub(super) transitive: bool,
 }
 
@@ -44,21 +44,22 @@ impl<'a> DependencyIndex<'a> {
             .map(move |(name, spec)| Direct {
                 name,
                 spec,
-                locked: lock.deps(kind).get(name),
+                locked: lock.get(kind, name),
             })
     }
 
     /// Every `ai.lock` entry: skills, then plugins, each by name.
     pub(super) fn locked(&self) -> impl Iterator<Item = Locked<'a>> + 'a {
         let manifest = self.manifest;
-        self.lock.dependencies().map(move |(kind, name, locked)| {
+        self.lock.dependencies().map(move |(name, locked)| {
+            let kind = locked.kind();
             let spec = manifest.deps(kind).get(name);
             Locked {
                 kind,
                 name,
                 locked,
                 spec,
-                transitive: is_transitive(kind, locked, spec),
+                transitive: is_transitive(locked, spec),
             }
         })
     }
@@ -79,14 +80,13 @@ impl<'a> DependencyIndex<'a> {
     /// Who requested `name`, when it is a transitive skill; empty otherwise.
     pub(super) fn requested_by(&self, name: &str) -> &'a [DepName] {
         self.lock
-            .skills
-            .get(name)
-            .filter(|l| is_transitive(DependencyKind::Skill, l, self.manifest.skills.get(name)))
-            .map_or(&[], |l| l.requested_by.as_slice())
+            .get(DependencyKind::Skill, name)
+            .filter(|l| is_transitive(*l, self.manifest.skills.get(name)))
+            .map_or(&[], LockEntry::requested_by)
     }
 
     /// Where a walk up from a transitive skill toward `ai.json` goes next from
-    /// `name`: the `requested_by` of its pin (of either kind) — or nowhere once
+    /// `name`: the requesters of its pin (only a skill has any) — or nowhere once
     /// `ai.json` declares `name` (as any kind), since that declaration is what
     /// to edit, whatever a stale `ai.lock` says requested it.
     pub(super) fn requesters(&self, name: &str) -> &'a [DepName] {
@@ -95,28 +95,23 @@ impl<'a> DependencyIndex<'a> {
         }
         self.lock
             .get_dependency(name)
-            .map_or(&[], |l| l.requested_by.as_slice())
+            .map_or(&[], LockEntry::requested_by)
     }
 }
 
 /// Only skills are pulled in transitively. A name declared in `ai.json` is
-/// direct even if a stale or hand-edited `ai.lock` left a `requested_by` on it.
-fn is_transitive(kind: DependencyKind, locked: &LockedSkill, spec: Option<&SkillSpec>) -> bool {
-    kind == DependencyKind::Skill && !locked.requested_by.is_empty() && spec.is_none()
+/// direct even if a stale or hand-edited `ai.lock` pins it as transitive.
+fn is_transitive(locked: LockEntry, spec: Option<&SkillSpec>) -> bool {
+    matches!(locked, LockEntry::Skill(s) if s.is_transitive()) && spec.is_none()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ids::dep;
-    use crate::lockfile::tests::entry;
+    use crate::lockfile::tests::{entry, plugin, requested};
     use std::collections::BTreeMap;
     use std::path::Path;
-
-    fn requested(mut l: LockedSkill, by: &[&str]) -> LockedSkill {
-        l.requested_by = by.iter().map(|n| dep(n)).collect();
-        l
-    }
 
     /// `top` is direct (its stray `requested_by` notwithstanding), `leaf` is
     /// transitive, `old` is a stale pin, `kit` a plugin and `new` declared
@@ -137,7 +132,7 @@ mod tests {
                 (dep("leaf"), requested(s('b'), &["top"])),
                 (dep("old"), s('c')),
             ]),
-            plugins: BTreeMap::from([(dep("kit"), requested(s('d'), &["top"]))]),
+            plugins: BTreeMap::from([(dep("kit"), plugin("https://h/s.git", 'd', "branch:main"))]),
             ..Default::default()
         };
         (manifest, lock)
@@ -154,7 +149,10 @@ mod tests {
         let skills: Vec<_> = index.direct(DependencyKind::Skill).collect();
         assert_eq!(names(skills.iter().map(|d| d.name)), ["new", "top"]);
         assert!(skills[0].locked.is_none());
-        assert_eq!(skills[1].locked.unwrap().commit.as_str(), "a".repeat(40));
+        assert_eq!(
+            skills[1].locked.unwrap().pin().commit.as_str(),
+            "a".repeat(40)
+        );
         let plugins: Vec<_> = index.direct(DependencyKind::Plugin).collect();
         assert_eq!(names(plugins.iter().map(|d| d.name)), ["kit"]);
         assert!(plugins[0].locked.is_some());
@@ -196,8 +194,10 @@ mod tests {
     #[test]
     fn requesters_stop_at_any_declared_name() {
         let (manifest, mut lock) = fixture();
-        lock.skills
-            .insert(dep("kit"), requested(lock.plugins["kit"].clone(), &["x"]));
+        lock.skills.insert(
+            dep("kit"),
+            requested(entry("https://h/s.git", 'd', "branch:main"), &["x"]),
+        );
         let index = DependencyIndex::new(&manifest, &lock);
         assert_eq!(names(index.requesters("leaf").iter()), ["top"]);
         for name in ["top", "kit", "new", "old", "missing"] {

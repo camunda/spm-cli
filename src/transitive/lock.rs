@@ -4,8 +4,8 @@
 
 use super::identity::{key_of, Key};
 use super::{Ctx, Output};
-use crate::ids::{LockReference, StoreKey};
-use crate::lockfile::LockedSkill;
+use crate::ids::{DepName, LockReference, StoreKey};
+use crate::lockfile::{LockedSkill, Origin, Pin};
 use crate::manifest::SkillSpec;
 use crate::resolver;
 use anyhow::Result;
@@ -14,13 +14,13 @@ use std::collections::BTreeSet;
 /// A requirement the lock has no pin for under its synthesized name.
 pub(super) struct Miss {
     pub(super) key: Key,
-    pub(super) name: String,
+    pub(super) name: DepName,
     /// The selector the edge requested.
     pub(super) requested: LockReference,
     pub(super) problem: String,
 }
 
-/// Resolve a nested skill spec to a locked entry, reusing the previous
+/// Resolve a nested skill spec to its pin, reusing the previous
 /// lockfile's pinned commit only when *this exact edge* — keyed by its
 /// deterministic synthesized name `synth` — resolved the same `git+ref+path`
 /// last time and we are not refreshing, so an unchanged transitive branch
@@ -56,25 +56,18 @@ pub(super) struct Miss {
 /// Under `--locked` or in a check (a `ctx.mode` that never resolves) a child
 /// without a reusable pin is never resolved: `Ok(None)` is returned and the
 /// caller records the miss.
-pub(super) fn resolve_child(
-    spec: &SkillSpec,
-    synth: &str,
-    ctx: &Ctx,
-) -> Result<Option<LockedSkill>> {
+pub(super) fn resolve_child(spec: &SkillSpec, synth: &str, ctx: &Ctx) -> Result<Option<Pin>> {
     if !ctx.mode.refresh() {
         if let Some(prev) = ctx.prev.get(synth) {
-            if prev.drift_from(spec)?.is_none() {
-                let commit = prev.commit.clone();
-                return Ok(Some(LockedSkill {
+            if prev.pin.drift_from(spec)?.is_none() {
+                let commit = prev.pin.commit.clone();
+                return Ok(Some(Pin {
                     git: spec.git.clone(),
                     reference: LockReference::from(spec.version()?),
                     store: StoreKey::derive(&spec.git, &commit),
                     path: spec.path.clone(),
                     commit,
-                    resolved_tag: prev.resolved_tag.clone(),
-                    bundled_skills: Vec::new(),
-                    requested_by: Vec::new(),
-                    also_satisfies: Vec::new(),
+                    resolved_tag: prev.pin.resolved_tag.clone(),
                 }));
             }
         }
@@ -96,7 +89,7 @@ pub(super) fn lock_miss(
     let what = match ctx.prev.get(synth) {
         Some(prev) => format!(
             "changed in ai.lock ({})",
-            prev.drift_from(spec)?.unwrap_or_default()
+            prev.pin.drift_from(spec)?.unwrap_or_default()
         ),
         None => "missing from ai.lock".to_string(),
     };
@@ -118,14 +111,14 @@ pub(super) fn sort_misses(out: &mut Output, misses: Vec<Miss>, ctx: &Ctx) {
     } else {
         ctx.prev
             .iter()
-            .filter(|(n, l)| !l.requested_by.is_empty() && !reached.contains(n.as_str()))
+            .filter(|(n, l)| l.is_transitive() && !reached.contains(n.as_str()))
             .map(|(_, l)| l)
             .collect()
     };
     for m in misses {
         let covered = unreached.iter().any(|l| {
-            key_of(&l.git, &l.path) == m.key
-                && (l.reference == m.requested
+            key_of(&l.pin.git, &l.pin.path) == m.key
+                && (l.pin.reference == m.requested
                     || l.also_satisfies.iter().any(|s| s.reference == m.requested))
         });
         if covered && !ctx.prev.contains_key(m.name.as_str()) {
@@ -140,8 +133,9 @@ pub(super) fn sort_misses(out: &mut Output, misses: Vec<Miss>, ctx: &Ctx) {
 /// order.
 pub(super) fn sort_provenance(out: &mut Output) {
     for (_, l) in &mut out.transitive {
-        l.requested_by.sort();
-        l.requested_by.dedup();
+        if let Origin::Transitive(by) = &mut l.origin {
+            by.normalize();
+        }
         l.also_satisfies.sort();
         l.also_satisfies.dedup();
     }

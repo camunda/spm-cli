@@ -6,7 +6,8 @@ use super::report::{Row, SelectorCheck, Status};
 use super::upgrade::Upgrade;
 use crate::git;
 use crate::ids::LockReference;
-use crate::lockfile::LockedSkill;
+use crate::lockfile::LockEntry;
+use crate::manifest::DependencyKind;
 use crate::version::{semver_of_tag, Version};
 use std::collections::BTreeMap;
 
@@ -32,13 +33,13 @@ impl Remotes {
 
 pub(super) fn check<'a>(
     name: &'a str,
-    l: &'a LockedSkill,
-    plugin: bool,
+    entry: LockEntry<'a>,
     transitive: bool,
     remotes: &mut Remotes,
 ) -> Row<'a> {
+    let l = entry.pin();
     let mut row = Row {
-        plugin,
+        plugin: entry.kind() == DependencyKind::Plugin,
         name,
         git: &l.git,
         path: l.path.as_deref(),
@@ -52,7 +53,7 @@ pub(super) fn check<'a>(
         status: Status::Error,
         outdated: false,
         transitive,
-        requested_by: &l.requested_by,
+        requested_by: entry.requested_by(),
         upgrade: Upgrade::default(),
         also_satisfies: Vec::new(),
         drift: None,
@@ -71,8 +72,8 @@ pub(super) fn check<'a>(
     row.latest_tag_commit = primary.latest_tag_commit;
     row.status = primary.status;
     row.error = primary.error;
-    row.also_satisfies = l
-        .also_satisfies
+    row.also_satisfies = entry
+        .also_satisfies()
         .iter()
         .map(|s| {
             evaluate(

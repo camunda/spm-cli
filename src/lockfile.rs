@@ -19,11 +19,11 @@ pub struct Lockfile {
     pub id: String,
     #[serde(default)]
     pub skills: BTreeMap<DepName, LockedSkill>,
-    /// Pinned full-plugin dependencies, parallel to `skills`. Same locked shape
-    /// (a plugin resolves to a single commit + store checkout); the `path` just
-    /// points at a plugin root rather than a single skill folder.
+    /// Pinned full-plugin dependencies, parallel to `skills`. A plugin
+    /// resolves to a single commit + store checkout like a skill; its `path`
+    /// just points at a plugin root rather than a single skill folder.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub plugins: BTreeMap<DepName, LockedSkill>,
+    pub plugins: BTreeMap<DepName, LockedPlugin>,
 }
 
 /// Generate a fresh, kebab-safe project id. Called once when a lockfile has none;
@@ -43,8 +43,10 @@ pub fn generate_id(root: &Path) -> String {
     format!("spm-{:08x}", h & 0xffff_ffff)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LockedSkill {
+/// What every `ai.lock` entry pins, whatever its kind: a version selector
+/// resolved down to an immutable commit and its store checkout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pin {
     pub git: String,
     /// The version selector that was requested, stored as its label (e.g.
     /// "tag:v1.2.0", "branch:main").
@@ -54,34 +56,185 @@ pub struct LockedSkill {
     /// For a `version:<requirement>` reference: the concrete semver tag the
     /// requirement resolved to (e.g. `v1.4.1`), so `list`/`outdated` can show
     /// `^1.2 → v1.4.1` without a remote lookup. Absent for every other selector.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub resolved_tag: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub path: Option<String>,
     /// Store directory key: `<repo-name>-<url-hash>@<sha>`.
     pub store: StoreKey,
-    /// For a full-plugin lock entry: the names of the skills the plugin bundles,
-    /// recorded at install time so `spm status` (which never touches the store)
-    /// still knows the plugin's materialized component set. Always empty for an
-    /// ordinary `skills` entry, so it is omitted from those.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub bundled_skills: Vec<DepName>,
-    /// Provenance for a transitively-resolved skill: the local name(s) of the
-    /// direct dependency(ies) that pulled it in (a top-level manifest key, or
-    /// another transitive skill's synthesized name). Empty for a normal,
-    /// directly-declared skill, so it is omitted from those. Always kept sorted
-    /// and deduplicated so the committed `ai.lock` is stable across runs
-    /// regardless of traversal order.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub requested_by: Vec<DepName>,
+}
+
+/// A pinned skill: declared in `ai.json`, or pulled in by a nested one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "EntryRepr", into = "EntryRepr")]
+pub struct LockedSkill {
+    pub pin: Pin,
+    pub origin: Origin,
     /// With `resolveTransitive`: other version selectors (`reference` labels)
     /// that nested `ai.json` edges request for this same skill identity and that
     /// resolved to this same `commit`. The deduplicated graph keeps one entry
     /// per identity, so this is the pin evidence that lets those edges be
     /// re-checked without a remote lookup (and lets `install --locked` accept
     /// them). Rebuilt on every sync; sorted and deduplicated.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub also_satisfies: Vec<Satisfied>,
+}
+
+/// Why a skill is in the lock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Origin {
+    /// Declared in `ai.json` (written without `requested_by`).
+    Direct,
+    /// Resolved transitively, for the dependencies that pulled it in.
+    Transitive(Requesters),
+}
+
+/// Provenance of a transitively-resolved skill: the local name(s) of the
+/// dependency(ies) that pulled it in (a top-level manifest key, or another
+/// transitive skill's synthesized name). Never empty — an entry without a
+/// requester is [`Origin::Direct`]. The walk keeps it sorted and deduplicated
+/// (see [`Requesters::normalize`]) so the committed `ai.lock` is stable across
+/// runs regardless of traversal order; a loaded one is kept as written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Requesters(Vec<DepName>);
+
+impl Requesters {
+    /// Requested by `first` alone.
+    pub fn new(first: DepName) -> Self {
+        Self(vec![first])
+    }
+
+    /// Requested by `name` as well.
+    pub fn push(&mut self, name: DepName) {
+        self.0.push(name);
+    }
+
+    /// Sort and deduplicate, as the lock records them.
+    pub fn normalize(&mut self) {
+        self.0.sort();
+        self.0.dedup();
+    }
+
+    pub fn as_slice(&self) -> &[DepName] {
+        &self.0
+    }
+}
+
+/// A pinned full-plugin dependency.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "EntryRepr", into = "EntryRepr")]
+pub struct LockedPlugin {
+    pub pin: Pin,
+    /// The names of the skills the plugin bundles, recorded at install time so
+    /// `spm status` (which never touches the store) still knows the plugin's
+    /// materialized component set.
+    pub bundled_skills: Vec<DepName>,
+}
+
+/// The on-disk shape of every `ai.lock` entry, whatever its kind: one flat
+/// object whose kind-specific lists are omitted when empty. The single
+/// serialization of [`LockedSkill`] and [`LockedPlugin`], so both keep the
+/// historical key set and order.
+#[derive(Serialize, Deserialize)]
+struct EntryRepr {
+    git: String,
+    reference: LockReference,
+    commit: CommitSha,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    resolved_tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    path: Option<String>,
+    store: StoreKey,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    bundled_skills: Vec<DepName>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    requested_by: Vec<DepName>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    also_satisfies: Vec<Satisfied>,
+}
+
+impl EntryRepr {
+    fn new(pin: Pin) -> Self {
+        let Pin {
+            git,
+            reference,
+            commit,
+            resolved_tag,
+            path,
+            store,
+        } = pin;
+        Self {
+            git,
+            reference,
+            commit,
+            resolved_tag,
+            path,
+            store,
+            bundled_skills: Vec::new(),
+            requested_by: Vec::new(),
+            also_satisfies: Vec::new(),
+        }
+    }
+
+    fn pin(&self) -> Pin {
+        Pin {
+            git: self.git.clone(),
+            reference: self.reference.clone(),
+            commit: self.commit.clone(),
+            resolved_tag: self.resolved_tag.clone(),
+            path: self.path.clone(),
+            store: self.store.clone(),
+        }
+    }
+}
+
+/// A field of the other kind (a hand-edited lock) was parsed and validated
+/// like any other, then dropped: nothing reads it, and the `--locked`
+/// whole-lock comparison (on the text as written) still reports it as drift.
+impl TryFrom<EntryRepr> for LockedSkill {
+    type Error = anyhow::Error;
+    fn try_from(r: EntryRepr) -> Result<Self> {
+        let pin = r.pin();
+        let origin = if r.requested_by.is_empty() {
+            Origin::Direct
+        } else {
+            Origin::Transitive(Requesters(r.requested_by))
+        };
+        Ok(Self {
+            pin,
+            origin,
+            also_satisfies: r.also_satisfies,
+        })
+    }
+}
+
+impl From<LockedSkill> for EntryRepr {
+    fn from(l: LockedSkill) -> Self {
+        let mut r = Self::new(l.pin);
+        if let Origin::Transitive(Requesters(by)) = l.origin {
+            r.requested_by = by;
+        }
+        r.also_satisfies = l.also_satisfies;
+        r
+    }
+}
+
+impl TryFrom<EntryRepr> for LockedPlugin {
+    type Error = anyhow::Error;
+    fn try_from(r: EntryRepr) -> Result<Self> {
+        // Dropped evidence is held to the rule it would be as a skill's. Serde
+        // renders the error with `{}`, so the chain is flattened here.
+        validate_evidence(&r.also_satisfies).map_err(|e| anyhow::anyhow!("{e:#}"))?;
+        Ok(Self {
+            pin: r.pin(),
+            bundled_skills: r.bundled_skills,
+        })
+    }
+}
+
+impl From<LockedPlugin> for EntryRepr {
+    fn from(l: LockedPlugin) -> Self {
+        let mut r = Self::new(l.pin);
+        r.bundled_skills = l.bundled_skills;
+        r
+    }
 }
 
 /// One `also_satisfies` entry: a selector (`reference` label) verified to
@@ -142,7 +295,7 @@ impl From<Satisfied> for SatisfiedRepr {
     }
 }
 
-impl LockedSkill {
+impl Pin {
     /// The requested selector as shown to humans: the `reference` label, plus
     /// the concrete tag a `version` range resolved to (`version:^1.2 → v1.4.1`).
     pub fn display_reference(&self) -> String {
@@ -150,6 +303,12 @@ impl LockedSkill {
             Some(tag) => format!("{} → {tag}", self.reference),
             None => self.reference.label(),
         }
+    }
+
+    /// Whether `other` pins the very same content: same git + path + commit
+    /// (whatever selector each was resolved from).
+    pub fn same_content(&self, other: &Pin) -> bool {
+        self.git == other.git && self.path == other.path && self.commit == other.commit
     }
 
     /// Compare this pin against the request it would satisfy. `None` when the
@@ -178,6 +337,95 @@ impl LockedSkill {
     }
 }
 
+impl LockedSkill {
+    /// A skill `ai.json` declares, pinned at `pin`.
+    pub fn direct(pin: Pin, also_satisfies: Vec<Satisfied>) -> Self {
+        Self {
+            pin,
+            origin: Origin::Direct,
+            also_satisfies,
+        }
+    }
+
+    /// A skill pulled in by `requested_by`, pinned at `pin`.
+    pub fn transitive(pin: Pin, requested_by: Requesters) -> Self {
+        Self {
+            pin,
+            origin: Origin::Transitive(requested_by),
+            also_satisfies: Vec::new(),
+        }
+    }
+
+    /// Record that `name` pulls this skill in too: a direct one becomes
+    /// transitive.
+    pub fn add_requester(&mut self, name: DepName) {
+        match &mut self.origin {
+            Origin::Direct => self.origin = Origin::Transitive(Requesters::new(name)),
+            Origin::Transitive(by) => by.push(name),
+        }
+    }
+
+    /// Who pulled this skill in; empty for a direct one.
+    pub fn requested_by(&self) -> &[DepName] {
+        match &self.origin {
+            Origin::Direct => &[],
+            Origin::Transitive(by) => by.as_slice(),
+        }
+    }
+
+    pub fn is_transitive(&self) -> bool {
+        matches!(self.origin, Origin::Transitive(_))
+    }
+}
+
+/// One `ai.lock` entry of either kind, borrowed: what a kind-agnostic reader
+/// (lookups, validation, reports) sees.
+#[derive(Debug, Clone, Copy)]
+pub enum LockEntry<'a> {
+    Skill(&'a LockedSkill),
+    Plugin(&'a LockedPlugin),
+}
+
+impl<'a> LockEntry<'a> {
+    pub fn kind(self) -> DependencyKind {
+        match self {
+            LockEntry::Skill(_) => DependencyKind::Skill,
+            LockEntry::Plugin(_) => DependencyKind::Plugin,
+        }
+    }
+
+    pub fn pin(self) -> &'a Pin {
+        match self {
+            LockEntry::Skill(s) => &s.pin,
+            LockEntry::Plugin(p) => &p.pin,
+        }
+    }
+
+    /// A transitive skill's requesters; empty for any other entry.
+    pub fn requested_by(self) -> &'a [DepName] {
+        match self {
+            LockEntry::Skill(s) => s.requested_by(),
+            LockEntry::Plugin(_) => &[],
+        }
+    }
+
+    /// A skill's `also_satisfies` evidence; empty for a plugin.
+    pub fn also_satisfies(self) -> &'a [Satisfied] {
+        match self {
+            LockEntry::Skill(s) => &s.also_satisfies,
+            LockEntry::Plugin(_) => &[],
+        }
+    }
+
+    /// A plugin's bundled skills; empty for a skill.
+    pub fn bundled_skills(self) -> &'a [DepName] {
+        match self {
+            LockEntry::Skill(_) => &[],
+            LockEntry::Plugin(p) => &p.bundled_skills,
+        }
+    }
+}
+
 impl Lockfile {
     pub fn path_in(dir: &Path) -> PathBuf {
         dir.join(LOCK_FILE)
@@ -202,42 +450,34 @@ impl Lockfile {
         if !self.id.is_empty() {
             validate_project_id(&self.id)?;
         }
-        for kind in DependencyKind::ALL {
-            validate_locked_map(self.deps(kind), kind)?;
+        for (name, entry) in self.dependencies() {
+            validate_entry(name, entry)?;
         }
         Ok(())
     }
 
-    /// The map holding pins of `kind`.
-    pub fn deps(&self, kind: DependencyKind) -> &BTreeMap<DepName, LockedSkill> {
+    /// The pin of the `kind` dependency `name`.
+    pub fn get(&self, kind: DependencyKind, name: &str) -> Option<LockEntry<'_>> {
         match kind {
-            DependencyKind::Skill => &self.skills,
-            DependencyKind::Plugin => &self.plugins,
+            DependencyKind::Skill => self.skills.get(name).map(LockEntry::Skill),
+            DependencyKind::Plugin => self.plugins.get(name).map(LockEntry::Plugin),
         }
     }
 
-    /// The map holding pins of `kind`, for editing.
-    pub fn deps_mut(&mut self, kind: DependencyKind) -> &mut BTreeMap<DepName, LockedSkill> {
-        match kind {
-            DependencyKind::Skill => &mut self.skills,
-            DependencyKind::Plugin => &mut self.plugins,
-        }
-    }
-
-    /// Every pin with its kind: skills (direct and transitive), then plugins,
-    /// each in name order.
-    pub fn dependencies(&self) -> impl Iterator<Item = (DependencyKind, &DepName, &LockedSkill)> {
-        DependencyKind::ALL
-            .into_iter()
-            .flat_map(move |kind| self.deps(kind).iter().map(move |(n, l)| (kind, n, l)))
+    /// Every pin: skills (direct and transitive), then plugins, each in name
+    /// order.
+    pub fn dependencies(&self) -> impl Iterator<Item = (&DepName, LockEntry<'_>)> {
+        let skills = self.skills.iter().map(|(n, l)| (n, LockEntry::Skill(l)));
+        let plugins = self.plugins.iter().map(|(n, l)| (n, LockEntry::Plugin(l)));
+        skills.chain(plugins)
     }
 
     /// The pin for `name`, whichever kind it is (a skill wins should a
     /// hand-edited lock repeat a name across kinds).
-    pub fn get_dependency(&self, name: &str) -> Option<&LockedSkill> {
+    pub fn get_dependency(&self, name: &str) -> Option<LockEntry<'_>> {
         DependencyKind::ALL
             .into_iter()
-            .find_map(|kind| self.deps(kind).get(name))
+            .find_map(|kind| self.get(kind, name))
     }
 
     /// Whether `name` is pinned as a skill or a plugin.
@@ -251,28 +491,32 @@ impl Lockfile {
     }
 }
 
-/// Validate one locked-dependency map (`skills` or `plugins`). `kind` only
-/// shapes the error text. Names, commits, store keys and references were
-/// already validated by their types while parsing; what remains are the
+/// Validate one locked dependency. Names, commits, store keys and references
+/// were already validated by their types while parsing; what remains are the
 /// cross-field rules. The store key must be exactly what we would derive from
 /// the entry's git+commit — a mismatch means the committed (untrusted)
 /// `ai.lock` was hand-edited to point elsewhere.
-fn validate_locked_map(map: &BTreeMap<DepName, LockedSkill>, kind: DependencyKind) -> Result<()> {
-    for (name, l) in map {
-        let expected = StoreKey::derive(&l.git, &l.commit);
-        if l.store != expected {
-            bail!(
-                "{kind} `{name}`: store key `{}` does not match `{expected}` derived from git+commit",
-                l.store
-            );
-        }
-        validate_resolved_tag(&l.reference, l.resolved_tag.as_deref())
-            .with_context(|| format!("{kind} `{name}`"))?;
-        for s in &l.also_satisfies {
-            let r = &s.reference;
-            validate_resolved_tag(r, s.resolved_tag.as_deref())
-                .with_context(|| format!("{kind} `{name}`: also_satisfies entry `{r}`"))?;
-        }
+fn validate_entry(name: &DepName, entry: LockEntry) -> Result<()> {
+    let (kind, l) = (entry.kind(), entry.pin());
+    let expected = StoreKey::derive(&l.git, &l.commit);
+    if l.store != expected {
+        bail!(
+            "{kind} `{name}`: store key `{}` does not match `{expected}` derived from git+commit",
+            l.store
+        );
+    }
+    validate_resolved_tag(&l.reference, l.resolved_tag.as_deref())
+        .with_context(|| format!("{kind} `{name}`"))?;
+    validate_evidence(entry.also_satisfies()).with_context(|| format!("{kind} `{name}`"))
+}
+
+/// Every `also_satisfies` entry follows the resolved-tag rule of a primary
+/// reference.
+fn validate_evidence(also_satisfies: &[Satisfied]) -> Result<()> {
+    for s in also_satisfies {
+        let r = &s.reference;
+        validate_resolved_tag(r, s.resolved_tag.as_deref())
+            .with_context(|| format!("also_satisfies entry `{r}`"))?;
     }
     Ok(())
 }
@@ -341,20 +585,39 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// A valid entry for `git` pinned at `c` repeated into a SHA.
-    pub(crate) fn entry(git: &str, c: char, reference: &str) -> LockedSkill {
+    /// A valid pin of `git` at `c` repeated into a SHA.
+    pub(crate) fn pin(git: &str, c: char, reference: &str) -> Pin {
         let commit = CommitSha::try_from(c.to_string().repeat(40)).unwrap();
-        LockedSkill {
+        Pin {
             git: git.into(),
             reference: LockReference::try_from(reference).unwrap(),
             store: StoreKey::derive(git, &commit),
             commit,
             resolved_tag: None,
             path: None,
-            bundled_skills: Vec::new(),
-            requested_by: Vec::new(),
-            also_satisfies: Vec::new(),
         }
+    }
+
+    /// A direct skill pinned like [`pin`].
+    pub(crate) fn entry(git: &str, c: char, reference: &str) -> LockedSkill {
+        LockedSkill::direct(pin(git, c, reference), Vec::new())
+    }
+
+    /// A plugin pinned like [`pin`], bundling nothing.
+    pub(crate) fn plugin(git: &str, c: char, reference: &str) -> LockedPlugin {
+        LockedPlugin {
+            pin: pin(git, c, reference),
+            bundled_skills: Vec::new(),
+        }
+    }
+
+    /// A transitive skill requested by `by`.
+    pub(crate) fn requested(mut l: LockedSkill, by: &[&str]) -> LockedSkill {
+        let mut by = by.iter().map(|n| dep(n));
+        let mut requesters = Requesters::new(by.next().unwrap());
+        by.for_each(|n| requesters.push(n));
+        l.origin = Origin::Transitive(requesters);
+        l
     }
 
     /// Name lookups span both maps; iteration yields skills before plugins.
@@ -365,12 +628,12 @@ pub(crate) mod tests {
                 (dep("zeta"), entry("https://h/s.git", 'a', "branch:main")),
                 (dep("alpha"), entry("https://h/s.git", 'b', "branch:main")),
             ]),
-            plugins: BTreeMap::from([(dep("kit"), entry("https://h/p.git", 'c', "tag:v1"))]),
+            plugins: BTreeMap::from([(dep("kit"), plugin("https://h/p.git", 'c', "tag:v1"))]),
             ..Default::default()
         };
         let all: Vec<_> = lock
             .dependencies()
-            .map(|(k, n, l)| (k, n.to_string(), l.git.clone()))
+            .map(|(n, l)| (l.kind(), n.to_string(), l.pin().git.clone()))
             .collect();
         assert_eq!(
             all,
@@ -392,7 +655,10 @@ pub(crate) mod tests {
                 ),
             ]
         );
-        assert_eq!(lock.get_dependency("kit").unwrap().git, "https://h/p.git");
+        assert_eq!(
+            lock.get_dependency("kit").unwrap().pin().git,
+            "https://h/p.git"
+        );
         assert!(lock.contains_dependency("alpha") && lock.contains_dependency("kit"));
         assert!(!lock.contains_dependency("missing"));
     }
@@ -400,8 +666,8 @@ pub(crate) mod tests {
     /// Validation errors name the map the bad entry lives in.
     #[test]
     fn validate_names_the_kind_of_a_bad_entry() {
-        let mut l = entry("https://example.com/repo.git", 'b', "branch:main");
-        l.store = StoreKey::try_from("not-derived").unwrap();
+        let mut l = plugin("https://example.com/repo.git", 'b', "branch:main");
+        l.pin.store = StoreKey::try_from("not-derived").unwrap();
         let lock = Lockfile {
             plugins: BTreeMap::from([(dep("kit"), l)]),
             ..Default::default()
@@ -416,7 +682,7 @@ pub(crate) mod tests {
     #[test]
     fn validate_rejects_store_key_mismatch() {
         let mut l = entry("https://example.com/repo.git", 'b', "branch:main");
-        l.store = StoreKey::try_from("totally-not-the-derived-key").unwrap();
+        l.pin.store = StoreKey::try_from("totally-not-the-derived-key").unwrap();
         let lock = Lockfile {
             skills: BTreeMap::from([(dep("greet"), l)]),
             ..Default::default()
@@ -431,9 +697,8 @@ pub(crate) mod tests {
     #[test]
     fn requested_by_round_trips_and_is_omitted_when_empty() {
         let git = "https://example.com/repo.git";
-        let mut leaf = entry(git, 'e', "branch:main");
-        leaf.path = Some("leaf".into());
-        leaf.requested_by = vec![dep("top")];
+        let mut leaf = requested(entry(git, 'e', "branch:main"), &["top"]);
+        leaf.pin.path = Some("leaf".into());
         let lock = Lockfile {
             skills: BTreeMap::from([
                 (dep("direct"), entry(git, 'e', "branch:main")),
@@ -452,8 +717,8 @@ pub(crate) mod tests {
         // Round-trips back to the same in-memory shape (and passes validation).
         let back: Lockfile = serde_json::from_str(&json).unwrap();
         back.validate().unwrap();
-        assert_eq!(back.skills["top__leaf-deadbeef"].requested_by, ["top"]);
-        assert!(back.skills["direct"].requested_by.is_empty());
+        assert_eq!(back.skills["top__leaf-deadbeef"].requested_by(), ["top"]);
+        assert_eq!(back.skills["direct"].origin, Origin::Direct);
     }
 
     /// An older `ai.lock` written before the provenance field existed loads
@@ -467,7 +732,7 @@ pub(crate) mod tests {
             StoreKey::derive(git, &sha)
         );
         let lock = load_text(&text).unwrap();
-        assert!(lock.skills["greet"].requested_by.is_empty());
+        assert_eq!(lock.skills["greet"].origin, Origin::Direct);
     }
 
     /// The typed fields serialize back to exactly the text they were parsed
@@ -475,11 +740,10 @@ pub(crate) mod tests {
     #[test]
     fn lockfile_round_trips_byte_for_byte() {
         let git = "https://example.com/repo.git";
-        let mut plugin = entry(git, 'c', "commit:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC");
+        let mut plugin = plugin(git, 'c', "commit:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC");
         plugin.bundled_skills = vec![dep("b-skill"), dep("a-skill")];
-        let mut range = entry(git, 'd', "version:>=1.2, <2");
-        range.resolved_tag = Some("v1.4.1".into());
-        range.requested_by = vec![dep("pdf")];
+        let mut range = requested(entry(git, 'd', "version:>=1.2, <2"), &["pdf"]);
+        range.pin.resolved_tag = Some("v1.4.1".into());
         range.also_satisfies = vec![
             Satisfied {
                 reference: LockReference::try_from("branch:feat/x:y").unwrap(),
@@ -527,9 +791,128 @@ pub(crate) mod tests {
         );
     }
 
+    /// An `ai.lock` as spm has always written it — every entry kind, every
+    /// optional field — loads into typed entries and saves back to the very
+    /// same bytes.
+    #[test]
+    fn existing_lock_text_round_trips_through_typed_entries() {
+        let git = "https://example.com/repo.git";
+        let (a, b, c) = (
+            CommitSha::try_from("a".repeat(40)).unwrap(),
+            CommitSha::try_from("b".repeat(40)).unwrap(),
+            CommitSha::try_from("c".repeat(40)).unwrap(),
+        );
+        let (sa, sb, sc) = (
+            StoreKey::derive(git, &a),
+            StoreKey::derive(git, &b),
+            StoreKey::derive(git, &c),
+        );
+        let text = format!(
+            r#"{{
+  "id": "spm-0123abcd",
+  "skills": {{
+    "pdf": {{
+      "git": "{git}",
+      "reference": "tag:v1.0.0",
+      "commit": "{a}",
+      "store": "{sa}",
+      "also_satisfies": [
+        "branch:main"
+      ]
+    }},
+    "pdf__leaf-0a1b2c3d": {{
+      "git": "{git}",
+      "reference": "version:^1.2",
+      "commit": "{b}",
+      "resolved_tag": "v1.4.1",
+      "path": "leaf",
+      "store": "{sb}",
+      "requested_by": [
+        "pdf",
+        "zip"
+      ],
+      "also_satisfies": [
+        {{
+          "reference": "version:^1",
+          "resolved_tag": "v1.4.1"
+        }}
+      ]
+    }}
+  }},
+  "plugins": {{
+    "ds": {{
+      "git": "{git}",
+      "reference": "branch:main",
+      "commit": "{c}",
+      "path": "pkg",
+      "store": "{sc}",
+      "bundled_skills": [
+        "b-skill",
+        "a-skill"
+      ]
+    }}
+  }}
+}}
+"#
+        );
+        let lock = load_text(&text).unwrap();
+        assert_eq!(lock.skills["pdf"].origin, Origin::Direct);
+        assert_eq!(
+            lock.skills["pdf__leaf-0a1b2c3d"].requested_by(),
+            [dep("pdf"), dep("zip")]
+        );
+        assert_eq!(
+            lock.plugins["ds"].bundled_skills,
+            [dep("b-skill"), dep("a-skill")]
+        );
+        assert_eq!(crate::jsonfile::to_text(&lock).unwrap(), text);
+    }
+
+    /// A hand-edited field of the other kind (a plugin's `requested_by` or
+    /// `also_satisfies`, a skill's `bundled_skills`) is still validated, then
+    /// dropped: no entry can carry another kind's data.
+    #[test]
+    fn fields_of_the_other_kind_are_validated_then_dropped() {
+        use serde_json::json;
+        let as_plugin = |text: String| text.replacen(r#"{"skills":"#, r#"{"plugins":"#, 1);
+        let lock = load_text(&entry_json("ok", "bundled_skills", json!(["x"]))).unwrap();
+        assert_eq!(lock.skills["ok"], entry_from_json());
+        for (field, value) in [
+            ("requested_by", json!(["top"])),
+            ("also_satisfies", json!(["branch:dev"])),
+        ] {
+            let lock = load_text(&as_plugin(entry_json("ok", field, value))).unwrap();
+            assert!(lock.plugins["ok"].bundled_skills.is_empty(), "{field}");
+            assert_eq!(lock.plugins["ok"].pin, entry_from_json().pin, "{field}");
+            let text = crate::jsonfile::to_text(&lock).unwrap();
+            assert!(!text.contains(field), "{field}: {text}");
+        }
+        for (field, value, needle) in [
+            ("requested_by", json!(["a/b"]), "invalid skill name"),
+            (
+                "also_satisfies",
+                json!([{"reference": "version:^1", "resolved_tag": "v2.0.0"}]),
+                "does not satisfy",
+            ),
+            (
+                "also_satisfies",
+                json!(["version:^1"]),
+                "has no resolved_tag",
+            ),
+        ] {
+            let err = load_text(&as_plugin(entry_json("ok", field, value))).unwrap_err();
+            assert!(format!("{err:#}").contains(needle), "{field}: {err:#}");
+        }
+    }
+
+    /// The entry [`entry_json`] writes, without overrides.
+    fn entry_from_json() -> LockedSkill {
+        entry("https://example.com/repo.git", 'a', "branch:main")
+    }
+
     fn with_reference(reference: &str, resolved_tag: Option<&str>) -> Lockfile {
         let mut l = entry("https://example.com/repo.git", 'a', reference);
-        l.resolved_tag = resolved_tag.map(str::to_string);
+        l.pin.resolved_tag = resolved_tag.map(str::to_string);
         Lockfile {
             skills: BTreeMap::from([(dep("pdf"), l)]),
             ..Default::default()
@@ -683,11 +1066,11 @@ pub(crate) mod tests {
     fn display_reference_appends_the_resolved_tag() {
         let lock = with_reference("version:^1.2", Some("v1.4.1"));
         assert_eq!(
-            lock.skills["pdf"].display_reference(),
+            lock.skills["pdf"].pin.display_reference(),
             "version:^1.2 → v1.4.1"
         );
         let lock = with_reference("tag:v1.4.1", None);
-        assert_eq!(lock.skills["pdf"].display_reference(), "tag:v1.4.1");
+        assert_eq!(lock.skills["pdf"].pin.display_reference(), "tag:v1.4.1");
     }
 
     mod props {
@@ -718,47 +1101,62 @@ pub(crate) mod tests {
             ]
         }
 
-        fn locked() -> impl Strategy<Value = LockedSkill> {
-            let names = || prop::collection::vec(dep_name(), 0..3);
+        fn pinned() -> impl Strategy<Value = Pin> {
             (
-                (".{0,16}", "[0-9a-f]{40}", reference()),
-                (prop::option::of(".{1,8}"), names(), names()),
-                prop::collection::vec(reference(), 0..3),
+                ".{0,16}",
+                "[0-9a-f]{40}",
+                reference(),
+                prop::option::of(".{1,8}"),
             )
-                .prop_map(
-                    |(
-                        (git, sha, (reference, resolved_tag)),
-                        (path, bundled_skills, requested_by),
-                        also,
-                    )| {
-                        let commit = CommitSha::try_from(sha).unwrap();
-                        LockedSkill {
-                            store: StoreKey::derive(&git, &commit),
-                            git,
-                            reference,
-                            commit,
-                            resolved_tag,
-                            path,
-                            bundled_skills,
-                            requested_by,
-                            also_satisfies: also
-                                .into_iter()
-                                .map(|(reference, resolved_tag)| Satisfied {
-                                    reference,
-                                    resolved_tag,
-                                })
-                                .collect(),
-                        }
+                .prop_map(|(git, sha, (reference, resolved_tag), path)| {
+                    let commit = CommitSha::try_from(sha).unwrap();
+                    Pin {
+                        store: StoreKey::derive(&git, &commit),
+                        git,
+                        reference,
+                        commit,
+                        resolved_tag,
+                        path,
+                    }
+                })
+        }
+
+        fn names() -> impl Strategy<Value = Vec<DepName>> {
+            prop::collection::vec(dep_name(), 0..3)
+        }
+
+        fn skill() -> impl Strategy<Value = LockedSkill> {
+            (pinned(), names(), prop::collection::vec(reference(), 0..3)).prop_map(
+                |(pin, requested_by, also)| LockedSkill {
+                    pin,
+                    origin: if requested_by.is_empty() {
+                        Origin::Direct
+                    } else {
+                        Origin::Transitive(Requesters(requested_by))
                     },
-                )
+                    also_satisfies: also
+                        .into_iter()
+                        .map(|(reference, resolved_tag)| Satisfied {
+                            reference,
+                            resolved_tag,
+                        })
+                        .collect(),
+                },
+            )
+        }
+
+        fn plugin() -> impl Strategy<Value = LockedPlugin> {
+            (pinned(), names()).prop_map(|(pin, bundled_skills)| LockedPlugin {
+                pin,
+                bundled_skills,
+            })
         }
 
         fn lockfile() -> impl Strategy<Value = Lockfile> {
-            let deps = || prop::collection::btree_map(dep_name(), locked(), 0..3);
             (
                 prop_oneof![Just(String::new()), "[A-Za-z0-9_-]{1,10}"],
-                deps(),
-                deps(),
+                prop::collection::btree_map(dep_name(), skill(), 0..3),
+                prop::collection::btree_map(dep_name(), plugin(), 0..3),
             )
                 .prop_map(|(id, skills, plugins)| Lockfile {
                     id,
@@ -787,11 +1185,15 @@ pub(crate) mod tests {
         proptest! {
             #![proptest_config(crate::proptest_config(128))]
 
-            /// Every lock spm can write loads back unchanged.
+            /// Every lock spm can write loads back unchanged: same text, and
+            /// every entry keeps its kind and origin.
             #[test]
             fn saved_locks_load_back(lock in lockfile()) {
                 let loaded = load_text(&text(&lock));
                 prop_assert_eq!(loaded.as_ref().map(text), Some(text(&lock)));
+                let loaded = loaded.unwrap();
+                prop_assert_eq!(&loaded.skills, &lock.skills);
+                prop_assert_eq!(&loaded.plugins, &lock.plugins);
             }
 
             /// A hand-edited or hostile `ai.lock` is an error or a lock, never
