@@ -786,7 +786,7 @@ fn ownership_records_are_guarded_like_links_files() {
     }
 }
 
-/// Saving the ownership record replaces the file at its path: with
+/// Saving the ownership record writes the file at its path: with
 /// `$SPM_HOME/owned` moved into a linked working copy (and symlinked back),
 /// every command that would save it refuses before changing anything — an
 /// install, `clean`, `target remove`, and a lock-only sync freezing a legacy
@@ -821,6 +821,27 @@ fn ownership_records_are_never_written_into_a_working_copy() {
     assert!(err.contains("linked directory `../dev`"), "{err}");
     assert!(!record.exists(), "no record written");
     assert_eq!(read_path(&sb.project.join("ai.lock")), lock);
+}
+
+/// Saving the ownership record writes through a symlink at its own path: one
+/// pointing into a linked working copy is refused like a symlinked parent,
+/// leaving the file it points at untouched.
+#[test]
+fn ownership_records_are_never_written_through_into_a_working_copy() {
+    let sb = Sandbox::new();
+    sb.ok(&["init", "--target", "copilot"]);
+    sb.ok(&["add", &sb.skill_url(), "--tag", "v0.1.0", "--name", "greet"]);
+    let dev = local_skill_checkout(&sb, "dev", "LOCAL");
+    sb.ok(&["link", "greet", "../dev"]);
+    let record = sb.project_owned();
+    let inside = dev.join("owned.json");
+    std::fs::rename(&record, &inside).unwrap();
+    symlink(&inside, &record);
+    let before = read_path(&inside);
+
+    let err = fails(&sb, &["install"]);
+    assert!(err.contains("linked directory `../dev`"), "{err}");
+    assert_eq!(read_path(&inside), before);
 }
 
 /// Before the first install there is no ownership record (nor links file) to

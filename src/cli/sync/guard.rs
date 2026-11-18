@@ -194,11 +194,11 @@ struct Kept<'a> {
 /// `.agents/skills/<name>`) would be wiped before it is copied — losing
 /// uncommitted edits — and output inside the source (e.g. linking the project
 /// root) would be copied into itself. Files spm edits in place (`ai.json`,
-/// `ai.lock`, the links file, the project `.gitignore`, a vendor's settings)
-/// are followed through symlinks, since writing them would modify whatever they
-/// point at. Compared by filesystem identity, so symlinks and spelling aliases
-/// (case on a case-insensitive filesystem) match. The recorded path's access
-/// route counts too: deleting a symlink (or a dir holding one) it passes
+/// `ai.lock`, the links file, the ownership record, the project `.gitignore`,
+/// a vendor's settings) are followed through symlinks, since writing them
+/// would modify whatever they point at. Compared by filesystem identity, so
+/// symlinks and spelling aliases (case on a case-insensitive filesystem)
+/// match. The recorded path's access route counts too: deleting a symlink (or a dir holding one) it passes
 /// through would break — or, once regenerated, silently re-point — the link.
 ///
 /// Nor may the targets wipe what `kept` lists: a links file (dropping every
@@ -289,6 +289,11 @@ fn touched(
             patched.extend(r.patched_files(scope)?.into_iter().map(|p| (v.name(), p)));
         }
     }
+    // Saving the ownership record writes it in place, through a symlink at
+    // its path (see `atomic::replace`).
+    if writes.ownership {
+        patched.push(("spm", Ownership::path(scope)?));
+    }
     for (owner, p) in &patched {
         let id = identity(&resolve(p, &mut Vec::new())?)?;
         outputs.push((*owner, p.clone(), id, true));
@@ -301,13 +306,6 @@ fn touched(
         let links_file = state_files[0].path.clone();
         let id = identity(&deletion_target(&links_file)?)?;
         outputs.push(("spm", links_file, id, false));
-    }
-    // Saving the ownership record replaces the entry at its path (beside a
-    // temporary file in the same dir), following its parents' symlinks only.
-    if writes.ownership {
-        let record = Ownership::path(scope)?;
-        let id = identity(&deletion_target(&record)?)?;
-        outputs.push(("spm", record, id, false));
     }
     Ok(Touched { outputs, patched })
 }
