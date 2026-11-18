@@ -35,10 +35,10 @@ pub(super) struct Miss {
 /// Freshness cascade contract — deliberately scoped to the *whole walk*, not
 /// per-parent:
 ///
-/// * A bare `spm update` (no name) sets `ctx.refresh = true`, so every
-///   transitive child is re-resolved to its latest commit.
+/// * A bare `spm update` (no name) walks in `Mode::Resolve { refresh: true }`,
+///   so every transitive child is re-resolved to its latest commit.
 /// * Any other sync (`install`, `add`, `sync`, or `spm update <name>`) leaves
-///   `ctx.refresh = false`, so a child whose spec is unchanged reuses its
+///   `refresh` off, so a child whose spec is unchanged reuses its
 ///   pinned commit — even when a moving `branch`/`tag` selector has since
 ///   advanced upstream.
 ///
@@ -53,14 +53,15 @@ pub(super) struct Miss {
 /// transitive frontier advances only under a bare `spm update`. See
 /// `docs/guide/transitive-dependencies.md`.
 ///
-/// Under `--locked` (`ctx.locked`) a child without a reusable pin is never
-/// resolved: `Ok(None)` is returned and the caller records the miss.
+/// Under `--locked` or in a check (a `ctx.mode` that never resolves) a child
+/// without a reusable pin is never resolved: `Ok(None)` is returned and the
+/// caller records the miss.
 pub(super) fn resolve_child(
     spec: &SkillSpec,
     synth: &str,
     ctx: &Ctx,
 ) -> Result<Option<LockedSkill>> {
-    if !ctx.refresh {
+    if !ctx.mode.refresh() {
         if let Some(prev) = ctx.prev.get(synth) {
             if prev.drift_from(spec)?.is_none() {
                 let commit = prev.commit.clone();
@@ -78,7 +79,7 @@ pub(super) fn resolve_child(
             }
         }
     }
-    if ctx.locked {
+    if !ctx.mode.resolves() {
         return Ok(None);
     }
     resolver::resolve(spec).map(Some)

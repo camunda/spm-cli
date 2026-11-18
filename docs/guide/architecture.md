@@ -21,6 +21,7 @@ the expected block).
 <!-- module-graph: generated from ALLOWED_EDGES in tests/cli/architecture.rs; regenerate with `SPM_BLESS=1 cargo test module_graph_diagram` -->
 ```mermaid
 flowchart TD
+  cli --> fetch
   cli --> fsutil
   cli --> git
   cli --> gitignore
@@ -45,6 +46,10 @@ flowchart TD
   cli --> transitive
   cli --> vendor
   cli --> version
+  fetch --> ids
+  fetch --> lockfile
+  fetch --> manifest
+  fetch --> store
   git --> ids
   git --> policy
   git --> remote
@@ -96,6 +101,7 @@ flowchart TD
   store --> lockfile
   store --> paths
   store --> policy
+  transitive --> fetch
   transitive --> fsutil
   transitive --> ids
   transitive --> links
@@ -107,7 +113,6 @@ flowchart TD
   transitive --> resolver
   transitive --> scan
   transitive --> skillcheck
-  transitive --> store
   vendor --> fsutil
   vendor --> gitignore
   vendor --> ids
@@ -173,7 +178,7 @@ flowchart TD
 - **`ai.lock` is written only after every target is materialized**, so it never
   pins state that was not installed. `--lock-only` skips materialization and
   writes `ai.lock` alone.
-- `spm doctor` runs the same plan read-only and offline (`LockMode::Check`) and
+- `spm doctor` runs the same plan read-only and offline (`Mode::Check`) and
   reports its verdict instead of applying it.
 
 ## Install data flow

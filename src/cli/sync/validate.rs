@@ -3,7 +3,7 @@
 //! plugin name collisions, the overlap guard, and the `--locked` backstop.
 
 use super::guard::{guard_working_copies, Writes};
-use super::{resolve, LockMode, Run};
+use super::{resolve, Mode};
 use crate::cli::verdict::{LockFindings, LockVerdict};
 use crate::ids::DepName;
 use crate::links::{Linked, Links};
@@ -38,10 +38,9 @@ pub(super) fn preflight(
     session: &ScopeSession,
     manifest: &Manifest,
     links: &Links,
-    mode: LockMode,
-    run: Run,
+    mode: Mode,
 ) -> Result<Preflight> {
-    if mode == LockMode::Links && session.access() != Access::Links {
+    if mode == Mode::Links && session.access() != Access::Links {
         bail!("internal error: editing links requires the exclusive links lock");
     }
     if session.access() == Access::Read {
@@ -55,9 +54,7 @@ pub(super) fn preflight(
     // Source policy: judge every direct source before any network access, and
     // report all denied ones at once.
     let policy = crate::policy::activate(manifest.policy(dir)?);
-    // `ai.lock` never depends on links, and a lock-only sync writes nothing
-    // else, so it ignores them (a missing linked directory can't block it).
-    let linked = if run.lock_only || run.check {
+    let linked = if mode.ignores_links() {
         BTreeMap::new()
     } else {
         resolve::links(scope, manifest, links)?
@@ -85,7 +82,7 @@ pub(super) fn preflight(
         .iter()
         .map(|t| crate::vendor::for_target(t))
         .collect::<Result<Vec<_>>>()?;
-    if run.locked && !Lockfile::path_in(dir).exists() {
+    if mode.locked() && !Lockfile::path_in(dir).exists() {
         LockVerdict::Missing {
             path: Lockfile::path_in(dir),
             declared: manifest.declares_any(),
@@ -231,15 +228,15 @@ pub(super) struct Output<'a> {
 }
 
 /// Run the overlap guard ([`guard_working_copies`]) for a sync of `manifest`
-/// about to write `out`.
+/// about to write `out` (only `ai.lock` and machine-local state when
+/// `lock_only`).
 pub(super) fn guard(
     scope: &Scope,
     dir: &Path,
     manifest: &Manifest,
     out: Output,
-    run: Run,
+    lock_only: bool,
 ) -> Result<()> {
-    let lock_only = run.lock_only;
     // Each target writes what it held before plus the new set — its own names
     // only, so another target's leftovers don't count as its output. A
     // lock-only sync writes no target output — only `ai.json`, `ai.lock` and

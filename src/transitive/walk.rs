@@ -5,11 +5,11 @@ use super::diagnostics::{chain_str, conflict_error, ConflictSide};
 use super::identity::{key_of, synth_name, Key};
 use super::lock::{lock_miss, resolve_child, sort_misses, sort_provenance, Miss};
 use super::{Ctx, Output, MAX_DEPTH, MAX_EDGES, MAX_NODES};
+use crate::fetch::Checkout;
 use crate::ids::{CommitSha, DepName, LockReference};
 use crate::lockfile::{LockedSkill, Satisfied};
-use crate::manifest::{DependencyManifest, Manifest};
+use crate::manifest::{DependencyKind, DependencyManifest, Manifest};
 use crate::materialized::{MaterializedSkill, Selected};
-use crate::store;
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -162,14 +162,14 @@ fn visit(
     direct: &BTreeMap<DepName, LockedSkill>,
     ctx: &Ctx,
 ) -> Result<()> {
-    let width = ctx.width;
     let link = if depth == 0 {
         ctx.links.get(name)
     } else {
         None
     };
     if let Some(l) = link {
-        println!("  {name:<width$}  linked → {}", l.display);
+        ctx.report
+            .entry(name, format_args!("linked → {}", l.display));
         if !l.content.join("SKILL.md").is_file() {
             eprintln!(
                 "warning: linked skill `{name}` has no SKILL.md at the root of `{}` — agents \
@@ -194,53 +194,51 @@ fn visit(
 
     // Fetch into the store and run the pre-materialize security gate BEFORE
     // reading this node's nested manifest — a blocked node aborts before any of
-    // its subtree is ever fetched.
-    let ensured = if ctx.check {
-        match store::cached(locked).with_context(|| format!("inspecting skill `{name}`"))? {
-            Some(ensured) => ensured,
-            None => {
+    // its subtree is ever fetched. A linked root's locked checkout is still the
+    // source of its nested manifest, so it passes the gate too; its content
+    // was already selected from the link.
+    let ensured =
+        match ctx
+            .mode
+            .fetch()
+            .checkout(DependencyKind::Skill, name, locked, ctx.report)?
+        {
+            Checkout::Unverified => {
                 w.out.unverified.push(name.to_string());
                 return Ok(());
             }
-        }
-    } else {
-        let ensured = store::ensure(locked).with_context(|| format!("fetching skill `{name}`"))?;
-        println!(
-            "  {name:<width$}  {}",
-            if ensured.fetched { "fetched" } else { "cached" }
-        );
-        ensured
-    };
-    if ctx.check {
-        // A check materializes nothing, so it has nothing to gate: only the
-        // name is selected.
-        if link.is_none() {
-            w.out.selected.push(Selected::Named(name.clone()));
-        }
-    } else {
-        if link.is_none() {
-            crate::skillcheck::warn_if_not_loadable(
-                name,
-                &locked.git,
-                &locked.reference.label(),
-                locked.path.as_deref(),
-                &ensured.path,
-                &ensured.root,
-            );
-        }
-        // A linked root's locked checkout is still the source of its nested
-        // manifest, so it passes the gate too before its subtree is walked.
-        let scanned = crate::scan::enforce(name, &ensured.path, &ensured.root)
-            .with_context(|| format!("scanning skill `{name}`"))?;
-        if link.is_none() {
-            w.out
-                .selected
-                .push(Selected::Materialized(MaterializedSkill::new(
-                    name.clone(),
-                    scanned,
-                )));
-        }
-    }
+            // A check materializes nothing, so it has nothing to gate: only the
+            // name is selected.
+            Checkout::Inspect(ensured) => {
+                if link.is_none() {
+                    w.out.selected.push(Selected::Named(name.clone()));
+                }
+                ensured
+            }
+            Checkout::Gate(ensured) => {
+                if link.is_none() {
+                    crate::skillcheck::warn_if_not_loadable(
+                        name,
+                        &locked.git,
+                        &locked.reference.label(),
+                        locked.path.as_deref(),
+                        &ensured.path,
+                        &ensured.root,
+                    );
+                }
+                let scanned = crate::scan::enforce(name, &ensured.path, &ensured.root)
+                    .with_context(|| format!("scanning skill `{name}`"))?;
+                if link.is_none() {
+                    w.out
+                        .selected
+                        .push(Selected::Materialized(MaterializedSkill::new(
+                            name.clone(),
+                            scanned,
+                        )));
+                }
+                ensured
+            }
+        };
 
     if !ctx.resolve_transitive {
         return Ok(());
@@ -361,7 +359,7 @@ fn visit(
                     None => direct.get(existing.chain[0].as_str()),
                 };
                 let evidence = pinned
-                    .filter(|p| !ctx.refresh && p.commit == existing.commit)
+                    .filter(|p| !ctx.mode.refresh() && p.commit == existing.commit)
                     .and_then(|p| p.also_satisfies.iter().find(|s| s.reference == requested));
                 let (child_commit, resolved_tag) = if let Some(e) = evidence {
                     (existing.commit.clone(), e.resolved_tag.clone())

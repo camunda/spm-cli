@@ -48,6 +48,7 @@ mod identity;
 mod lock;
 mod walk;
 
+use crate::fetch::{Fetch, Reporter};
 use crate::ids::DepName;
 use crate::lockfile::{LockedSkill, Satisfied};
 use crate::materialized::Selected;
@@ -83,6 +84,47 @@ pub const MAX_NODES: usize = 256;
 /// graph is unaffected while a pathological fan-out still trips.
 pub const MAX_EDGES: usize = 1024;
 
+/// How the walk treats transitive pins and the store, derived from the
+/// surrounding sync's mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// Reuse a child's `ai.lock` pin while its request is unchanged, else
+    /// resolve it. `refresh` re-resolves every child to its latest commit; it
+    /// is set only by a bare `spm update` (no name) — see the `resolve_child`
+    /// doc for why a single-name `spm update <name>` deliberately leaves it
+    /// `false` and does not cascade into the named root's transitive frontier.
+    Resolve { refresh: bool },
+    /// `spm install --locked`: never resolve a transitive child. A child whose
+    /// edge has no matching `ai.lock` pin is recorded in [`Output::lock_misses`]
+    /// (and its subtree skipped) instead of being resolved.
+    Locked,
+    /// Read-only check (`spm doctor`): the [`Mode::Locked`] rules, but never
+    /// fetch, scan or print. A skill whose checkout is not already in the
+    /// store is recorded in [`Output::unverified`] and its subtree is not
+    /// walked.
+    Check,
+}
+
+impl Mode {
+    /// Whether every child is re-resolved rather than reusing its pin.
+    fn refresh(self) -> bool {
+        matches!(self, Mode::Resolve { refresh: true })
+    }
+
+    /// Whether a child without a reusable pin may be resolved.
+    fn resolves(self) -> bool {
+        matches!(self, Mode::Resolve { .. })
+    }
+
+    /// How a skill's checkout is obtained.
+    fn fetch(self) -> Fetch<'static> {
+        match self {
+            Mode::Check => Fetch::Offline,
+            Mode::Resolve { .. } | Mode::Locked => Fetch::Online,
+        }
+    }
+}
+
 /// Inputs the walk needs from the surrounding sync.
 pub struct Ctx<'a> {
     /// The previous lockfile's skill entries, consulted to reuse a pinned commit
@@ -90,22 +132,9 @@ pub struct Ctx<'a> {
     pub prev: &'a BTreeMap<DepName, LockedSkill>,
     /// Whether transitive resolution is enabled (root manifest's flag).
     pub resolve_transitive: bool,
-    /// Re-resolve transitive children to their latest commit. This is a single
-    /// global flag, set only by a bare `spm update` (no name) — see the
-    /// `resolve_child` doc for why a single-name `spm update <name>`
-    /// deliberately leaves it `false` and does not cascade into the named
-    /// root's transitive frontier.
-    pub refresh: bool,
-    /// `spm install --locked`: never resolve a transitive child. A child whose
-    /// edge has no matching `ai.lock` pin is recorded in [`Output::lock_misses`]
-    /// (and its subtree skipped) instead of being resolved.
-    pub locked: bool,
-    /// Read-only check (`spm doctor`, with `locked`): never fetch, scan or
-    /// print. A skill whose checkout is not already in the store is recorded in
-    /// [`Output::unverified`] and its subtree is not walked.
-    pub check: bool,
-    /// Column width for the aligned per-skill fetch output.
-    pub width: usize,
+    pub mode: Mode,
+    /// Where the per-skill fetch progress goes (silent in [`Mode::Check`]).
+    pub report: Reporter,
     /// The effective source policy every nested edge must pass before it is
     /// resolved or fetched.
     pub policy: &'a crate::policy::Policy,
@@ -132,10 +161,10 @@ pub struct Output {
     /// edge that would have needed a fresh resolution because `ai.lock` has no
     /// matching pin for it. That edge's subtree is not walked.
     pub lock_misses: Vec<(String, String)>,
-    /// [`Ctx::check`] only: skills whose store checkout is missing, so they
+    /// [`Mode::Check`] only: skills whose store checkout is missing, so they
     /// (and their nested dependencies) could not be verified offline.
     pub unverified: Vec<String>,
-    /// [`Ctx::check`] only: synthesized names of misses that may be artifacts
+    /// [`Mode::Check`] only: synthesized names of misses that may be artifacts
     /// of an [`Output::unverified`] subtree. The lock has no entry under the
     /// miss's own name but pins the same identity under a name this walk never
     /// reached, so the unwalked subtree could claim it first, under that name.
