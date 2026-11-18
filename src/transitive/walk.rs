@@ -372,9 +372,8 @@ fn visit(
                     else {
                         w.misses.push(Miss {
                             key: ckey.clone(),
-                            name: synth.clone(),
                             requested: requested.clone(),
-                            problem: lock_miss(&synth, declared, name, spec, ctx)?,
+                            miss: lock_miss(&synth, declared, name, spec, ctx)?,
                         });
                         continue;
                     };
@@ -454,9 +453,8 @@ fn visit(
         else {
             w.misses.push(Miss {
                 key: ckey,
-                name: synth.clone(),
                 requested: LockReference::from(spec.version()?),
-                problem: lock_miss(&synth, declared, name, spec, ctx)?,
+                miss: lock_miss(&synth, declared, name, spec, ctx)?,
             });
             continue;
         };

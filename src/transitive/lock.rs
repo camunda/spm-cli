@@ -3,7 +3,7 @@
 //! walk accumulated into a stable lockfile.
 
 use super::identity::{key_of, Key};
-use super::{Ctx, Output};
+use super::{Ctx, LockMiss, MissedPin, Output};
 use crate::ids::{DepName, LockReference, StoreKey};
 use crate::lockfile::{LockedSkill, Origin, Pin};
 use crate::manifest::SkillSpec;
@@ -14,10 +14,9 @@ use std::collections::BTreeSet;
 /// A requirement the lock has no pin for under its synthesized name.
 pub(super) struct Miss {
     pub(super) key: Key,
-    pub(super) name: DepName,
     /// The selector the edge requested.
     pub(super) requested: LockReference,
-    pub(super) problem: String,
+    pub(super) miss: LockMiss,
 }
 
 /// Resolve a nested skill spec to its pin, reusing the previous
@@ -78,24 +77,25 @@ pub(super) fn resolve_child(spec: &SkillSpec, synth: &str, ctx: &Ctx) -> Result<
     resolver::resolve(spec).map(Some)
 }
 
-/// Describe a transitive edge that `--locked` refused to resolve.
+/// The transitive edge `synth` (`declared` by `parent`, requesting `spec`)
+/// that `--locked` refused to resolve.
 pub(super) fn lock_miss(
-    synth: &str,
-    declared: &str,
-    parent: &str,
+    synth: &DepName,
+    declared: &DepName,
+    parent: &DepName,
     spec: &SkillSpec,
     ctx: &Ctx,
-) -> Result<String> {
-    let what = match ctx.prev.get(synth) {
-        Some(prev) => format!(
-            "changed in ai.lock ({})",
-            prev.pin.drift_from(spec)?.unwrap_or_default()
-        ),
-        None => "missing from ai.lock".to_string(),
+) -> Result<LockMiss> {
+    let why = match ctx.prev.get(synth) {
+        Some(prev) => MissedPin::Changed(prev.pin.drift_from(spec)?.unwrap_or_default()),
+        None => MissedPin::Missing,
     };
-    Ok(format!(
-        "transitive skill `{synth}` (`{declared}` required by `{parent}`): {what}"
-    ))
+    Ok(LockMiss {
+        name: synth.clone(),
+        declared: declared.clone(),
+        parent: parent.clone(),
+        why,
+    })
 }
 
 /// Sort the walk's lock misses into [`Output::lock_misses`] and
@@ -121,10 +121,10 @@ pub(super) fn sort_misses(out: &mut Output, misses: Vec<Miss>, ctx: &Ctx) {
                 && (l.pin.reference == m.requested
                     || l.also_satisfies.iter().any(|s| s.reference == m.requested))
         });
-        if covered && !ctx.prev.contains_key(m.name.as_str()) {
-            out.uncertain_misses.push(m.name);
+        if covered && !ctx.prev.contains_key(m.miss.name.as_str()) {
+            out.uncertain_misses.push(m.miss.name);
         } else {
-            out.lock_misses.push((m.name, m.problem));
+            out.lock_misses.push(m.miss);
         }
     }
 }
