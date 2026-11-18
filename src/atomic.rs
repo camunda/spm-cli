@@ -49,38 +49,24 @@ pub fn replace(
     Staged::write(&resolve(path)?, write)?.publish()
 }
 
-/// A name no other staging entry has: `<pid>-<nanos>-<n>.<ext>`.
-fn unique(ext: &str) -> String {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{}-{nanos}-{n}.{ext}", std::process::id())
-}
-
-/// Whether `name` is one [`unique`] makes for `ext`.
-fn is_unique(name: &str, ext: &str) -> bool {
-    let Some(stamp) = name.strip_suffix(ext).and_then(|n| n.strip_suffix('.')) else {
-        return false;
-    };
-    let parts: Vec<_> = stamp.split('-').collect();
-    parts.len() == 3
-        && parts
-            .iter()
-            .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
-}
-
-/// A hidden, unique sibling of `dest` (`.<name>.<pid>-<nanos>-<n>.<ext>`):
-/// on the same filesystem, so renaming it over `dest` is atomic.
+/// A hidden, unique sibling of `dest` (`.spm-<pid>-<nanos>-<n>.<ext>`): on
+/// the same filesystem, so renaming it over `dest` is atomic. Its name does
+/// not grow with `dest`'s, so any name the filesystem allows can be staged.
+/// It is always created exclusively, so a name of the user's that happens to
+/// match fails the write rather than being overwritten.
 fn sibling(dest: &Path, ext: &str) -> std::io::Result<PathBuf> {
-    let (Some(dir), Some(name)) = (dest.parent(), dest.file_name()) else {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let Some(dir) = dest.parent().filter(|_| dest.file_name().is_some()) else {
         return Err(std::io::Error::new(
             ErrorKind::InvalidInput,
             format!("{} is not a file path", dest.display()),
         ));
     };
-    Ok(dir.join(format!(".{}.{}", name.to_string_lossy(), unique(ext))))
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    Ok(dir.join(format!(".spm-{}-{nanos}-{n}.{ext}", std::process::id())))
 }
 
 /// A complete replacement for a file, staged beside it as a hidden `.tmp`
@@ -167,70 +153,10 @@ impl Drop for StagedDir {
     }
 }
 
-/// The directory [`publish_dir`] stages in, beside the destinations it
-/// publishes: everything in it named by [`unique`] is spm's, so what an
-/// interrupted publish left there can be cleared without guessing whether a
-/// look-alike name beside the destination is the user's. Removed once empty.
-const STAGING: &str = ".spm-staging";
-
-/// The [`STAGING`] directory of `parent`, created if needed and removed (when
-/// empty) on drop.
-struct Staging(PathBuf);
-
-impl Staging {
-    /// Create (or reuse) `parent`'s staging directory, clearing what an
-    /// interrupted publish left in it. A symlink there is refused: clearing
-    /// through it could delete files of the user's.
-    fn open(parent: &Path) -> std::io::Result<Self> {
-        let dir = parent.join(STAGING);
-        match std::fs::create_dir(&dir) {
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
-            res => res?,
-        }
-        let staging = Self(dir);
-        if !std::fs::symlink_metadata(&staging.0)?.is_dir() {
-            return Err(std::io::Error::new(
-                ErrorKind::AlreadyExists,
-                format!("{} is not a directory", staging.0.display()),
-            ));
-        }
-        for entry in std::fs::read_dir(&staging.0)? {
-            let entry = entry?;
-            let leftover = entry
-                .file_name()
-                .to_str()
-                .is_some_and(|n| is_unique(n, "tmp") || is_unique(n, "old"));
-            if !leftover {
-                continue;
-            }
-            // `remove_dir_all` unlinks a symlink itself, never its target.
-            if entry.file_type()?.is_dir() {
-                std::fs::remove_dir_all(entry.path())?;
-            } else {
-                std::fs::remove_file(entry.path())?;
-            }
-        }
-        Ok(staging)
-    }
-
-    /// A fresh path in the staging directory.
-    fn entry(&self, ext: &str) -> PathBuf {
-        self.0.join(unique(ext))
-    }
-}
-
-impl Drop for Staging {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir(&self.0);
-    }
-}
-
 /// Replace the directory (or symlink) at `dest` with the one `build` fills,
-/// creating `dest`'s parent if needed. `build` writes into an empty directory
-/// staged beside `dest` (in its parent's [`STAGING`] directory, so even a
-/// name as long as the filesystem allows can be staged); only once it
-/// succeeds does the new entry take the previous one's place, which is then
-/// removed. A failure (in `build` or while swapping) leaves the previous
+/// creating `dest`'s parent if needed. `build` writes into an empty hidden
+/// sibling of `dest` (see [`sibling`]); only once it succeeds does the new
+/// entry take the previous one's place, which is then removed. A failure (in `build` or while swapping) leaves the previous
 /// entry intact and nothing staged behind; a previous entry that can't be
 /// removed whole is put back as left, as a failed in-place removal would
 /// leave it. Any other file at `dest` (a regular file, a FIFO) is the
@@ -239,10 +165,10 @@ impl Drop for Staging {
 /// Where the OS can swap two entries at once (Linux, macOS), readers see the
 /// old entry or the new one throughout. Elsewhere (Windows, or a filesystem
 /// that can't swap), the previous entry is moved aside first, so for a moment
-/// there is none. An interrupted publish leaves its staged entries (and
-/// there, perhaps no `dest`): the next publish beside it clears them, so
-/// callers must not publish into one directory concurrently (spm holds the
-/// state lock).
+/// there is none. A process killed mid-publish leaves its hidden siblings
+/// behind (and there, perhaps no `dest`, which the next publish creates
+/// again); they are never deleted by name, as only the process that made
+/// one knows it is spm's and abandoned.
 pub fn publish_dir(
     dest: &Path,
     build: impl FnOnce(&Path) -> anyhow::Result<()>,
@@ -255,13 +181,11 @@ pub fn publish_dir(
         Err(e) if e.kind() == ErrorKind::NotFound => false,
         Err(e) => return Err(e).with_context(clearing),
     };
-    let parent = dest
-        .parent()
-        .with_context(|| format!("{} has no parent directory", dest.display()))?;
-    std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-    let staging = Staging::open(parent)
-        .with_context(|| format!("staging in {}", parent.join(STAGING).display()))?;
-    let tmp = staging.entry("tmp");
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let tmp = sibling(dest, "tmp")?;
     std::fs::create_dir(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
     let mut staged = StagedDir(Some(tmp.clone()));
     build(&tmp)?;
@@ -278,7 +202,7 @@ pub fn publish_dir(
         // A directory cannot be renamed over a non-empty one (nor over any
         // directory on Windows), so the previous entry is moved aside first
         // and restored should the new one fail to take its place.
-        let aside = staging.entry("old");
+        let aside = sibling(dest, "old")?;
         std::fs::rename(dest, &aside).with_context(clearing)?;
         if let Err(e) = std::fs::rename(&tmp, dest) {
             let _ = std::fs::rename(&aside, dest);
@@ -297,7 +221,7 @@ pub fn publish_dir(
     let new = if exchange(&old, dest).unwrap_or(false) {
         Some(old)
     } else {
-        let new = staging.entry("tmp");
+        let new = sibling(dest, "tmp")?;
         match std::fs::rename(dest, &new) {
             Ok(()) if std::fs::rename(&old, dest).is_ok() => Some(new),
             Ok(()) => {
@@ -415,6 +339,19 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// A file named as long as the filesystem allows is replaced too: the
+    /// staged file's name does not grow with it.
+    #[test]
+    fn a_file_name_of_any_length_is_replaced() {
+        let dir = scratch("long");
+        let p = dir.join("n".repeat(255));
+        replace(&p, |f| f.write_all(b"v1")).unwrap();
+        replace(&p, |f| f.write_all(b"v2")).unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "v2");
+        assert_eq!(entries(&dir), ["n".repeat(255)]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// A replaced file keeps its permissions, as an in-place write would.
     #[cfg(unix)]
     #[test]
@@ -518,30 +455,27 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// What an interrupted publish left in the staging directory (a staged
-    /// build, a previous entry moved aside) is cleared by the next one beside
-    /// it, even with the destination gone; entries beside the destination
-    /// are never taken for leftovers, whatever their names.
+    /// Entries beside the destination are the user's whatever their names,
+    /// even ones shaped like a staged entry: a publish never deletes them.
     #[test]
-    fn publish_dir_clears_only_what_an_interrupted_one_left() {
-        let root = scratch("dir-interrupted");
+    fn publish_dir_never_takes_a_look_alike_for_its_own() {
+        let root = scratch("dir-look-alike");
         let dest = root.join("greet");
-        let staging = root.join(STAGING);
-        write_dir(&staging.join("123-456-7.old"), "old").unwrap();
-        write_dir(&staging.join("123-456-8.tmp"), "half").unwrap();
-        std::fs::write(staging.join("123-456-9.tmp"), "half").unwrap();
-        for mine in [".greet.123-456-7.tmp", ".greet.2026-01-01.old"] {
-            write_dir(&root.join(mine), "mine").unwrap();
+        let mine = [".greet.123-456-7.tmp", ".spm-123-456-7.old", ".spm-staging"];
+        for m in mine {
+            write_dir(&root.join(m), "mine").unwrap();
         }
-        publish_dir(&dest, |d| write_dir(d, "new")).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(dest.join("sub/file")).unwrap(),
-            "new"
-        );
-        assert_eq!(
-            entries(&root),
-            [".greet.123-456-7.tmp", ".greet.2026-01-01.old", "greet"]
-        );
+        publish_dir(&dest, |d| write_dir(d, "v1")).unwrap();
+        publish_dir(&root.join(mine[1]), |d| write_dir(d, "dep")).unwrap();
+        publish_dir(&dest, |d| write_dir(d, "v2")).unwrap();
+        let mut all = mine.to_vec();
+        all.push("greet");
+        all.sort();
+        assert_eq!(entries(&root), all);
+        for m in [mine[0], mine[2]] {
+            let file = root.join(m).join("sub/file");
+            assert_eq!(std::fs::read_to_string(file).unwrap(), "mine");
+        }
         std::fs::remove_dir_all(&root).unwrap();
     }
 

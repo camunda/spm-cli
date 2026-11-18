@@ -180,10 +180,6 @@ const GUARDS: &[Guard] = &[
                 "src/fsutil.rs",
                 "`walk_tree` itself, the boundary-aware traversal",
             ),
-            (
-                "src/atomic.rs",
-                "one level: what an interrupted publish left in `.spm-staging`",
-            ),
             ("src/links.rs", "one level: the per-project links files"),
             (
                 "src/owned.rs",
