@@ -617,17 +617,10 @@ pub(crate) mod tests {
 
     /// Load `text` as an on-disk `ai.lock`, exactly as commands do.
     fn load_text(text: &str) -> Result<Lockfile> {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir =
-            std::env::temp_dir().join(format!("spm-lockfile-text-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(LOCK_FILE), text).unwrap();
-        let out = Lockfile::load_or_default(&dir);
-        std::fs::remove_dir_all(&dir).unwrap();
-        out
+        // A counter, not the clock, names the dir: parallel tests call this.
+        let dir = crate::manifest::testutil::Scratch::new();
+        std::fs::write(dir.0.join(LOCK_FILE), text).unwrap();
+        Lockfile::load_or_default(&dir.0)
     }
 
     /// One `skills` entry as JSON, with `field` overridden to `value`
