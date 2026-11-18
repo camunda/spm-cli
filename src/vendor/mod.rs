@@ -265,11 +265,7 @@ mod tests {
         let src = root.join("src").join(name);
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(src.join("SKILL.md"), format!("---\nname: {name}\n---\n")).unwrap();
-        MaterializedSkill {
-            name: DepName::try_from(name).unwrap(),
-            path: src,
-            root: root.to_path_buf(),
-        }
+        MaterializedSkill::unscanned(DepName::try_from(name).unwrap(), src, root.to_path_buf())
     }
 
     /// Copilot owns its whole project dir: a materialize rebuilds it (dropping

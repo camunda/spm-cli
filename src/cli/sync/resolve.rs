@@ -10,7 +10,7 @@ use crate::ids::DepName;
 use crate::links::{Linked, Links};
 use crate::lockfile::{LockedSkill, Lockfile, Satisfied};
 use crate::manifest::{DependencyKind, Manifest, SkillSpec};
-use crate::materialized::{MaterializedPlugin, MaterializedSkill};
+use crate::materialized::{MaterializedPlugin, Selected};
 use crate::scope::Scope;
 use crate::{resolver, store, transitive};
 use anyhow::{bail, Context, Result};
@@ -209,7 +209,7 @@ pub(super) struct Plugins {
     pub(super) plugins: Vec<MaterializedPlugin>,
     /// Their bundled skills, flattened later into the list every vendor
     /// consumes.
-    pub(super) skills: Vec<MaterializedSkill>,
+    pub(super) skills: Vec<Selected>,
     /// The skills bundled by linked plugins (recorded in the links file).
     pub(super) linked_skills: Vec<DepName>,
 }
@@ -297,19 +297,24 @@ pub(super) fn plugins(
             out.linked_skills
                 .extend(bundled.iter().map(|s| s.name.clone()));
         }
-        // Scan the whole plugin tree (agents, scripts, hooks, bundled skills)
-        // before any of it is materialized into an agent-discovered directory.
-        // A check materializes nothing, so it has nothing to gate.
-        if !check {
-            crate::scan::enforce(name, &path, &root)
-                .with_context(|| format!("scanning plugin `{name}`"))?;
+        // A check materializes nothing: only the bundled names are selected.
+        if check {
+            out.skills
+                .extend(bundled.into_iter().map(|s| Selected::Named(s.name)));
+            continue;
         }
-        out.skills.extend(bundled);
-        out.plugins.push(MaterializedPlugin {
-            name: name.clone(),
-            path,
-            root,
-        });
+        // Scan the whole plugin tree (agents, scripts, hooks, bundled skills)
+        // before any of it is materialized into an agent-discovered directory:
+        // the plugin and its bundled skills are only built from that scan.
+        let scanned = crate::scan::enforce(name, &path, &root)
+            .with_context(|| format!("scanning plugin `{name}`"))?;
+        let plugin = MaterializedPlugin::new(name.clone(), scanned);
+        for s in bundled {
+            out.skills.push(Selected::Materialized(
+                plugin.bundled_skill(s.name, s.path)?,
+            ));
+        }
+        out.plugins.push(plugin);
     }
     Ok(out)
 }
@@ -867,7 +872,7 @@ mod tests {
             skipped_roots: BTreeSet::from(["b".to_string()]),
         };
         let mut expansion = transitive::Output {
-            materialized: Vec::new(),
+            selected: Vec::new(),
             transitive: Vec::new(),
             direct_also_satisfies: BTreeMap::new(),
             lock_misses: vec![("m".into(), "skill `m`: missing from ai.lock".into())],

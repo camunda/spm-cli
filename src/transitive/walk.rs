@@ -8,7 +8,7 @@ use super::{Ctx, Output, MAX_DEPTH, MAX_EDGES, MAX_NODES};
 use crate::ids::{CommitSha, DepName, LockReference};
 use crate::lockfile::{LockedSkill, Satisfied};
 use crate::manifest::{DependencyManifest, Manifest};
-use crate::materialized::MaterializedSkill;
+use crate::materialized::{MaterializedSkill, Selected};
 use crate::store;
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
@@ -134,7 +134,7 @@ pub fn expand(direct: &BTreeMap<DepName, LockedSkill>, ctx: &Ctx) -> Result<Outp
         stack: Vec::new(),
         resolved,
         out: Output {
-            materialized: Vec::new(),
+            selected: Vec::new(),
             transitive: Vec::new(),
             direct_also_satisfies: BTreeMap::new(),
             lock_misses: Vec::new(),
@@ -177,13 +177,14 @@ fn visit(
                 l.display
             );
         }
-        crate::scan::enforce(name, &l.content, &l.content)
+        let scanned = crate::scan::enforce(name, &l.content, &l.content)
             .with_context(|| format!("scanning linked skill `{name}`"))?;
-        w.out.materialized.push(MaterializedSkill {
-            name: name.clone(),
-            path: l.content.clone(),
-            root: l.content.clone(),
-        });
+        w.out
+            .selected
+            .push(Selected::Materialized(MaterializedSkill::new(
+                name.clone(),
+                scanned,
+            )));
         // Without transitive resolution a linked root needs nothing from the
         // store at all.
         if !ctx.resolve_transitive {
@@ -210,29 +211,35 @@ fn visit(
         );
         ensured
     };
-    if link.is_none() && !ctx.check {
-        crate::skillcheck::warn_if_not_loadable(
-            name,
-            &locked.git,
-            &locked.reference.label(),
-            locked.path.as_deref(),
-            &ensured.path,
-            &ensured.root,
-        );
-    }
-    // A linked root's locked checkout is still the source of its nested
-    // manifest, so it passes the gate too before its subtree is walked. A check
-    // materializes and fetches nothing, so it has nothing to gate.
-    if !ctx.check {
-        crate::scan::enforce(name, &ensured.path, &ensured.root)
+    if ctx.check {
+        // A check materializes nothing, so it has nothing to gate: only the
+        // name is selected.
+        if link.is_none() {
+            w.out.selected.push(Selected::Named(name.clone()));
+        }
+    } else {
+        if link.is_none() {
+            crate::skillcheck::warn_if_not_loadable(
+                name,
+                &locked.git,
+                &locked.reference.label(),
+                locked.path.as_deref(),
+                &ensured.path,
+                &ensured.root,
+            );
+        }
+        // A linked root's locked checkout is still the source of its nested
+        // manifest, so it passes the gate too before its subtree is walked.
+        let scanned = crate::scan::enforce(name, &ensured.path, &ensured.root)
             .with_context(|| format!("scanning skill `{name}`"))?;
-    }
-    if link.is_none() {
-        w.out.materialized.push(MaterializedSkill {
-            name: name.clone(),
-            path: ensured.path.clone(),
-            root: ensured.root.clone(),
-        });
+        if link.is_none() {
+            w.out
+                .selected
+                .push(Selected::Materialized(MaterializedSkill::new(
+                    name.clone(),
+                    scanned,
+                )));
+        }
     }
 
     if !ctx.resolve_transitive {

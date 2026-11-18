@@ -193,7 +193,7 @@ impl Vendor for SharedDirVendor {
             // about-to-write). Never wipe the whole dir.
             Ownership::Shared => {
                 let mut owned: BTreeSet<&DepName> = previously_managed.iter().collect();
-                owned.extend(skills.iter().map(|s| &s.name));
+                owned.extend(skills.iter().map(|s| s.name()));
                 remove_managed(&dir, owned.iter().copied(), claim)?;
             }
         }
@@ -201,7 +201,7 @@ impl Vendor for SharedDirVendor {
             copy_skills_into(&dir, skills, claim)?;
         }
         if let Scope::Project { root } = scope {
-            let names: Vec<DepName> = skills.iter().map(|s| s.name.clone()).collect();
+            let names: Vec<DepName> = skills.iter().map(|s| s.name().clone()).collect();
             for entry in self.gitignore_entries(&names) {
                 gitignore::ensure(root, self.gitignore_comment, &entry)?;
             }
@@ -292,11 +292,7 @@ mod tests {
         let src = root.join("src").join(name);
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(src.join("SKILL.md"), format!("---\nname: {name}\n---\n")).unwrap();
-        MaterializedSkill {
-            name: DepName::try_from(name).unwrap(),
-            path: src,
-            root: root.to_path_buf(),
-        }
+        MaterializedSkill::unscanned(DepName::try_from(name).unwrap(), src, root.to_path_buf())
     }
 
     #[test]
