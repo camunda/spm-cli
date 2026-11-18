@@ -95,10 +95,12 @@ pub trait Vendor {
     /// entries spm previously owned but that were since dropped from the
     /// manifest, never touching the user's hand-authored skills.
     ///
-    /// `claim(name)` must be called right before the vendor modifies (removes
-    /// or writes) a skill entry `name` in a dir it shares with the user, so the
-    /// ownership record (`crate::owned`) covers everything spm touched even if
-    /// a later step fails — and nothing it never reached.
+    /// `claim(name)` must be called right before the vendor removes a skill
+    /// entry `name` in a dir it shares with the user, or right after it
+    /// replaces one whole (a failed replacement leaves the previous entry,
+    /// perhaps the user's, untouched), so the ownership record
+    /// (`crate::owned`) covers everything spm touched even if a later step
+    /// fails — and nothing it never reached.
     fn materialize(
         &self,
         scope: &Scope,

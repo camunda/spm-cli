@@ -23,7 +23,7 @@ use crate::materialized::MaterializedSkill;
 /// idempotent even when `dir` is shared with the user's own hand-authored
 /// skills. Each skill is published whole (see [`atomic::publish_dir`]): one
 /// that fails to copy keeps its previous version. Each name is `claim`ed right
-/// before its entry is written.
+/// after its entry is replaced (see [`copy_skills`]).
 pub fn copy_skills_into(dir: &Path, skills: &[MaterializedSkill], claim: Claim) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     copy_skills(dir, dir, skills, claim)
@@ -31,20 +31,24 @@ pub fn copy_skills_into(dir: &Path, skills: &[MaterializedSkill], claim: Claim) 
 
 /// Replace `dir` with one holding exactly `skills`, published whole (see
 /// [`atomic::publish_dir`]): a failure keeps the previous `dir` intact. Each
-/// name is `claim`ed right before its entry is written.
+/// name is `claim`ed once its entry is staged (see [`copy_skills`]).
 pub fn rebuild_with_skills(dir: &Path, skills: &[MaterializedSkill], claim: Claim) -> Result<()> {
     atomic::publish_dir(dir, |stage| copy_skills(stage, dir, skills, claim))
 }
 
 /// Publish each skill as `into/<name>/`, naming `dir` (where `into` ends up)
-/// in errors.
+/// in errors. A name is `claim`ed only once its entry is replaced: one that
+/// fails to publish leaves the previous entry (perhaps the user's own skill)
+/// untouched, so claiming it would let a later cleanup delete it. Killed in
+/// between, spm leaves its skill unclaimed, which is left alone rather than
+/// deleted.
 fn copy_skills(into: &Path, dir: &Path, skills: &[MaterializedSkill], claim: Claim) -> Result<()> {
     for s in skills {
-        claim(s.name())?;
         atomic::publish_dir(&into.join(s.name()), |stage| {
             fsutil::copy_tree(s.path(), stage, s.root())
                 .with_context(|| format!("copying skill `{}` into {}", s.name(), dir.display()))
         })?;
+        claim(s.name())?;
     }
     Ok(())
 }
@@ -105,6 +109,31 @@ mod tests {
         copy_skills_into(&dir, &[s], &mut |_| Ok(())).unwrap();
         let got = std::fs::read_to_string(dir.join("greet").join("SKILL.md")).unwrap();
         assert_eq!(got, "v2\n");
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    /// A skill failing to copy over the user's own skill of that name leaves
+    /// it untouched, so it is not claimed either: a later cleanup must not
+    /// delete what spm never replaced.
+    #[test]
+    fn a_failed_copy_never_claims_the_entry_it_left() {
+        let tmp = scratch("unclaimed");
+        let dir = tmp.join("skills");
+        std::fs::create_dir_all(dir.join("greet")).unwrap();
+        std::fs::write(dir.join("greet/SKILL.md"), "mine\n").unwrap();
+        let s = make_skill(&tmp, "greet");
+        std::fs::remove_dir_all(s.path()).unwrap();
+        let mut claimed = Vec::new();
+        copy_skills_into(&dir, &[s], &mut |n| {
+            claimed.push(n.clone());
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(claimed, Vec::<DepName>::new());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("greet/SKILL.md")).unwrap(),
+            "mine\n"
+        );
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 

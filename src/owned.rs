@@ -269,7 +269,7 @@ impl Ownership {
     /// `targets` with `install(index, prior ownership, claim)`, keeping the
     /// record true at every step: a failure part-way leaves nothing spm
     /// touched unrecorded, and claims nothing it did not touch. A skill name is
-    /// recorded when the vendor `claim`s it, right before modifying its entry;
+    /// recorded when the vendor `claim`s it (see `Vendor::materialize`);
     /// plugin output lives only in spm-owned locations, so the new plugins are
     /// recorded up front. Once a target is written it holds exactly the new
     /// set. Targets not installed now (e.g. ones another branch's `ai.json`
