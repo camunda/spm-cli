@@ -2,8 +2,9 @@
 //! behind every file and directory spm writes outside the store. A new
 //! version is staged beside its destination and renamed into place, so a
 //! failed or interrupted write leaves the previous one intact, and a reader
-//! sees either the old or the new one, never a truncated file or a
-//! half-copied directory.
+//! never sees a truncated file or a half-copied directory: the old one or
+//! the new one (or, for a directory where the OS can't swap two entries,
+//! briefly neither; see [`publish_dir`]).
 
 use anyhow::Context;
 use std::fs::File;
@@ -90,24 +91,31 @@ impl Staged {
         write: impl FnOnce(&mut File) -> std::io::Result<()>,
     ) -> std::io::Result<Self> {
         let tmp = sibling(dest, "tmp")?;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)?;
+        let perms = std::fs::metadata(dest)
+            .ok()
+            .filter(|m| m.is_file())
+            .map(|m| m.permissions());
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        // Created no more open than the file it replaces (the umask only
+        // narrows it further), so no reader can open it while it is written.
+        #[cfg(unix)]
+        if let Some(perms) = &perms {
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            options.mode(perms.mode() & 0o777);
+        }
+        let mut file = options.open(&tmp)?;
         let staged = Self {
             tmp,
             dest: dest.to_path_buf(),
             published: false,
         };
         write(&mut file)?;
-        if let Ok(meta) = std::fs::metadata(dest) {
-            let perms = meta.permissions();
-            // Windows refuses to delete a read-only file, so an unpublished
-            // one could not be cleaned up; replacing a read-only file fails
-            // there anyway.
-            if meta.is_file() && (cfg!(unix) || !perms.readonly()) {
-                file.set_permissions(perms)?;
-            }
+        // Windows refuses to delete a read-only file, so an unpublished one
+        // could not be cleaned up; replacing a read-only file fails there
+        // anyway.
+        if let Some(perms) = perms.filter(|p| cfg!(unix) || !p.readonly()) {
+            file.set_permissions(perms)?;
         }
         file.sync_all()?;
         Ok(staged)
@@ -148,17 +156,27 @@ impl Drop for StagedDir {
 
 /// Replace the directory (or symlink) at `dest` with the one `build` fills,
 /// creating `dest`'s parent if needed. `build` writes into an empty hidden
-/// sibling of `dest`; only once it succeeds is the previous entry moved
-/// aside, the new one renamed into place and the previous one removed. A
-/// failure (in `build` or while renaming) leaves the previous entry intact
-/// and no staged directory behind; a previous entry that can't be removed
-/// whole is put back as left, as a failed in-place removal would leave it. Any other file at `dest` (a regular file,
-/// a FIFO) is the user's: it is refused before anything is built.
+/// sibling of `dest`; only once it succeeds does the new entry take the
+/// previous one's place, which is then removed. A failure (in `build` or
+/// while swapping) leaves the previous entry intact and no staged directory
+/// behind; a previous entry that can't be removed whole is put back as left,
+/// as a failed in-place removal would leave it. Any other file at `dest` (a
+/// regular file, a FIFO) is the user's: it is refused before anything is
+/// built.
+///
+/// Where the OS can swap two entries at once (Linux, macOS), readers see the
+/// old entry or the new one throughout. Elsewhere (Windows, or a filesystem
+/// that can't swap), the previous entry is moved aside first, so for a moment
+/// there is none. An interrupted publish leaves its hidden siblings (and
+/// there, perhaps no `dest`): the next publish of `dest` clears them, so
+/// callers must not publish one `dest` concurrently (spm holds the state
+/// lock).
 pub fn publish_dir(
     dest: &Path,
     build: impl FnOnce(&Path) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let clearing = || format!("clearing {}", dest.display());
+    let writing = || format!("writing {}", dest.display());
     let existing = match std::fs::symlink_metadata(dest) {
         Ok(m) if m.is_dir() || m.file_type().is_symlink() => true,
         Ok(_) => return Err(std::io::Error::from(ErrorKind::NotADirectory)).with_context(clearing),
@@ -169,48 +187,130 @@ pub fn publish_dir(
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
+    clear_leftovers(dest).with_context(clearing)?;
     let tmp = sibling(dest, "tmp")?;
     std::fs::create_dir(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
     let mut staged = StagedDir(Some(tmp.clone()));
     build(&tmp)?;
+    if !existing {
+        std::fs::rename(&tmp, dest).with_context(writing)?;
+        staged.0 = None;
+        return Ok(());
+    }
 
-    // A directory cannot be renamed over a non-empty one (nor over any
-    // directory on Windows), so the previous entry is moved aside first and
-    // restored should the new one fail to take its place.
-    let aside = if existing {
+    // `old` ends up holding the previous entry.
+    let old = if exchange(&tmp, dest).with_context(writing)? {
+        tmp
+    } else {
+        // A directory cannot be renamed over a non-empty one (nor over any
+        // directory on Windows), so the previous entry is moved aside first
+        // and restored should the new one fail to take its place.
         let aside = sibling(dest, "old")?;
         std::fs::rename(dest, &aside).with_context(clearing)?;
-        Some(aside)
-    } else {
-        None
-    };
-    if let Err(e) = std::fs::rename(&tmp, dest) {
-        if let Some(aside) = &aside {
-            let _ = std::fs::rename(aside, dest);
+        if let Err(e) = std::fs::rename(&tmp, dest) {
+            let _ = std::fs::rename(&aside, dest);
+            return Err(e).with_context(writing);
         }
-        return Err(e).with_context(|| format!("writing {}", dest.display()));
-    }
-    staged.0 = None;
-    let Some(aside) = aside else {
-        return Ok(());
+        aside
     };
+    staged.0 = None;
     // `remove_dir_all` unlinks a symlink itself, never its target.
-    let Err(e) = std::fs::remove_dir_all(&aside) else {
+    let Err(e) = std::fs::remove_dir_all(&old) else {
         return Ok(());
     };
     // What is left of an entry that can't be removed whole (e.g. a read-only
     // subdirectory of the user's) goes back in place, as if removed in place,
-    // rather than lingering hidden beside the new one.
-    let new = sibling(dest, "tmp")?;
-    if std::fs::rename(dest, &new).is_ok() {
-        match std::fs::rename(&aside, dest) {
-            Ok(()) => drop(StagedDir(Some(new))),
-            Err(_) => {
+    // rather than lingering hidden beside the new one; the new one is dropped.
+    let new = if exchange(&old, dest).unwrap_or(false) {
+        Some(old)
+    } else {
+        let new = sibling(dest, "tmp")?;
+        match std::fs::rename(dest, &new) {
+            Ok(()) if std::fs::rename(&old, dest).is_ok() => Some(new),
+            Ok(()) => {
                 let _ = std::fs::rename(&new, dest);
+                None
             }
+            Err(_) => None,
+        }
+    };
+    drop(StagedDir(new));
+    Err(e).with_context(|| format!("removing {}", dest.display()))
+}
+
+/// Remove the hidden siblings an interrupted [`publish_dir`] of `dest` left
+/// (named by [`sibling`]: `.<name>.<pid>-<nanos>-<n>.tmp` or `.old`), and
+/// nothing else.
+fn clear_leftovers(dest: &Path) -> std::io::Result<()> {
+    let (Some(dir), Some(name)) = (dest.parent(), dest.file_name()) else {
+        return Ok(());
+    };
+    let prefix = format!(".{}.", name.to_string_lossy());
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let Some(stamp) = file_name
+            .to_str()
+            .and_then(|n| n.strip_prefix(&prefix))
+            .and_then(|n| n.strip_suffix(".tmp").or_else(|| n.strip_suffix(".old")))
+        else {
+            continue;
+        };
+        let parts: Vec<_> = stamp.split('-').collect();
+        if parts.len() != 3
+            || !parts
+                .iter()
+                .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+        {
+            continue;
+        }
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            std::fs::remove_dir_all(&path)?;
+        } else {
+            std::fs::remove_file(&path)?;
         }
     }
-    Err(e).with_context(|| format!("removing {}", dest.display()))
+    Ok(())
+}
+
+/// Atomically swap the entries at `a` and `b`, both existing: `false`, with
+/// nothing changed, where the OS or the filesystem can't.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn exchange(a: &Path, b: &Path) -> std::io::Result<bool> {
+    use std::os::unix::ffi::OsStrExt;
+    let cstr = |p: &Path| std::ffi::CString::new(p.as_os_str().as_bytes());
+    let (a, b) = (
+        cstr(a).map_err(std::io::Error::other)?,
+        cstr(b).map_err(std::io::Error::other)?,
+    );
+    // SAFETY: `a` and `b` are valid NUL-terminated strings outliving the call.
+    #[cfg(target_os = "linux")]
+    let rc = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            a.as_ptr(),
+            libc::AT_FDCWD,
+            b.as_ptr(),
+            libc::RENAME_EXCHANGE,
+        )
+    };
+    // SAFETY: as above.
+    #[cfg(target_os = "macos")]
+    let rc = unsafe { libc::renamex_np(a.as_ptr(), b.as_ptr(), libc::RENAME_SWAP) };
+    if rc == 0 {
+        return Ok(true);
+    }
+    let err = std::io::Error::last_os_error();
+    match err.raw_os_error() {
+        Some(libc::EINVAL | libc::ENOSYS | libc::ENOTSUP) => Ok(false),
+        _ => Err(err),
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn exchange(_: &Path, _: &Path) -> std::io::Result<bool> {
+    Ok(false)
 }
 
 #[cfg(test)]
@@ -293,6 +393,24 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// The staged file is never more open than the one it replaces, not even
+    /// while being written: a descriptor opened then would outlive a chmod.
+    #[cfg(unix)]
+    #[test]
+    fn a_staged_file_is_private_while_written() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("mode-staged");
+        let p = dir.join("settings.json");
+        std::fs::write(&p, "old").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        replace(&p, |f| {
+            assert_eq!(f.metadata()?.permissions().mode() & 0o077, 0);
+            f.write_all(b"new")
+        })
+        .unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// A symlink, even a dangling one or a chain of them, is written through:
     /// the links stay and what they point at is replaced.
     #[cfg(unix)]
@@ -360,6 +478,36 @@ mod tests {
             "old"
         );
         assert_eq!(entries(&root), ["skill"]);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// What an interrupted publish left beside the destination (a staged
+    /// build, a previous entry moved aside, even with the destination gone)
+    /// is cleared by the next one; the user's look-alike names are not.
+    #[test]
+    fn publish_dir_clears_what_an_interrupted_one_left() {
+        let root = scratch("dir-interrupted");
+        let dest = root.join("skill");
+        write_dir(&root.join(".skill.123-456-7.old"), "old").unwrap();
+        write_dir(&root.join(".skill.123-456-8.tmp"), "half").unwrap();
+        std::fs::write(root.join(".skill.123-456-9.tmp"), "half").unwrap();
+        for mine in [".skill.notes.old", ".skill.1-2.tmp", ".other.1-2-3.tmp"] {
+            std::fs::write(root.join(mine), "mine").unwrap();
+        }
+        publish_dir(&dest, |d| write_dir(d, "new")).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dest.join("sub/file")).unwrap(),
+            "new"
+        );
+        assert_eq!(
+            entries(&root),
+            [
+                ".other.1-2-3.tmp",
+                ".skill.1-2.tmp",
+                ".skill.notes.old",
+                "skill"
+            ]
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 
