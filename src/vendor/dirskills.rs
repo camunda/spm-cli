@@ -30,10 +30,13 @@ pub fn copy_skills_into(dir: &Path, skills: &[MaterializedSkill], claim: Claim) 
 }
 
 /// Replace `dir` with one holding exactly `skills`, published whole (see
-/// [`atomic::publish_dir`]): a failure keeps the previous `dir` intact. Each
-/// name is `claim`ed once its entry is staged (see [`copy_skills`]).
+/// [`atomic::publish_dir`]): a failure keeps the previous `dir` intact. The
+/// names are `claim`ed once `dir` is replaced (see [`copy_skills`]).
 pub fn rebuild_with_skills(dir: &Path, skills: &[MaterializedSkill], claim: Claim) -> Result<()> {
-    atomic::publish_dir(dir, |stage| copy_skills(stage, dir, skills, claim))
+    atomic::publish_dir(dir, |stage| {
+        copy_skills(stage, dir, skills, &mut |_| Ok(()))
+    })?;
+    skills.iter().try_for_each(|s| claim(s.name()))
 }
 
 /// Publish each skill as `into/<name>/`, naming `dir` (where `into` ends up)
@@ -134,6 +137,25 @@ mod tests {
             std::fs::read_to_string(dir.join("greet/SKILL.md")).unwrap(),
             "mine\n"
         );
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    /// A rebuild failing part-way keeps the previous dir, and claims none of
+    /// the skills it staged before failing: none of them reached `dir`.
+    #[test]
+    fn a_failed_rebuild_claims_nothing() {
+        let tmp = scratch("rebuild-unclaimed");
+        let dir = tmp.join("skills");
+        let skills = [make_skill(&tmp, "a"), make_skill(&tmp, "b")];
+        std::fs::remove_dir_all(skills[1].path()).unwrap();
+        let mut claimed = Vec::new();
+        rebuild_with_skills(&dir, &skills, &mut |n| {
+            claimed.push(n.clone());
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(claimed, Vec::<DepName>::new());
+        assert!(!dir.exists());
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 

@@ -77,7 +77,6 @@ impl Vendor for Claude {
             std::fs::create_dir_all(&skills_dir)?;
 
             for s in skills {
-                claim(s.name())?;
                 let dest = skills_dir.join(s.name());
                 fsutil::copy_tree(s.path(), &dest, s.root())
                     .with_context(|| format!("copying skill `{}` into plugin", s.name()))?;
@@ -96,6 +95,9 @@ impl Vendor for Claude {
                 }),
             )
         })?;
+        // Claimed once the marketplace holds them: a failed rebuild left the
+        // previous one, which they never reached.
+        skills.iter().try_for_each(|s| claim(s.name()))?;
 
         patch_settings(scope, &market_dir, skills)?;
         if let Scope::Project { root } = scope {
@@ -480,9 +482,10 @@ mod tests {
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 
-    /// A materialize failing part-way (here: the second skill's claim)
+    /// A materialize failing part-way (here: copying the second skill)
     /// leaves the previous marketplace and settings exactly as they were,
-    /// with nothing staged left beside them.
+    /// with nothing staged left beside them, and claims none of the skills
+    /// it staged.
     #[test]
     fn a_failed_materialize_keeps_the_previous_marketplace() {
         let tmp = scratch("failed-mat");
@@ -503,13 +506,19 @@ mod tests {
 
         std::fs::write(greet.path().join("SKILL.md"), "v2\n").unwrap();
         let other = make_skill(&tmp, "other");
+        std::fs::remove_dir_all(other.path()).unwrap();
+        let mut claimed = Vec::new();
         let err = Claude
             .materialize(&scope, "spm-1234", &[greet, other], &[], &mut |n| {
-                anyhow::ensure!(n.as_str() != "other", "boom");
+                claimed.push(n.clone());
                 Ok(())
             })
             .unwrap_err();
-        assert_eq!(format!("{err:#}"), "boom");
+        assert!(
+            format!("{err:#}").starts_with("copying skill `other` into plugin"),
+            "{err:#}"
+        );
+        assert_eq!(claimed, Vec::<DepName>::new());
 
         let skills = tmp.join(".spm/claude/plugin/skills");
         assert_eq!(
