@@ -75,6 +75,12 @@ const GUARDS: &[Guard] = &[
             "File::create_new",
             "File::options",
             "OpenOptions",
+            // A file opened outside std (an FFI call) and adopted from its
+            // raw descriptor or handle.
+            "from_raw_fd",
+            "from_raw_handle",
+            "OwnedFd",
+            "OwnedHandle",
         ],
         imports: &["fs::write", "fs::copy", "fs::rename"],
         opaque: &[
@@ -93,8 +99,9 @@ const GUARDS: &[Guard] = &[
             ),
             (
                 "src/atomic/access.rs",
-                "sets how `atomic` opens a stage (`OpenOptions`: owner-only, \
-                 exclusive); opens and writes nothing itself",
+                "creates `atomic`'s stage open to its owner alone (`OpenOptions`; \
+                 on macOS `openx_np`, adopted with `from_raw_fd`); writes nothing \
+                 into it",
             ),
             (
                 "src/fsutil.rs",
@@ -872,6 +879,10 @@ fn write_guard_sees_grouped_imports_and_create_new() {
                 ),
                 ("src/glob.rs", "use std::fs::*;"),
                 (
+                    "src/raw.rs",
+                    "fn f() { File::from_raw_fd(openx(p)); File::from(OwnedHandle::from_raw_handle(h)); }",
+                ),
+                (
                     "src/fine.rs",
                     "use std::fs::{self, File};\nuse std::io::Write;\nfn f() { fs::read(p); }",
                 ),
@@ -886,6 +897,9 @@ fn write_guard_sees_grouped_imports_and_create_new() {
             "src/moves.rs:1 uses `fs::copy`",
             "src/moves.rs:1 uses `fs::rename`",
             "src/glob.rs:1 uses `fs::*`",
+            "src/raw.rs:1 uses `OwnedHandle`",
+            "src/raw.rs:1 uses `from_raw_fd`",
+            "src/raw.rs:1 uses `from_raw_handle`",
         ]
     );
 }

@@ -6,40 +6,150 @@
 //! publish a more open file. Until it carries them, the staged file is
 //! open to its owner alone, so nothing written to it is exposed meanwhile.
 //!
-//! - Unix: the staged file is created `0600`, then takes the original's
-//!   owner and group, then (Linux) its extended attributes, the POSIX ACL
-//!   among them, or (macOS) its ACL and extended attributes, and only then
-//!   its mode, which grants no more than that ACL.
+//! - Unix: the staged file is created `0600` (on macOS, whose ACLs the mode
+//!   does not mask, with an empty ACL that inherits nothing from its
+//!   directory), then takes the original's owner and group, then (Linux) its
+//!   extended attributes, the POSIX ACL among them, or (macOS) its ACL and
+//!   extended attributes, and only then its mode, which grants no more than
+//!   that ACL.
 //! - Windows: the staged file is opened exclusively and given a protected,
 //!   owner-only DACL before anything is written to it; [`replace`] then
 //!   publishes it with `ReplaceFileW`, which gives it the replaced file's
 //!   DACL and attributes.
 
-use std::fs::{File, Metadata, OpenOptions};
+use std::fs::{File, Metadata};
 use std::path::Path;
 
-/// Open the stage of a file replacing an existing one no more open than its
-/// owner alone (see [`restrict`]).
-#[cfg(unix)]
-pub(super) fn private(options: &mut OpenOptions) {
+/// Create the stage `tmp` of a file replacing an existing one, open to its
+/// owner alone until [`restrict`] gives it the original's access control.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(super) fn create(tmp: &Path) -> std::io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
-    options.mode(0o600);
+    // A directory's default POSIX ACL is masked by the group bits: none here.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(tmp)
+}
+
+/// macOS ACLs are not masked by the mode, so a `0600` file would still take
+/// its directory's inheritable entries: it is created with an empty ACL
+/// flagged not to inherit, at once (`openx_np`).
+#[cfg(target_os = "macos")]
+pub(super) fn create(tmp: &Path) -> std::io::Result<File> {
+    macos::create(tmp)
 }
 
 /// Open the stage exclusively, with the right to change its DACL, so no one
 /// else can open it before [`restrict`] makes it owner-only.
 #[cfg(windows)]
-pub(super) fn private(options: &mut OpenOptions) {
+pub(super) fn create(tmp: &Path) -> std::io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Foundation::GENERIC_WRITE;
     use windows_sys::Win32::Storage::FileSystem::WRITE_DAC;
-    options.share_mode(0).access_mode(GENERIC_WRITE | WRITE_DAC);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .share_mode(0)
+        .access_mode(GENERIC_WRITE | WRITE_DAC)
+        .open(tmp)
 }
 
 #[cfg(not(any(unix, windows)))]
-pub(super) fn private(_: &mut OpenOptions) {}
+pub(super) fn create(tmp: &Path) -> std::io::Result<File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(tmp)
+}
 
-/// Give the staged file `tmp` (open as `file`, through [`private`]) the
+/// `openx_np` and the ACL calls it takes, which `libc` does not bind.
+#[cfg(target_os = "macos")]
+mod macos {
+    use std::ffi::{c_char, c_int, c_void, CString};
+    use std::fs::File;
+    use std::os::fd::FromRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Path;
+
+    const ACL_FLAG_NO_INHERIT: c_int = 1 << 17;
+    const FILESEC_MODE: c_int = 4;
+    const FILESEC_ACL: c_int = 5;
+
+    extern "C" {
+        fn acl_init(count: c_int) -> *mut c_void;
+        fn acl_free(obj: *mut c_void) -> c_int;
+        fn acl_get_flagset_np(obj: *mut c_void, flagset: *mut *mut c_void) -> c_int;
+        fn acl_add_flag_np(flagset: *mut c_void, flag: c_int) -> c_int;
+        fn acl_set_flagset_np(obj: *mut c_void, flagset: *mut c_void) -> c_int;
+        fn filesec_init() -> *mut c_void;
+        fn filesec_free(fsec: *mut c_void);
+        fn filesec_set_property(fsec: *mut c_void, property: c_int, value: *const c_void) -> c_int;
+        fn openx_np(path: *const c_char, flags: c_int, fsec: *mut c_void) -> c_int;
+    }
+
+    /// An `acl_t` or `filesec_t`, freed when dropped.
+    struct Owned(*mut c_void, unsafe extern "C" fn(*mut c_void));
+
+    impl Owned {
+        fn new(p: *mut c_void, free: unsafe extern "C" fn(*mut c_void)) -> std::io::Result<Self> {
+            if p.is_null() {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(Self(p, free))
+        }
+    }
+
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            // SAFETY: `self.0` came from the allocator `self.1` frees, once.
+            unsafe { (self.1)(self.0) }
+        }
+    }
+
+    unsafe extern "C" fn free_acl(p: *mut c_void) {
+        // SAFETY: the caller passes an `acl_t` from `acl_init`.
+        unsafe { acl_free(p) };
+    }
+
+    fn check(rc: c_int) -> std::io::Result<()> {
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    pub(super) fn create(tmp: &Path) -> std::io::Result<File> {
+        let path = CString::new(tmp.as_os_str().as_bytes()).map_err(std::io::Error::other)?;
+        let mode: libc::mode_t = 0o600;
+        // SAFETY: each pointer is checked non-null by `Owned::new` and lives
+        // until its guard drops, after `openx_np` has copied what it needs;
+        // `path` is NUL-terminated and `fd`, when valid, is owned by no one
+        // else.
+        unsafe {
+            let acl = Owned::new(acl_init(0), free_acl)?;
+            let mut flags = std::ptr::null_mut();
+            check(acl_get_flagset_np(acl.0, &mut flags))?;
+            check(acl_add_flag_np(flags, ACL_FLAG_NO_INHERIT))?;
+            check(acl_set_flagset_np(acl.0, flags))?;
+            let fsec = Owned::new(filesec_init(), filesec_free)?;
+            let acl_ptr: *const *mut c_void = &acl.0;
+            check(filesec_set_property(fsec.0, FILESEC_ACL, acl_ptr.cast()))?;
+            let mode_ptr: *const libc::mode_t = &mode;
+            check(filesec_set_property(fsec.0, FILESEC_MODE, mode_ptr.cast()))?;
+            let flags = libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC;
+            let fd = openx_np(path.as_ptr(), flags, fsec.0);
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(File::from_raw_fd(fd))
+        }
+    }
+}
+
+/// Give the staged file `tmp` (open as `file`, from [`create`]) the
 /// access control of `dest`, whose metadata is `original`, before anything
 /// is written to it. Each step narrows or keeps what the one before
 /// allowed: owner, then ACL, then mode.

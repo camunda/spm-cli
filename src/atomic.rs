@@ -127,12 +127,13 @@ impl Staged {
             // in-place write this replaces did, without truncating it.
             std::fs::OpenOptions::new().write(true).open(dest)?;
         }
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        if original.is_some() {
-            access::private(&mut options);
-        }
-        let file = options.open(&tmp)?;
+        let file = match original {
+            Some(_) => access::create(&tmp)?,
+            None => std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)?,
+        };
         let staged = Self {
             tmp,
             dest: dest.to_path_buf(),
@@ -680,6 +681,51 @@ mod tests {
             xattr(&p, "com.camunda.spm-test").as_deref(),
             Some(&b"kept"[..])
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Unlike a POSIX one, a macOS ACL is not masked by the mode, so the
+    /// stage inherits none of its directory's entries, not even while being
+    /// written: one granting read would let a descriptor opened then outlive
+    /// the stage taking the replaced file's ACL.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_replaced_file_gains_no_inherited_access_control_list() {
+        let dir = scratch("inherit");
+        let chmod = |args: &[&str], p: &Path| {
+            let status = std::process::Command::new("chmod")
+                .args(args)
+                .arg(p)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+        let acl = |p: &Path| {
+            let out = std::process::Command::new("ls")
+                .arg("-len")
+                .arg(p)
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            let text = String::from_utf8(out.stdout).unwrap();
+            text.lines().skip(1).map(str::to_owned).collect::<Vec<_>>()
+        };
+        chmod(&["+a", "group:everyone allow read,file_inherit"], &dir);
+        let p = dir.join("settings.json");
+        std::fs::write(&p, "old").unwrap();
+        assert_eq!(acl(&p).len(), 1, "the directory's entry is inherited");
+        chmod(&["-N"], &p);
+        replace(&p, |f| {
+            let stage = entries(&dir)
+                .into_iter()
+                .find(|e| e.ends_with(".tmp"))
+                .unwrap();
+            assert_eq!(acl(&dir.join(stage)), Vec::<String>::new());
+            f.write_all(b"new")
+        })
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "new");
+        assert_eq!(acl(&p), Vec::<String>::new());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
