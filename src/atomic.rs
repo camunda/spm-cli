@@ -88,7 +88,9 @@ impl Staged {
     /// Stage what `write` writes as the next content of `dest`, flushed to
     /// disk, with the access control of the file it replaces (see
     /// [`access`]): a write that can't keep it fails rather than publish a
-    /// more open file. `dest`'s directory must exist. A symlink at `dest` is
+    /// more open file; a `dest` it may not write is refused, read-only
+    /// included, even where its directory would allow the rename. `dest`'s
+    /// directory must exist. A symlink at `dest` is
     /// replaced, not followed: pass a [`resolve`]d path to write through it.
     pub fn write(
         dest: &Path,
@@ -96,6 +98,11 @@ impl Staged {
     ) -> std::io::Result<Self> {
         let tmp = sibling(dest, "tmp")?;
         let original = std::fs::metadata(dest).ok().filter(|m| m.is_file());
+        if original.is_some() {
+            // A rename asks only the directory: ask the file too, as the
+            // in-place write this replaces did, without truncating it.
+            std::fs::OpenOptions::new().write(true).open(dest)?;
+        }
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
         if original.is_some() {
@@ -406,6 +413,23 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// A read-only file is refused, as an in-place write would be, even though
+    /// its directory would let a rename replace it.
+    #[test]
+    fn a_read_only_file_is_not_replaced() {
+        let dir = scratch("readonly");
+        let p = dir.join("ai.json");
+        std::fs::write(&p, "old").unwrap();
+        let mut perms = std::fs::metadata(&p).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&p, perms).unwrap();
+        let err = replace(&p, |f| f.write_all(b"new")).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::PermissionDenied);
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "old");
+        assert_eq!(entries(&dir), ["ai.json"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// A replaced file keeps its permissions, as an in-place write would.
     #[cfg(unix)]
     #[test]
@@ -558,9 +582,11 @@ mod tests {
         let dir = scratch("acl");
         let p = dir.join("settings.json");
         std::fs::write(&p, "old").unwrap();
+        // `-n` lists each entry's stored UUID: resolving it to a name asks
+        // the directory service, which can time out and print the UUID.
         let acl = |p: &Path| {
             let out = std::process::Command::new("ls")
-                .arg("-le")
+                .arg("-len")
                 .arg(p)
                 .output()
                 .unwrap();
