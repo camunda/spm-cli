@@ -5,7 +5,7 @@
 //! Nothing here writes outside the global store.
 
 use super::{unlink_command, Run};
-use crate::cli::verdict::LockFindings;
+use crate::cli::verdict::{LockFindings, LockProblem, Mismatch};
 use crate::fetch::{Checkout, Reporter};
 use crate::ids::DepName;
 use crate::links::{Linked, Links};
@@ -54,7 +54,7 @@ pub(super) fn direct(
     // Stable, path-independent project id: reuse the locked one, else mint & persist.
     let id = if prev.id.is_empty() {
         if mode.locked() {
-            findings.missing_id = true;
+            findings.push(LockProblem::MissingId);
         }
         crate::lockfile::generate_id(dir)
     } else {
@@ -95,8 +95,12 @@ pub(super) fn direct(
             mode.locked(),
         )? {
             Ok(entry) => entry,
-            Err(mismatch) => {
-                findings.drift.push(mismatch);
+            Err(why) => {
+                findings.push(LockProblem::Drift {
+                    kind,
+                    name: name.clone(),
+                    why,
+                });
                 // A skill failing the pin check is not walked, so its
                 // transitive subtree is never visited.
                 if kind == DependencyKind::Skill {
@@ -168,10 +172,10 @@ pub(super) fn direct(
     if mode.locked() {
         for (name, l) in prev.dependencies() {
             if !matches!(l, LockEntry::Skill(s) if s.is_transitive()) {
-                findings.stale.push(format!(
-                    "{} `{name}`: in ai.lock but not declared in ai.json",
-                    l.kind()
-                ));
+                findings.push(LockProblem::Stale {
+                    kind: l.kind(),
+                    name: name.clone(),
+                });
             }
         }
     }
@@ -232,7 +236,7 @@ pub(super) fn plugins(
                 // Not in the store: keep the locked bundled skills (carried
                 // over above), unverified.
                 Checkout::Unverified => {
-                    findings.unverified.push(name.to_string());
+                    findings.unverified.push(name.clone());
                     continue;
                 }
                 checkout => Some(checkout),
@@ -382,19 +386,22 @@ pub(super) fn judge_transitive(
         .iter()
         .map(|(n, _)| n.as_str())
         .collect();
-    findings.stale.extend(stale_transitive_pins(
+    let stale = stale_transitive_pins(
         &res.prev.skills,
         &reached,
         resolve_transitive,
         std::mem::take(&mut res.skipped_roots)
             .into_iter()
-            .chain(lock_misses.iter().map(|(n, _)| n.clone()))
+            .chain(lock_misses.iter().map(|m| m.name.clone()))
             .chain(std::mem::take(&mut expansion.uncertain_misses))
             .chain(expansion.unverified.iter().cloned()),
-    ));
-    findings
-        .unresolved
-        .extend(lock_misses.into_iter().map(|(_, m)| m));
+    );
+    for name in stale {
+        findings.push(LockProblem::StaleTransitive(name));
+    }
+    for miss in lock_misses {
+        findings.push(LockProblem::Unresolved(miss));
+    }
 }
 
 /// Fold the transitively-resolved skills into `lock`. A synthesized name
@@ -480,8 +487,8 @@ struct Entry {
 /// Pin the direct dependency `name` of `kind`: reuse `prev` (its entry in the
 /// previous `ai.lock`) when it pins exactly `spec` and `refresh` is off, else
 /// resolve `spec`. Under `locked` nothing is resolved: a pin that can't be
-/// reused yields `Ok(Err(mismatch))`, the line `--locked` reports. The single
-/// pin rule for skills and plugins alike.
+/// reused yields `Ok(Err(why))`, for `--locked` to report. The single pin rule
+/// for skills and plugins alike.
 fn resolve_entry(
     kind: DependencyKind,
     name: &DepName,
@@ -489,11 +496,11 @@ fn resolve_entry(
     prev: Option<Previous>,
     refresh: bool,
     locked: bool,
-) -> Result<std::result::Result<Entry, String>> {
+) -> Result<std::result::Result<Entry, Mismatch>> {
     spec.version()?; // validates selectors
     let (pin, fresh) = match reusable_pin(prev.as_ref().map(Previous::pin), spec, refresh)? {
         Ok(p) => (p.clone(), false),
-        Err(why) if locked => return Ok(Err(format!("{kind} `{name}`: {why}"))),
+        Err(why) if locked => return Ok(Err(why)),
         Err(_) => (
             resolver::resolve(spec).with_context(|| format!("resolving {kind} `{name}`"))?,
             true,
@@ -508,20 +515,20 @@ fn reusable_pin<'a>(
     prev: Option<&'a Pin>,
     spec: &SkillSpec,
     refresh: bool,
-) -> Result<std::result::Result<&'a Pin, String>> {
+) -> Result<std::result::Result<&'a Pin, Mismatch>> {
     let Some(p) = prev else {
-        return Ok(Err("missing from ai.lock".to_string()));
+        return Ok(Err(Mismatch::Missing));
     };
     if refresh {
-        return Ok(Err("refreshing".to_string()));
+        return Ok(Err(Mismatch::Refreshing));
     }
     Ok(match p.drift_from(spec)? {
         None => Ok(p),
-        Some(changes) => Err(format!("changed since ai.lock was written ({changes})")),
+        Some(changes) => Err(Mismatch::Changed(changes)),
     })
 }
 
-/// `--locked`: describe every transitive pin left in `prev` (direct entries
+/// `--locked`: every transitive pin left in `prev` (direct entries
 /// already removed) that the walk did not reach. A pin that hangs off a
 /// subtree the walk skipped — a direct root or edge that itself failed the pin
 /// check, seeded by `unwalked` — may still be needed, so it is not judged (that
@@ -532,7 +539,7 @@ pub(super) fn stale_transitive_pins(
     reached: &BTreeSet<&str>,
     resolve_transitive: bool,
     unwalked: impl IntoIterator<Item = DepName>,
-) -> Vec<String> {
+) -> Vec<DepName> {
     let unreached: Vec<(&DepName, &LockedSkill)> = prev
         .iter()
         .filter(|(n, l)| l.is_transitive() && !reached.contains(n.as_str()))
@@ -557,7 +564,7 @@ pub(super) fn stale_transitive_pins(
     unreached
         .into_iter()
         .filter(|(n, _)| !unwalked.contains(*n))
-        .map(|(n, _)| format!("transitive skill `{n}`: in ai.lock but no longer required"))
+        .map(|(n, _)| n.clone())
         .collect()
 }
 
@@ -622,8 +629,8 @@ mod tests {
         }
     }
 
-    /// Under `--locked`, a pin that can't be reused becomes the mismatch line,
-    /// worded the same for both kinds; nothing is resolved.
+    /// Under `--locked`, a pin that can't be reused yields why, the same for
+    /// both kinds; nothing is resolved.
     #[test]
     fn resolve_entry_reports_locked_mismatches_per_kind() {
         let main = spec(("branch", "main"));
@@ -635,19 +642,14 @@ mod tests {
                 Err(m) => m,
             };
         for kind in DependencyKind::ALL {
-            assert_eq!(
-                mismatch(kind, None, false),
-                format!("{kind} `x`: missing from ai.lock")
-            );
+            assert_eq!(mismatch(kind, None, false), Mismatch::Missing);
             assert_eq!(
                 mismatch(kind, Some(previous(kind, &spec(("tag", "v1")))), false),
-                format!(
-                    "{kind} `x`: changed since ai.lock was written (`tag:v1` -> `branch:main`)"
-                )
+                Mismatch::Changed("`tag:v1` -> `branch:main`".into())
             );
             assert_eq!(
                 mismatch(kind, Some(previous(kind, &main)), true),
-                format!("{kind} `x`: refreshing")
+                Mismatch::Refreshing
             );
         }
     }
@@ -732,16 +734,24 @@ mod tests {
         )
         .unwrap();
 
-        assert!(findings.missing_id && res.lock.id.starts_with("spm-"));
+        assert!(res.lock.id.starts_with("spm-"));
         assert_eq!(
-            findings.drift,
-            ["skill `b`: changed since ai.lock was written (`tag:v1` -> `tag:v2`)"]
-        );
-        assert_eq!(
-            findings.stale,
+            findings.recorded(),
             [
-                "skill `gone`: in ai.lock but not declared in ai.json",
-                "plugin `old`: in ai.lock but not declared in ai.json",
+                LockProblem::MissingId,
+                LockProblem::Drift {
+                    kind: DependencyKind::Skill,
+                    name: dep("b"),
+                    why: Mismatch::Changed("`tag:v1` -> `tag:v2`".into()),
+                },
+                LockProblem::Stale {
+                    kind: DependencyKind::Skill,
+                    name: dep("gone"),
+                },
+                LockProblem::Stale {
+                    kind: DependencyKind::Plugin,
+                    name: dep("old"),
+                },
             ]
         );
         assert_eq!(res.skipped_roots, BTreeSet::from([dep("b")]));
@@ -777,7 +787,7 @@ mod tests {
             &mut findings,
         )
         .unwrap();
-        assert!(findings.in_sync() && !findings.missing_id);
+        assert!(findings.in_sync());
         assert_eq!(res.lock.id, "spm-1234abcd");
         assert_eq!(res.lock.plugins["p"].bundled_skills, [dep("bundled")]);
     }
@@ -816,6 +826,12 @@ mod tests {
     /// (with the skipped roots) exempt their subtrees from the stale check.
     #[test]
     fn judge_transitive_records_misses_and_drains_them() {
+        let miss = transitive::LockMiss {
+            name: dep("m"),
+            declared: dep("d"),
+            parent: dep("b"),
+            why: transitive::MissedPin::Missing,
+        };
         let mut res = Resolution {
             lock: Lockfile::default(),
             prev: Lockfile::default(),
@@ -827,14 +843,13 @@ mod tests {
             selected: Vec::new(),
             transitive: Vec::new(),
             direct_also_satisfies: BTreeMap::new(),
-            lock_misses: vec![(dep("m"), "skill `m`: missing from ai.lock".into())],
+            lock_misses: vec![miss.clone()],
             unverified: Vec::new(),
             uncertain_misses: Vec::new(),
         };
         let mut findings = LockFindings::default();
         judge_transitive(&mut res, &mut expansion, true, &mut findings);
-        assert_eq!(findings.unresolved, ["skill `m`: missing from ai.lock"]);
-        assert!(findings.stale.is_empty());
+        assert_eq!(findings.recorded(), [LockProblem::Unresolved(miss)]);
         assert!(res.skipped_roots.is_empty() && expansion.lock_misses.is_empty());
     }
 }

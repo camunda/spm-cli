@@ -5,8 +5,12 @@
 //! lives here, so the two can never disagree on what is wrong or how to fix it.
 
 use super::sync::install_command;
+use crate::ids::DepName;
+use crate::manifest::DependencyKind;
 use crate::scope::Scope;
+use crate::transitive::{LockMiss, MissedPin};
 use anyhow::{anyhow, Error};
+use std::fmt;
 use std::path::PathBuf;
 
 /// Who rejects a lock that is missing or out of sync, which decides how the
@@ -38,48 +42,170 @@ impl Enforcer {
     }
 }
 
-/// Every way `ai.lock` disagrees with `ai.json`, by problem class. Its
+/// Why a direct dependency's pin in `ai.lock` can't be reused as is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum Mismatch {
+    /// `ai.lock` has no entry for it.
+    Missing,
+    /// A refresh (`spm update`) re-resolves it regardless.
+    Refreshing,
+    /// Its request changed; the changes as `Pin::drift_from` describes them.
+    Changed(String),
+}
+
+/// What the whole-lock backstop found `ai.lock` to differ in from what spm
+/// would write, after every specific check passed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum Rewrite {
+    /// Somewhere: the walk was complete, so the documents are compared whole.
+    Lock,
+    /// A top-level field other than `skills` and `plugins`.
+    TopLevel(String),
+    /// The `plugins` map's shape (e.g. an empty map spm omits).
+    Plugins,
+    /// One plugin's entry.
+    Plugin(String),
+    /// One skill's entry.
+    Skill(DepName),
+}
+
+/// One way `ai.lock` disagrees with `ai.json`: what `spm install --locked`
+/// rejects. Only ever rendered here (see [`fmt::Display`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum LockProblem {
+    /// The lock has no project `id`.
+    MissingId,
+    /// A declared dependency whose pin is missing or no longer matches.
+    Drift {
+        kind: DependencyKind,
+        name: DepName,
+        why: Mismatch,
+    },
+    /// A direct pin `ai.json` no longer declares.
+    Stale { kind: DependencyKind, name: DepName },
+    /// A transitive pin nothing requires any more.
+    StaleTransitive(DepName),
+    /// A transitive dependency the lock does not pin.
+    Unresolved(LockMiss),
+    /// What the specific checks missed: the lock differs from what spm would
+    /// write.
+    Rewritten(Rewrite),
+}
+
+impl LockProblem {
+    /// The problem class's rank in report order.
+    fn rank(&self) -> u8 {
+        match self {
+            LockProblem::MissingId => 0,
+            LockProblem::Drift { .. } => 1,
+            LockProblem::Stale { .. } | LockProblem::StaleTransitive(_) => 2,
+            LockProblem::Unresolved(_) => 3,
+            LockProblem::Rewritten(_) => 4,
+        }
+    }
+}
+
+impl fmt::Display for LockProblem {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            LockProblem::MissingId => f.write_str("ai.lock has no project `id`"),
+            LockProblem::Drift { kind, name, why } => {
+                write!(f, "{kind} `{name}`: ")?;
+                match why {
+                    Mismatch::Missing => f.write_str("missing from ai.lock"),
+                    Mismatch::Refreshing => f.write_str("refreshing"),
+                    Mismatch::Changed(changes) => {
+                        write!(f, "changed since ai.lock was written ({changes})")
+                    }
+                }
+            }
+            LockProblem::Stale { kind, name } => {
+                write!(f, "{kind} `{name}`: in ai.lock but not declared in ai.json")
+            }
+            LockProblem::StaleTransitive(name) => {
+                write!(
+                    f,
+                    "transitive skill `{name}`: in ai.lock but no longer required"
+                )
+            }
+            LockProblem::Unresolved(LockMiss {
+                name,
+                declared,
+                parent,
+                why,
+            }) => {
+                write!(
+                    f,
+                    "transitive skill `{name}` (`{declared}` required by `{parent}`): "
+                )?;
+                match why {
+                    MissedPin::Missing => f.write_str("missing from ai.lock"),
+                    MissedPin::Changed(changes) => write!(f, "changed in ai.lock ({changes})"),
+                }
+            }
+            LockProblem::Rewritten(Rewrite::Lock) => f.write_str(
+                "ai.lock differs from what spm would write (e.g. a plugin's bundled skills \
+                 or a transitive skill's requesters changed)",
+            ),
+            LockProblem::Rewritten(Rewrite::TopLevel(key)) => {
+                write!(
+                    f,
+                    "ai.lock top-level `{key}` differs from what spm would write"
+                )
+            }
+            LockProblem::Rewritten(Rewrite::Plugins) => {
+                f.write_str("ai.lock `plugins` differs from what spm would write")
+            }
+            LockProblem::Rewritten(Rewrite::Plugin(name)) => write!(
+                f,
+                "ai.lock entry for plugin `{name}` differs from what spm would write (e.g. \
+                 its bundled skills changed)"
+            ),
+            LockProblem::Rewritten(Rewrite::Skill(name)) => write!(
+                f,
+                "ai.lock entry for skill `{name}` differs from what spm would write (e.g. \
+                 a transitive skill's requesters changed)"
+            ),
+        }
+    }
+}
+
+/// Every way `ai.lock` disagrees with `ai.json`. Its
 /// [`problems`](Self::problems) are exactly what `spm install --locked`
 /// rejects.
 #[derive(Default, Debug, PartialEq, Eq)]
 pub(super) struct LockFindings {
-    /// The lock has no project `id`.
-    pub(super) missing_id: bool,
-    /// Declared dependencies whose pin is missing or no longer matches.
-    pub(super) drift: Vec<String>,
-    /// Pins nothing declares or requires any more.
-    pub(super) stale: Vec<String>,
-    /// Transitive dependencies the lock does not pin.
-    pub(super) unresolved: Vec<String>,
-    /// What the specific checks missed: the lock differs from what spm would
-    /// write.
-    pub(super) rewritten: Vec<String>,
+    /// What `--locked` rejects, in the order found.
+    problems: Vec<LockProblem>,
     /// Dependencies whose store checkout is missing, so what they contribute
     /// to `ai.lock` (a plugin's bundled skills, nested dependencies) could not
     /// be verified offline — not a problem, but `spm install` would fetch them.
-    pub(super) unverified: Vec<String>,
+    pub(super) unverified: Vec<DepName>,
 }
 
 impl LockFindings {
-    /// The problems, one line each, in report order.
+    /// Record `problem`.
+    pub(super) fn push(&mut self, problem: LockProblem) {
+        self.problems.push(problem);
+    }
+
+    /// The problems recorded so far, in the order found.
+    #[cfg(test)]
+    pub(super) fn recorded(&self) -> &[LockProblem] {
+        &self.problems
+    }
+
+    /// The problems, one line each, in report order: by class, then in the
+    /// order found.
     pub(super) fn problems(&self) -> Vec<String> {
-        self.missing_id
-            .then(|| "ai.lock has no project `id`".to_string())
-            .into_iter()
-            .chain(self.drift.iter().cloned())
-            .chain(self.stale.iter().cloned())
-            .chain(self.unresolved.iter().cloned())
-            .chain(self.rewritten.iter().cloned())
-            .collect()
+        let mut problems: Vec<&LockProblem> = self.problems.iter().collect();
+        problems.sort_by_key(|p| p.rank());
+        problems.iter().map(ToString::to_string).collect()
     }
 
     /// Whether `ai.lock` agrees with `ai.json` as far as could be checked.
     pub(super) fn in_sync(&self) -> bool {
-        !self.missing_id
-            && self.drift.is_empty()
-            && self.stale.is_empty()
-            && self.unresolved.is_empty()
-            && self.rewritten.is_empty()
+        self.problems.is_empty()
     }
 }
 
@@ -161,7 +287,7 @@ impl LockVerdict {
                             Severity::Warn,
                             "not in the store, so what they add to ai.lock was not verified offline",
                         )
-                        .details(findings.unverified)
+                        .details(findings.unverified.iter().map(ToString::to_string).collect())
                         .fix(format!("{install} (fetches them)")),
                     );
                 }
@@ -210,15 +336,121 @@ impl Finding {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ids::dep;
 
+    fn drift() -> LockProblem {
+        LockProblem::Drift {
+            kind: DependencyKind::Skill,
+            name: dep("d"),
+            why: Mismatch::Missing,
+        }
+    }
+
+    fn miss(why: MissedPin) -> LockProblem {
+        LockProblem::Unresolved(LockMiss {
+            name: dep("t"),
+            declared: dep("u"),
+            parent: dep("p"),
+            why,
+        })
+    }
+
+    /// One problem of each class, found out of report order.
     fn every_class() -> LockFindings {
-        LockFindings {
-            missing_id: true,
-            drift: vec!["drift".into()],
-            stale: vec!["stale".into()],
-            unresolved: vec!["unresolved".into()],
-            rewritten: vec!["rewritten".into()],
-            unverified: vec!["unverified".into()],
+        let mut f = LockFindings {
+            unverified: vec![dep("unverified")],
+            ..Default::default()
+        };
+        for p in [
+            LockProblem::Rewritten(Rewrite::Plugins),
+            miss(MissedPin::Missing),
+            LockProblem::StaleTransitive(dep("s")),
+            drift(),
+            LockProblem::MissingId,
+        ] {
+            f.push(p);
+        }
+        f
+    }
+
+    const EVERY_CLASS: [&str; 5] = [
+        "ai.lock has no project `id`",
+        "skill `d`: missing from ai.lock",
+        "transitive skill `s`: in ai.lock but no longer required",
+        "transitive skill `t` (`u` required by `p`): missing from ai.lock",
+        "ai.lock `plugins` differs from what spm would write",
+    ];
+
+    /// Every problem's wording, the one place it is written.
+    #[test]
+    fn each_problem_renders_its_message() {
+        let drift = |kind, why| LockProblem::Drift {
+            kind,
+            name: dep("x"),
+            why,
+        };
+        let cases = [
+            (LockProblem::MissingId, "ai.lock has no project `id`"),
+            (
+                drift(DependencyKind::Skill, Mismatch::Missing),
+                "skill `x`: missing from ai.lock",
+            ),
+            (
+                drift(DependencyKind::Plugin, Mismatch::Refreshing),
+                "plugin `x`: refreshing",
+            ),
+            (
+                drift(
+                    DependencyKind::Skill,
+                    Mismatch::Changed("`a` -> `b`".into()),
+                ),
+                "skill `x`: changed since ai.lock was written (`a` -> `b`)",
+            ),
+            (
+                LockProblem::Stale {
+                    kind: DependencyKind::Plugin,
+                    name: dep("x"),
+                },
+                "plugin `x`: in ai.lock but not declared in ai.json",
+            ),
+            (
+                LockProblem::StaleTransitive(dep("x")),
+                "transitive skill `x`: in ai.lock but no longer required",
+            ),
+            (
+                miss(MissedPin::Missing),
+                "transitive skill `t` (`u` required by `p`): missing from ai.lock",
+            ),
+            (
+                miss(MissedPin::Changed("`a` -> `b`".into())),
+                "transitive skill `t` (`u` required by `p`): changed in ai.lock (`a` -> `b`)",
+            ),
+            (
+                LockProblem::Rewritten(Rewrite::Lock),
+                "ai.lock differs from what spm would write (e.g. a plugin's bundled skills \
+                 or a transitive skill's requesters changed)",
+            ),
+            (
+                LockProblem::Rewritten(Rewrite::TopLevel("id".into())),
+                "ai.lock top-level `id` differs from what spm would write",
+            ),
+            (
+                LockProblem::Rewritten(Rewrite::Plugins),
+                "ai.lock `plugins` differs from what spm would write",
+            ),
+            (
+                LockProblem::Rewritten(Rewrite::Plugin("x".into())),
+                "ai.lock entry for plugin `x` differs from what spm would write (e.g. its \
+                 bundled skills changed)",
+            ),
+            (
+                LockProblem::Rewritten(Rewrite::Skill(dep("x"))),
+                "ai.lock entry for skill `x` differs from what spm would write (e.g. a \
+                 transitive skill's requesters changed)",
+            ),
+        ];
+        for (problem, message) in cases {
+            assert_eq!(problem.to_string(), message);
         }
     }
 
@@ -230,14 +462,33 @@ mod tests {
 
     #[test]
     fn problems_list_every_class_in_report_order_but_not_unverified() {
+        assert_eq!(every_class().problems(), EVERY_CLASS);
+    }
+
+    /// Within a class, problems keep the order they were found in; direct
+    /// stale pins are found before transitive ones.
+    #[test]
+    fn problems_keep_the_order_found_within_a_class() {
+        let mut f = LockFindings::default();
+        let stale = LockProblem::Stale {
+            kind: DependencyKind::Skill,
+            name: dep("z"),
+        };
+        for p in [
+            stale,
+            LockProblem::StaleTransitive(dep("a")),
+            drift(),
+            LockProblem::StaleTransitive(dep("b")),
+        ] {
+            f.push(p);
+        }
         assert_eq!(
-            every_class().problems(),
+            f.problems(),
             [
-                "ai.lock has no project `id`",
-                "drift",
-                "stale",
-                "unresolved",
-                "rewritten"
+                "skill `d`: missing from ai.lock",
+                "skill `z`: in ai.lock but not declared in ai.json",
+                "transitive skill `a`: in ai.lock but no longer required",
+                "transitive skill `b`: in ai.lock but no longer required",
             ]
         );
     }
@@ -245,20 +496,13 @@ mod tests {
     #[test]
     fn any_problem_class_puts_the_lock_out_of_sync_but_unverified_does_not() {
         let unverified = LockFindings {
-            unverified: vec!["u".into()],
+            unverified: vec![dep("u")],
             ..Default::default()
         };
         assert!(unverified.in_sync());
-        let one_each: [fn(&mut LockFindings); 5] = [
-            |f| f.missing_id = true,
-            |f| f.drift.push("x".into()),
-            |f| f.stale.push("x".into()),
-            |f| f.unresolved.push("x".into()),
-            |f| f.rewritten.push("x".into()),
-        ];
-        for set in one_each {
+        for problem in every_class().problems {
             let mut f = LockFindings::default();
-            set(&mut f);
+            f.push(problem);
             assert!(!f.in_sync(), "{f:?}");
             assert_eq!(f.problems().len(), 1, "{f:?}");
         }
@@ -271,9 +515,11 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             err.to_string(),
-            "--locked: ai.lock is out of sync with ai.json (5 problem(s)):\n  \
-             - ai.lock has no project `id`\n  - drift\n  - stale\n  - unresolved\n  \
-             - rewritten\nrun `spm install` (without --locked) and commit ai.lock"
+            format!(
+                "--locked: ai.lock is out of sync with ai.json (5 problem(s)):\n  - {}\n\
+                 run `spm install` (without --locked) and commit ai.lock",
+                EVERY_CLASS.join("\n  - ")
+            )
         );
         let err = LockVerdict::Missing {
             path: PathBuf::from("x/ai.lock"),
@@ -291,7 +537,7 @@ mod tests {
     #[test]
     fn enforcing_passes_a_lock_in_sync_and_raises_why_it_was_unchecked() {
         let unverified = LockFindings {
-            unverified: vec!["u".into()],
+            unverified: vec![dep("u")],
             ..Default::default()
         };
         assert!(LockVerdict::Checked(unverified)
