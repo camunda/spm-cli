@@ -73,6 +73,29 @@ fn sibling(dest: &Path, ext: &str) -> std::io::Result<PathBuf> {
     Ok(dir.join(format!(".spm-{}-{nanos}-{n}.{ext}", std::process::id())))
 }
 
+/// The regular file `dest` replaces, if any: a symlink there is replaced
+/// (keeping its target's access when that is a file), a missing one is
+/// created, and anything else (a directory, FIFO or device) is refused
+/// rather than swapped for a regular file.
+fn original(dest: &Path) -> std::io::Result<Option<std::fs::Metadata>> {
+    let absent = |e: std::io::Error| match e.kind() {
+        ErrorKind::NotFound => Ok(None),
+        _ => Err(e),
+    };
+    match std::fs::symlink_metadata(dest) {
+        Ok(m) if m.is_file() => Ok(Some(m)),
+        Ok(m) if m.file_type().is_symlink() => match std::fs::metadata(dest) {
+            Ok(t) => Ok(Some(t).filter(std::fs::Metadata::is_file)),
+            Err(e) => absent(e),
+        },
+        Ok(_) => Err(std::io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("{} is not a regular file", dest.display()),
+        )),
+        Err(e) => absent(e),
+    }
+}
+
 /// A complete replacement for a file, staged beside it as a hidden `.tmp`
 /// file (which readers listing the directory for `.json` files skip) until
 /// [`Staged::publish`] renames it over the destination. Dropped unpublished,
@@ -89,15 +112,16 @@ impl Staged {
     /// disk, with the access control of the file it replaces (see
     /// [`access`]): a write that can't keep it fails rather than publish a
     /// more open file; a `dest` it may not write is refused, read-only
-    /// included, even where its directory would allow the rename. `dest`'s
-    /// directory must exist. A symlink at `dest` is
+    /// included, even where its directory would allow the rename, as is one
+    /// that is not a regular file (see [`original`]). `dest`'s directory
+    /// must exist. A symlink at `dest` is
     /// replaced, not followed: pass a [`resolve`]d path to write through it.
     pub fn write(
         dest: &Path,
         write: impl FnOnce(&mut File) -> std::io::Result<()>,
     ) -> std::io::Result<Self> {
         let tmp = sibling(dest, "tmp")?;
-        let original = std::fs::metadata(dest).ok().filter(|m| m.is_file());
+        let original = original(dest)?;
         if original.is_some() {
             // A rename asks only the directory: ask the file too, as the
             // in-place write this replaces did, without truncating it.
@@ -410,6 +434,45 @@ mod tests {
         replace(&p, |f| f.write_all(b"v2")).unwrap();
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "v2");
         assert_eq!(entries(&dir), ["n".repeat(255)]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Only a regular file is replaced: a directory at the destination is
+    /// refused before anything is staged.
+    #[test]
+    fn a_directory_in_place_of_the_file_is_refused() {
+        let dir = scratch("notfile");
+        let p = dir.join("ai.json");
+        std::fs::create_dir(&p).unwrap();
+        let err = replace(&p, |f| f.write_all(b"new")).unwrap_err();
+        assert!(err.to_string().contains("not a regular file"), "{err}");
+        assert!(p.is_dir());
+        assert_eq!(entries(&dir), ["ai.json"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A FIFO or device reached through a symlink (`.gitignore -> /dev/null`)
+    /// is refused, not swapped for a regular file.
+    #[cfg(unix)]
+    #[test]
+    fn a_special_file_behind_a_symlink_is_refused() {
+        use std::os::unix::fs::FileTypeExt;
+        let dir = scratch("fifo");
+        let fifo = dir.join("pipe");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let link = dir.join(".gitignore");
+        std::os::unix::fs::symlink(&fifo, &link).unwrap();
+        let err = replace(&link, |f| f.write_all(b"new")).unwrap_err();
+        assert!(err.to_string().contains("not a regular file"), "{err}");
+        assert!(std::fs::symlink_metadata(&fifo)
+            .unwrap()
+            .file_type()
+            .is_fifo());
+        assert_eq!(entries(&dir), [".gitignore", "pipe"]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
