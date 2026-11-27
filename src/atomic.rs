@@ -245,6 +245,19 @@ pub fn publish_dir(
     dest: &Path,
     build: impl FnOnce(&Path) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
+    publish_dir_and(dest, build, || Ok(()))
+}
+
+/// [`publish_dir`], running `commit` once the new entry is in place, before
+/// the previous one is dropped: should it fail, the previous entry is put
+/// back (or a new one that replaced none is dropped). So what `commit`
+/// records about the new entry (e.g. that spm owns it) is true whenever it
+/// stays, and an entry that can't be recorded never does.
+pub fn publish_dir_and(
+    dest: &Path,
+    build: impl FnOnce(&Path) -> anyhow::Result<()>,
+    commit: impl FnOnce() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
     let clearing = || format!("clearing {}", dest.display());
     let writing = || format!("writing {}", dest.display());
     let existing = match std::fs::symlink_metadata(dest) {
@@ -264,7 +277,13 @@ pub fn publish_dir(
     if !existing {
         std::fs::rename(&tmp, dest).with_context(writing)?;
         staged.0 = None;
-        return Ok(());
+        return commit().inspect_err(|_| {
+            if let Ok(new) = sibling(dest, "tmp") {
+                if std::fs::rename(dest, &new).is_ok() {
+                    drop(StagedDir(Some(new)));
+                }
+            }
+        });
     }
 
     // `old` ends up holding the previous entry.
@@ -283,13 +302,24 @@ pub fn publish_dir(
         aside
     };
     staged.0 = None;
+    if let Err(e) = commit() {
+        put_back(dest, old)?;
+        return Err(e);
+    }
     // `remove_dir_all` unlinks a symlink itself, never its target.
     let Err(e) = std::fs::remove_dir_all(&old) else {
         return Ok(());
     };
     // What is left of an entry that can't be removed whole (e.g. a read-only
     // subdirectory of the user's) goes back in place, as if removed in place,
-    // rather than lingering hidden beside the new one; the new one is dropped.
+    // rather than lingering hidden beside the new one.
+    put_back(dest, old)?;
+    Err(e).with_context(|| format!("removing {}", dest.display()))
+}
+
+/// Put the previous entry `old` back at `dest` and drop the new one there,
+/// as far as the OS allows: whatever can't be moved stays where it is.
+fn put_back(dest: &Path, old: PathBuf) -> std::io::Result<()> {
     let new = if exchange(&old, dest).unwrap_or(false) {
         Some(old)
     } else {
@@ -304,7 +334,7 @@ pub fn publish_dir(
         }
     };
     drop(StagedDir(new));
-    Err(e).with_context(|| format!("removing {}", dest.display()))
+    Ok(())
 }
 
 /// Atomically swap the entries at `a` and `b`, both existing: `false`, with
@@ -886,6 +916,46 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dest.join("sub/file")).unwrap(),
             "old"
+        );
+        assert_eq!(entries(&root), ["skill"]);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A failed commit (recording the new entry as spm's) puts the previous
+    /// entry back, or drops a new one that replaced none: what the commit
+    /// would have recorded is never left in place unrecorded.
+    #[test]
+    fn a_failed_commit_puts_the_previous_directory_back() {
+        let root = scratch("dir-commit");
+        let dest = root.join("skill");
+        publish_dir(&dest, |d| write_dir(d, "old")).unwrap();
+        let err = publish_dir_and(
+            &dest,
+            |d| write_dir(d, "new"),
+            || anyhow::bail!("record not saved"),
+        )
+        .unwrap_err();
+        assert_eq!(format!("{err:#}"), "record not saved");
+        assert_eq!(
+            std::fs::read_to_string(dest.join("sub/file")).unwrap(),
+            "old"
+        );
+        assert_eq!(entries(&root), ["skill"]);
+
+        let fresh = root.join("fresh");
+        let committed = std::cell::Cell::new(false);
+        publish_dir_and(
+            &fresh,
+            |d| write_dir(d, "new"),
+            || {
+                committed.set(fresh.join("sub/file").exists());
+                anyhow::bail!("record not saved")
+            },
+        )
+        .unwrap_err();
+        assert!(
+            committed.get(),
+            "the commit runs once the entry is in place"
         );
         assert_eq!(entries(&root), ["skill"]);
         std::fs::remove_dir_all(&root).unwrap();

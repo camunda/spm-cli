@@ -96,11 +96,12 @@ pub trait Vendor {
     /// manifest, never touching the user's hand-authored skills.
     ///
     /// `claim(name)` must be called right before the vendor removes a skill
-    /// entry `name` in a dir it shares with the user, or right after it
-    /// replaces one whole (a failed replacement leaves the previous entry,
-    /// perhaps the user's, untouched), so the ownership record
-    /// (`crate::owned`) covers everything spm touched even if a later step
-    /// fails — and nothing it never reached.
+    /// entry `name` in a dir it shares with the user, or as it replaces one
+    /// whole: once the new entry is in place, before the previous one (perhaps
+    /// the user's) is dropped, so a failed replacement or claim puts that
+    /// back (`atomic::publish_dir_and`). The ownership record
+    /// (`crate::owned`) then covers everything spm touched even if a later
+    /// step fails — and nothing it never reached.
     fn materialize(
         &self,
         scope: &Scope,

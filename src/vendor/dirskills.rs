@@ -22,8 +22,8 @@ use crate::materialized::MaterializedSkill;
 /// Replaces any pre-existing dir of the same name so re-materialization is
 /// idempotent even when `dir` is shared with the user's own hand-authored
 /// skills. Each skill is published whole (see [`atomic::publish_dir`]): one
-/// that fails to copy keeps its previous version. Each name is `claim`ed right
-/// after its entry is replaced (see [`copy_skills`]).
+/// that fails to copy keeps its previous version. Each name is `claim`ed as
+/// its entry is replaced (see [`copy_skills`]).
 pub fn copy_skills_into(dir: &Path, skills: &[MaterializedSkill], claim: Claim) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     copy_skills(dir, dir, skills, claim)
@@ -33,25 +33,30 @@ pub fn copy_skills_into(dir: &Path, skills: &[MaterializedSkill], claim: Claim) 
 /// [`atomic::publish_dir`]): a failure keeps the previous `dir` intact. The
 /// names are `claim`ed once `dir` is replaced (see [`copy_skills`]).
 pub fn rebuild_with_skills(dir: &Path, skills: &[MaterializedSkill], claim: Claim) -> Result<()> {
-    atomic::publish_dir(dir, |stage| {
-        copy_skills(stage, dir, skills, &mut |_| Ok(()))
-    })?;
-    skills.iter().try_for_each(|s| claim(s.name()))
+    atomic::publish_dir_and(
+        dir,
+        |stage| copy_skills(stage, dir, skills, &mut |_| Ok(())),
+        || skills.iter().try_for_each(|s| claim(s.name())),
+    )
 }
 
 /// Publish each skill as `into/<name>/`, naming `dir` (where `into` ends up)
-/// in errors. A name is `claim`ed only once its entry is replaced: one that
-/// fails to publish leaves the previous entry (perhaps the user's own skill)
-/// untouched, so claiming it would let a later cleanup delete it. Killed in
-/// between, spm leaves its skill unclaimed, which is left alone rather than
-/// deleted.
+/// in errors. A name is `claim`ed once its entry is in place, before the
+/// previous one is dropped (see [`atomic::publish_dir_and`]): one that fails
+/// to publish leaves the previous entry (perhaps the user's own skill)
+/// untouched, so claiming it would let a later cleanup delete it, and one
+/// whose claim fails is put back the same way. Killed in between, spm leaves
+/// its skill unclaimed, which is left alone rather than deleted.
 fn copy_skills(into: &Path, dir: &Path, skills: &[MaterializedSkill], claim: Claim) -> Result<()> {
     for s in skills {
-        atomic::publish_dir(&into.join(s.name()), |stage| {
-            fsutil::copy_tree(s.path(), stage, s.root())
-                .with_context(|| format!("copying skill `{}` into {}", s.name(), dir.display()))
-        })?;
-        claim(s.name())?;
+        atomic::publish_dir_and(
+            &into.join(s.name()),
+            |stage| {
+                fsutil::copy_tree(s.path(), stage, s.root())
+                    .with_context(|| format!("copying skill `{}` into {}", s.name(), dir.display()))
+            },
+            || claim(s.name()),
+        )?;
     }
     Ok(())
 }
@@ -189,6 +194,30 @@ mod tests {
             .collect();
         names.sort();
         assert_eq!(names, ["a", "b"]);
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    /// A skill whose claim can't be recorded is not left in place unclaimed:
+    /// the entry it replaced (here the user's own) is put back.
+    #[test]
+    fn a_failed_claim_keeps_the_previous_skill() {
+        let tmp = scratch("claim");
+        let dir = tmp.join("skills");
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        std::fs::write(dir.join("a/SKILL.md"), "mine\n").unwrap();
+        let skills = [make_skill(&tmp, "a")];
+        let err = copy_skills_into(&dir, &skills, &mut |_| anyhow::bail!("record not saved"))
+            .unwrap_err();
+        assert_eq!(format!("{err:#}"), "record not saved");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a/SKILL.md")).unwrap(),
+            "mine\n"
+        );
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["a"]);
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 

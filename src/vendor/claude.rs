@@ -70,34 +70,37 @@ impl Vendor for Claude {
         let market = marketplace(scope);
         let market_dir = managed_dir(scope)?;
         // Rebuild from scratch so removed skills disappear (dir is spm-owned),
-        // published whole so a failure keeps the previous marketplace.
-        atomic::publish_dir(&market_dir, |market_dir| {
-            let plugin_dir = market_dir.join("plugin");
-            let skills_dir = plugin_dir.join("skills");
-            std::fs::create_dir_all(&skills_dir)?;
+        // published whole so a failure keeps the previous marketplace. The
+        // skills are claimed once it holds them, before the previous one is
+        // dropped (see `atomic::publish_dir_and`).
+        atomic::publish_dir_and(
+            &market_dir,
+            |market_dir| {
+                let plugin_dir = market_dir.join("plugin");
+                let skills_dir = plugin_dir.join("skills");
+                std::fs::create_dir_all(&skills_dir)?;
 
-            for s in skills {
-                let dest = skills_dir.join(s.name());
-                fsutil::copy_tree(s.path(), &dest, s.root())
-                    .with_context(|| format!("copying skill `{}` into plugin", s.name()))?;
-            }
+                for s in skills {
+                    let dest = skills_dir.join(s.name());
+                    fsutil::copy_tree(s.path(), &dest, s.root())
+                        .with_context(|| format!("copying skill `{}` into plugin", s.name()))?;
+                }
 
-            jsonutil::write(
-                &plugin_dir.join(".claude-plugin/plugin.json"),
-                &json!({ "name": market }),
-            )?;
-            jsonutil::write(
-                &market_dir.join(".claude-plugin/marketplace.json"),
-                &json!({
-                    "name": market,
-                    "owner": { "name": "spm" },
-                    "plugins": [ { "name": market, "source": "./plugin" } ],
-                }),
-            )
-        })?;
-        // Claimed once the marketplace holds them: a failed rebuild left the
-        // previous one, which they never reached.
-        skills.iter().try_for_each(|s| claim(s.name()))?;
+                jsonutil::write(
+                    &plugin_dir.join(".claude-plugin/plugin.json"),
+                    &json!({ "name": market }),
+                )?;
+                jsonutil::write(
+                    &market_dir.join(".claude-plugin/marketplace.json"),
+                    &json!({
+                        "name": market,
+                        "owner": { "name": "spm" },
+                        "plugins": [ { "name": market, "source": "./plugin" } ],
+                    }),
+                )
+            },
+            || skills.iter().try_for_each(|s| claim(s.name())),
+        )?;
 
         patch_settings(scope, &market_dir, skills)?;
         if let Scope::Project { root } = scope {
