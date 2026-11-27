@@ -23,7 +23,7 @@ use crate::lockfile::Lockfile;
 use crate::pathid::{dir_id, DirId};
 use crate::paths;
 use crate::scope::Scope;
-use crate::vendor::Claim;
+use crate::vendor::{Claim, Hold};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -269,7 +269,7 @@ impl Ownership {
     /// `targets` with `install(index, prior ownership, claim)`, keeping the
     /// record true at every step: a failure part-way leaves nothing spm
     /// touched unrecorded, and claims nothing it did not touch. A skill name is
-    /// recorded when the vendor `claim`s it, right before modifying its entry;
+    /// recorded when the vendor `claim`s it (see `Vendor::materialize`);
     /// plugin output lives only in spm-owned locations, so the new plugins are
     /// recorded up front. Once a target is written it holds exactly the new
     /// set. Targets not installed now (e.g. ones another branch's `ai.json`
@@ -321,8 +321,17 @@ impl Ownership {
             // marketplace), before claiming even names it already owned, so a
             // claim saves whenever the name or the binding is new.
             let mut bound = skills_dir_identity(scope, target)?;
-            let mut claim = |name: &DepName| -> Result<()> {
+            let mut claim = |name: &DepName, hold: Hold| -> Result<()> {
                 let owned = record.entry(target.clone()).or_default();
+                if hold == Hold::Release {
+                    // The replacement was withdrawn: the name holds what it
+                    // held before, owned only if it was. The failed install
+                    // saves this (see `fail`), so nothing is saved here.
+                    if !prior.skills.contains(name) {
+                        owned.skills.remove(name);
+                    }
+                    return Ok(());
+                }
                 // Claimed only to be removed: nothing to record.
                 let added = desired.skills.contains(name) && owned.skills.insert(name.clone());
                 let dir = skills_dir_identity(scope, target)?;
@@ -431,7 +440,7 @@ impl Ownership {
         };
         // The record is the sole history of what spm installed, so a failed
         // write (e.g. a full disk) must leave the previous one intact.
-        crate::jsonfile::save_atomic(&p, &record)
+        crate::jsonfile::save(&p, &record)
     }
 }
 
@@ -531,7 +540,7 @@ mod tests {
                     if i == fail_at && n == 1 {
                         anyhow::bail!("boom")
                     }
-                    claim(name)?;
+                    claim(name, Hold::Claim)?;
                     write(&targets[i], name);
                 }
                 Ok(())
@@ -550,7 +559,7 @@ mod tests {
         let path = Ownership::path(&scope).unwrap();
         let before = std::fs::read(&path).unwrap();
 
-        let err = crate::jsonfile::replace_with(&path, |f| {
+        let err = crate::atomic::replace(&path, |f| {
             f.write_all(&b"{\"targets\":{}}\n"[..3])?;
             Err(std::io::Error::other("disk full"))
         })
@@ -747,9 +756,9 @@ mod tests {
                 &["codex".to_string()],
                 &Owned::from_lock(&lock),
                 |_, _, claim| {
-                    claim(&dep("old"))?;
+                    claim(&dep("old"), Hold::Claim)?;
                     std::fs::remove_dir_all(dir.join("old"))?;
-                    claim(&dep("fresh"))?;
+                    claim(&dep("fresh"), Hold::Claim)?;
                     std::fs::create_dir_all(dir.join("fresh"))?;
                     // The record can't be written from here on.
                     std::fs::set_permissions(&record_dir, std::fs::Permissions::from_mode(0o555))?;
@@ -761,6 +770,60 @@ mod tests {
         assert!(format!("{err:#}").contains("ermission"), "{err:#}");
         let after = Ownership::load(&scope, &Lockfile::default(), &[], &[]).unwrap();
         assert_eq!(after.for_target("codex").skills, set(&["fresh"]));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A replacement rolled back after its claim (the user's skill can't be
+    /// removed whole, so it is put back) leaves the name unclaimed: a later
+    /// clean must not delete the user's skill.
+    #[cfg(unix)]
+    #[test]
+    fn a_rolled_back_replacement_is_not_claimed() {
+        use std::os::unix::fs::PermissionsExt;
+        let (root, scope, _home) = sandbox("rollback");
+        let vendor = crate::vendor::for_target("codex").unwrap();
+        let dir = vendor.skills_dir(&scope).unwrap();
+        let locked = dir.join("a").join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("SKILL.md"), "mine\n").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let unlock =
+            || std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Root can delete from a read-only directory: nothing is rolled back.
+        if std::fs::write(locked.join("probe"), "").is_ok() {
+            unlock();
+            std::fs::remove_dir_all(root).unwrap();
+            return;
+        }
+        let src = root.join("src").join("a");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("SKILL.md"), "---\nname: a\n---\n").unwrap();
+        let skill = crate::materialized::MaterializedSkill::unscanned(dep("a"), src, root.clone());
+        let before = Ownership::Recorded(BTreeMap::new());
+        let targets = ["codex".to_string()];
+        before
+            .install(
+                &scope,
+                &targets,
+                &Owned::from_lock(&lock_with(&["a"])),
+                |_, _, claim| {
+                    vendor.materialize(&scope, "id", std::slice::from_ref(&skill), &[], claim)
+                },
+            )
+            .unwrap_err();
+        unlock();
+        assert_eq!(
+            std::fs::read_to_string(locked.join("SKILL.md")).unwrap(),
+            "mine\n"
+        );
+        let after = Ownership::load(&scope, &Lockfile::default(), &[], &targets).unwrap();
+        let owned = after.for_target("codex").skill_names();
+        vendor.clean(&scope, &owned).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(locked.join("SKILL.md")).unwrap(),
+            "mine\n",
+            "clean leaves the user's skill"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -7,7 +7,7 @@
 //! each vendor owns.
 
 use anyhow::{Context, Result};
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::path::Path;
 
 /// Read an existing `.gitignore`, returning `None` when the file simply does
@@ -44,7 +44,8 @@ pub fn ensure(project_root: &Path, comment: &str, entry: &str) -> Result<()> {
     out.push_str(entry);
     out.push('\n');
 
-    std::fs::write(&path, out).with_context(|| format!("updating {}", path.display()))
+    crate::atomic::replace(&path, |f| f.write_all(out.as_bytes()))
+        .with_context(|| format!("updating {}", path.display()))
 }
 
 /// The `entries` [`ensure`] would still add to the project's `.gitignore`, in

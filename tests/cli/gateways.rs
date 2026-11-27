@@ -65,7 +65,7 @@ const GUARDS: &[Guard] = &[
     },
     Guard {
         name: "file writes",
-        gateway: "`jsonfile::save`/`save_atomic`/`Staged` (src/jsonfile.rs)",
+        gateway: "`jsonfile::save` (src/jsonfile.rs) or `atomic` (src/atomic.rs)",
         patterns: &[
             "fs::write",
             "fs::copy",
@@ -75,6 +75,12 @@ const GUARDS: &[Guard] = &[
             "File::create_new",
             "File::options",
             "OpenOptions",
+            // A file opened outside std (an FFI call) and adopted from its
+            // raw descriptor or handle.
+            "from_raw_fd",
+            "from_raw_handle",
+            "OwnedFd",
+            "OwnedHandle",
         ],
         imports: &["fs::write", "fs::copy", "fs::rename"],
         opaque: &[
@@ -87,21 +93,24 @@ const GUARDS: &[Guard] = &[
         ],
         allowed: &[
             (
-                "src/jsonfile.rs",
-                "the JSON gateway: in-place `save` and the atomic `Staged` replace \
-                 (`fs::rename` publishes the staged file)",
+                "src/atomic.rs",
+                "stages files and directories beside their destination \
+                 (`OpenOptions::create_new`) and publishes them (`fs::rename`)",
+            ),
+            (
+                "src/atomic/access.rs",
+                "creates `atomic`'s stage open to its owner alone (`OpenOptions`; \
+                 on macOS `openx_np`, adopted with `from_raw_fd`); writes nothing \
+                 into it",
             ),
             (
                 "src/fsutil.rs",
-                "`copy_tree` copies skill content (`fs::copy`) into a target",
+                "`copy_tree` copies skill content (`fs::copy`) into a staged \
+                 directory (`atomic::publish_dir`)",
             ),
             (
                 "src/store.rs",
                 "the empty restricted-checkout marker in the store, not JSON state",
-            ),
-            (
-                "src/gitignore.rs",
-                "appends spm's entries to the user's `.gitignore`, a text file",
             ),
             (
                 "src/cli/session.rs",
@@ -112,6 +121,21 @@ const GUARDS: &[Guard] = &[
                 "opens a read-only Windows handle to query a file's identity",
             ),
         ],
+    },
+    Guard {
+        // Narrower than the write guard: whatever a file there may stage or
+        // copy, writing a file in place (truncating it, then filling it) can
+        // leave it half-written, so spm's files and the user's config are
+        // replaced whole through `atomic` instead.
+        name: "in-place file writes",
+        gateway: "`jsonfile::save` (src/jsonfile.rs) or `atomic::replace` (src/atomic.rs)",
+        patterns: &["fs::write", "File::create", "File::create_new"],
+        imports: &["fs::write"],
+        opaque: &["fs", "fs::File", "fs::write"],
+        allowed: &[(
+            "src/store.rs",
+            "the empty restricted-checkout marker: nothing to leave half-written",
+        )],
     },
     Guard {
         name: "OS file locks",
@@ -855,6 +879,10 @@ fn write_guard_sees_grouped_imports_and_create_new() {
                 ),
                 ("src/glob.rs", "use std::fs::*;"),
                 (
+                    "src/raw.rs",
+                    "fn f() { File::from_raw_fd(openx(p)); File::from(OwnedHandle::from_raw_handle(h)); }",
+                ),
+                (
                     "src/fine.rs",
                     "use std::fs::{self, File};\nuse std::io::Write;\nfn f() { fs::read(p); }",
                 ),
@@ -869,6 +897,31 @@ fn write_guard_sees_grouped_imports_and_create_new() {
             "src/moves.rs:1 uses `fs::copy`",
             "src/moves.rs:1 uses `fs::rename`",
             "src/glob.rs:1 uses `fs::*`",
+            "src/raw.rs:1 uses `OwnedHandle`",
+            "src/raw.rs:1 uses `from_raw_fd`",
+            "src/raw.rs:1 uses `from_raw_handle`",
+        ]
+    );
+}
+
+/// A file allowed to stage or copy files may still not write one in place.
+#[test]
+fn in_place_write_guard_flags_files_the_write_guard_allows() {
+    assert_eq!(
+        flagged(
+            "in-place file writes",
+            &[
+                ("src/fsutil.rs", "fn f() { std::fs::write(p, t); }"),
+                ("src/jsonfile.rs", "fn f() { File::create(p); }"),
+                (
+                    "src/atomic.rs",
+                    "fn f() { fs::rename(a, b); OpenOptions::new().create_new(true); }",
+                ),
+            ],
+        ),
+        vec![
+            "src/fsutil.rs:1 uses `fs::write`",
+            "src/jsonfile.rs:1 uses `File::create`",
         ]
     );
 }

@@ -22,14 +22,13 @@
 //!   them under a dir of its own). There is no repo, so no `.gitignore` is
 //!   written.
 
-use super::dirskills::{copy_skills_into, remove_managed};
+use super::dirskills::{copy_skills_into, rebuild_with_skills, remove_managed};
 use super::{Claim, Vendor};
 use crate::ids::DepName;
 use crate::materialized::MaterializedSkill;
 use crate::scope::Scope;
 use crate::{fsutil, gitignore, paths};
 use anyhow::{Context, Result};
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// Who owns a vendor's skills dir.
@@ -185,20 +184,23 @@ impl Vendor for SharedDirVendor {
         let dir = self.skills_dir(scope)?;
         match self.ownership(scope) {
             // Rebuild from scratch so removed skills disappear.
-            Ownership::Exclusive => {
+            Ownership::Exclusive if skills.is_empty() => {
                 fsutil::remove_path_if_present(&dir)
                     .with_context(|| format!("clearing {}", dir.display()))?;
             }
-            // Remove only the entries spm owns (previously-managed ∪
-            // about-to-write). Never wipe the whole dir.
+            Ownership::Exclusive => rebuild_with_skills(&dir, skills, claim)?,
+            // Remove only the entries spm owns that it no longer writes
+            // (previously-managed − about-to-write), then replace each one it
+            // writes. Never wipe the whole dir.
             Ownership::Shared => {
-                let mut owned: BTreeSet<&DepName> = previously_managed.iter().collect();
-                owned.extend(skills.iter().map(|s| s.name()));
-                remove_managed(&dir, owned.iter().copied(), claim)?;
+                let dropped = previously_managed
+                    .iter()
+                    .filter(|n| !skills.iter().any(|s| s.name() == *n));
+                remove_managed(&dir, dropped, claim)?;
+                if !skills.is_empty() {
+                    copy_skills_into(&dir, skills, claim)?;
+                }
             }
-        }
-        if !skills.is_empty() {
-            copy_skills_into(&dir, skills, claim)?;
         }
         if let Scope::Project { root } = scope {
             let names: Vec<DepName> = skills.iter().map(|s| s.name().clone()).collect();
@@ -377,7 +379,7 @@ mod tests {
             "spm-1234",
             &[greet],
             &[dep("old-skill")],
-            &mut |_| Ok(()),
+            &mut |_, _| Ok(()),
         )
         .unwrap();
 

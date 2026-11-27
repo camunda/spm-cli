@@ -10,14 +10,13 @@
 //! of the checkout means a repository can never supply (or commit) one: only
 //! running `spm link` on this machine activates a local source.
 
+use crate::atomic::Staged;
 use crate::ids::DepName;
-use crate::jsonfile::Staged;
 use crate::paths;
 use crate::scope::Scope;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 const FILE: &str = "links.json";
@@ -202,14 +201,7 @@ impl Links {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
-        let dest = match p.canonicalize() {
-            Ok(d) => d,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => p.to_path_buf(),
-            Err(e) => return Err(e).with_context(|| format!("resolving {}", p.display())),
-        };
-        let text = crate::jsonfile::to_text(self)?;
-        Staged::write(&dest, |f| f.write_all(text.as_bytes()))
-            .with_context(|| format!("writing {}", p.display()))
+        crate::jsonfile::stage(p, self)
     }
 
     /// Every skill name materialized for a scope with this lock and these
