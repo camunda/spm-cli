@@ -315,12 +315,7 @@ mod tests {
     use crate::ids::dep;
 
     fn tmp(tag: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let d =
-            std::env::temp_dir().join(format!("spm-links-{tag}-{}-{nanos}", std::process::id()));
+        let d = crate::testutil::scratch_path(&format!("spm-links-{tag}"));
         std::fs::create_dir_all(&d).unwrap();
         d
     }

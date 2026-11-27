@@ -69,12 +69,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn scratch(tag: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let d =
-            std::env::temp_dir().join(format!("spm-jsonfile-{tag}-{}-{nanos}", std::process::id()));
+        let d = crate::testutil::scratch_path(&format!("spm-jsonfile-{tag}"));
         std::fs::create_dir_all(&d).unwrap();
         d
     }

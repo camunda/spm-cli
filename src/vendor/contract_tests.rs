@@ -67,14 +67,7 @@ struct Sandbox {
 
 impl Sandbox {
     fn new(target: &str, scope: &str) -> Self {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "spm-vendor-contract-{target}-{scope}-{}-{nanos}",
-            std::process::id()
-        ));
+        let root = crate::testutil::scratch_path(&format!("spm-vendor-contract-{target}-{scope}"));
         let (project, home, spm_home) = (root.join("project"), root.join("home"), root.join("spm"));
         let store = spm_home.join("store");
         for d in [&project, &home, &store] {

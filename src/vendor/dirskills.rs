@@ -90,14 +90,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn scratch(name: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!(
-            "spm-dirskills-{name}-{}-{nanos}",
-            std::process::id()
-        ))
+        crate::testutil::scratch_path(&format!("spm-dirskills-{name}"))
     }
 
     fn make_skill(root: &Path, name: &str) -> MaterializedSkill {

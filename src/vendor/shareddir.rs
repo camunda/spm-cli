@@ -280,14 +280,7 @@ mod tests {
     use crate::ids::dep;
 
     fn scratch(name: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!(
-            "spm-shareddir-{name}-{}-{nanos}",
-            std::process::id()
-        ))
+        crate::testutil::scratch_path(&format!("spm-shareddir-{name}"))
     }
 
     fn make_skill(root: &Path, name: &str) -> MaterializedSkill {

@@ -465,11 +465,7 @@ mod tests {
     use std::io::Write;
 
     fn scratch(name: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let p = std::env::temp_dir().join(format!("spm-owned-{name}-{nanos}"));
+        let p = crate::testutil::scratch_path(&format!("spm-owned-{name}"));
         std::fs::create_dir_all(&p).unwrap();
         p
     }

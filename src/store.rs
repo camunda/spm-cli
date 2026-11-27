@@ -236,14 +236,7 @@ mod tests {
     use std::process::Command as StdCommand;
 
     fn scratch(name: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!(
-            "spm-store-test-{name}-{}-{nanos}",
-            std::process::id(),
-        ))
+        crate::testutil::scratch_path(&format!("spm-store-test-{name}"))
     }
 
     /// Point `SPM_HOME` at `home` for the duration of `f`. Holds `ENV_LOCK`

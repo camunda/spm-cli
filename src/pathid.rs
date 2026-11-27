@@ -252,12 +252,7 @@ mod tests {
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir =
-            std::env::temp_dir().join(format!("spm-pathid-{name}-{}-{nanos}", std::process::id()));
+        let dir = crate::testutil::scratch_path(&format!("spm-pathid-{name}"));
         std::fs::create_dir_all(&dir).unwrap();
         resolve(&dir, &mut Vec::new()).unwrap()
     }

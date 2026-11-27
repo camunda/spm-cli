@@ -588,14 +588,7 @@ pub(crate) mod tests {
     /// empty, since a freshly-`init`ed-but-never-synced project has none yet.
     #[test]
     fn load_or_default_accepts_missing_id() {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "spm-lockfile-test-noid-{}-{nanos}",
-            std::process::id(),
-        ));
+        let dir = crate::testutil::scratch_path("spm-lockfile-test-noid");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(LOCK_FILE), r#"{"skills":{}}"#).unwrap();
         let lock = Lockfile::load_or_default(&dir).unwrap();
@@ -780,12 +773,7 @@ pub(crate) mod tests {
             ]),
             plugins: BTreeMap::from([(dep("ds"), plugin)]),
         };
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir =
-            std::env::temp_dir().join(format!("spm-lockfile-bytes-{}-{nanos}", std::process::id()));
+        let dir = crate::testutil::scratch_path("spm-lockfile-bytes");
         std::fs::create_dir_all(&dir).unwrap();
         lock.save(&dir).unwrap();
         let text = std::fs::read_to_string(dir.join(LOCK_FILE)).unwrap();
