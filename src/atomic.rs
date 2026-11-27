@@ -413,8 +413,9 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// A read-only file is refused, as an in-place write would be, even though
-    /// its directory would let a rename replace it.
+    /// A read-only file is refused exactly when an in-place write would be,
+    /// even though its directory would let a rename replace it: a process
+    /// allowed to write it anyway (root, on Unix) replaces it.
     #[test]
     fn a_read_only_file_is_not_replaced() {
         let dir = scratch("readonly");
@@ -423,9 +424,15 @@ mod tests {
         let mut perms = std::fs::metadata(&p).unwrap().permissions();
         perms.set_readonly(true);
         std::fs::set_permissions(&p, perms).unwrap();
-        let err = replace(&p, |f| f.write_all(b"new")).unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::PermissionDenied);
-        assert_eq!(std::fs::read_to_string(&p).unwrap(), "old");
+        let writable = std::fs::OpenOptions::new().write(true).open(&p).is_ok();
+        let result = replace(&p, |f| f.write_all(b"new"));
+        if writable {
+            result.unwrap();
+            assert_eq!(std::fs::read_to_string(&p).unwrap(), "new");
+        } else {
+            assert_eq!(result.unwrap_err().kind(), ErrorKind::PermissionDenied);
+            assert_eq!(std::fs::read_to_string(&p).unwrap(), "old");
+        }
         assert_eq!(entries(&dir), ["ai.json"]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
