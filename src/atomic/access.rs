@@ -1,23 +1,50 @@
 //! Keeping a replaced file's access control. Renaming a staged file over
-//! another publishes a new inode, so whatever guarded the old one (its
-//! owner, mode, access-control list (ACL) and extended attributes) must be
-//! carried over, or the new file is as open as its directory makes it. An
-//! in-place write kept all of it; a replacement that can't keep it fails
-//! rather than publish a more open file.
+//! another publishes a new file, so whatever guarded the old one (its owner,
+//! mode, access-control list (ACL) and extended attributes) must be carried
+//! over, or the new file is as open as its directory makes it. An in-place
+//! write kept all of it; a replacement that can't keep it fails rather than
+//! publish a more open file. Until it carries them, the staged file is
+//! open to its owner alone, so nothing written to it is exposed meanwhile.
 //!
-//! - Unix: the staged file takes the original's owner and group, then its
-//!   mode, then (Linux) its extended attributes, the POSIX ACL among them,
-//!   or (macOS) its ACL and extended attributes.
-//! - Windows: [`replace`] replaces an existing file with `ReplaceFileW`,
-//!   which keeps the replaced file's ACL, owner and attributes.
+//! - Unix: the staged file is created `0600`, then takes the original's
+//!   owner and group, then (Linux) its extended attributes, the POSIX ACL
+//!   among them, or (macOS) its ACL and extended attributes, and only then
+//!   its mode, which grants no more than that ACL.
+//! - Windows: the staged file is opened exclusively and given a protected,
+//!   owner-only DACL before anything is written to it; [`replace`] then
+//!   publishes it with `ReplaceFileW`, which gives it the replaced file's
+//!   DACL and attributes.
 
-use std::fs::{File, Metadata};
+use std::fs::{File, Metadata, OpenOptions};
 use std::path::Path;
 
-/// Give the staged file `tmp` (open as `file`) the access control of `dest`,
-/// whose metadata is `original`.
+/// Open the stage of a file replacing an existing one no more open than its
+/// owner alone (see [`restrict`]).
 #[cfg(unix)]
-pub(super) fn copy(
+pub(super) fn private(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+    options.mode(0o600);
+}
+
+/// Open the stage exclusively, with the right to change its DACL, so no one
+/// else can open it before [`restrict`] makes it owner-only.
+#[cfg(windows)]
+pub(super) fn private(options: &mut OpenOptions) {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Foundation::GENERIC_WRITE;
+    use windows_sys::Win32::Storage::FileSystem::WRITE_DAC;
+    options.share_mode(0).access_mode(GENERIC_WRITE | WRITE_DAC);
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(super) fn private(_: &mut OpenOptions) {}
+
+/// Give the staged file `tmp` (open as `file`, through [`private`]) the
+/// access control of `dest`, whose metadata is `original`, before anything
+/// is written to it. Each step narrows or keeps what the one before
+/// allowed: owner, then ACL, then mode.
+#[cfg(unix)]
+pub(super) fn restrict(
     dest: &Path,
     tmp: &Path,
     file: &File,
@@ -28,46 +55,96 @@ pub(super) fn copy(
     if (staged.uid(), staged.gid()) != (original.uid(), original.gid()) {
         std::os::unix::fs::fchown(file, Some(original.uid()), Some(original.gid()))?;
     }
-    // After the owner: changing it clears the set-user/group-ID bits.
-    file.set_permissions(std::fs::Permissions::from_mode(original.mode() & 0o7777))?;
-    xattr::copy(dest, tmp)
+    xattr::copy(dest, tmp)?;
+    // Last: with an ACL in place, the group bits are its mask, so the mode
+    // grants nothing the ACL does not. (After the owner too, as changing it
+    // clears the set-user/group-ID bits.)
+    file.set_permissions(std::fs::Permissions::from_mode(original.mode() & 0o7777))
 }
 
-#[cfg(not(unix))]
-pub(super) fn copy(_: &Path, _: &Path, _: &File, _: &Metadata) -> std::io::Result<()> {
+/// Make the staged file `file` owner-only: a protected DACL, so none of its
+/// directory's inheritable entries apply. [`replace`] gives it `dest`'s.
+#[cfg(windows)]
+pub(super) fn restrict(_: &Path, _: &Path, file: &File, _: &Metadata) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::{LocalFree, ERROR_SUCCESS};
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SetSecurityInfo, SDDL_REVISION_1,
+        SE_FILE_OBJECT,
+    };
+    use windows_sys::Win32::Security::{
+        GetSecurityDescriptorDacl, ACL, DACL_SECURITY_INFORMATION,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+    };
+    // Protected (`P`), one entry: full access (`FA`) for the owner (`OW`).
+    let sddl: Vec<u16> = "D:P(A;;FA;;;OW)".encode_utf16().chain([0]).collect();
+    let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: `sddl` is NUL-terminated; `sd` receives a LocalAlloc'd
+    // descriptor, freed below.
+    let ok = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut sd,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let (mut present, mut defaulted) = (0, 0);
+    let mut dacl: *mut ACL = std::ptr::null_mut();
+    // SAFETY: `sd` is a valid descriptor; `dacl` points into it.
+    let ok = unsafe { GetSecurityDescriptorDacl(sd, &mut present, &mut dacl, &mut defaulted) };
+    let rc = if ok == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        // SAFETY: the handle is open with WRITE_DAC (see `private`) and
+        // `dacl` is valid while `sd` is.
+        let rc = unsafe {
+            SetSecurityInfo(
+                file.as_raw_handle(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                dacl,
+                std::ptr::null(),
+            )
+        };
+        if rc == ERROR_SUCCESS {
+            Ok(())
+        } else {
+            Err(std::io::Error::from_raw_os_error(rc as i32))
+        }
+    };
+    // SAFETY: `sd` was allocated by the conversion above.
+    unsafe { LocalFree(sd) };
+    rc
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(super) fn restrict(_: &Path, _: &Path, _: &File, _: &Metadata) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Elsewhere a rename keeps nothing to carry over: `false`, nothing done.
-#[cfg(not(windows))]
-pub(super) fn replace(_: &Path, _: &Path) -> std::io::Result<bool> {
-    Ok(false)
-}
-
-/// Replace an existing file `dest` with `tmp`, keeping `dest`'s ACL, owner
-/// and attributes (a rename would give it `tmp`'s, inherited from the
-/// directory); any of them that can't be kept fails the replacement.
-/// `false`, nothing done, where there is no file at `dest` to keep them of.
+/// Replace the file `dest` with `tmp`, moving `dest` to `backup` on the
+/// way, with `ReplaceFileW`: `tmp` takes `dest`'s DACL and attributes (any
+/// of which that can't be kept fails it). On failure the previous file is
+/// at `dest` or, at worst, `backup` (see `replace_with_backup`).
 #[cfg(windows)]
-pub(super) fn replace(tmp: &Path, dest: &Path) -> std::io::Result<bool> {
+pub(super) fn replace(tmp: &Path, dest: &Path, backup: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
-    if !std::fs::symlink_metadata(dest).is_ok_and(|m| m.is_file()) {
-        return Ok(false);
-    }
-    let wide = |p: &Path| {
-        let mut w: Vec<u16> = p.as_os_str().encode_wide().collect();
-        w.push(0);
-        w
-    };
-    let (dest, tmp) = (wide(dest), wide(tmp));
-    // SAFETY: `dest` and `tmp` are NUL-terminated UTF-16 strings outliving
-    // the call; no backup file, no flags, and the reserved pointers null.
+    let wide = |p: &Path| -> Vec<u16> { p.as_os_str().encode_wide().chain([0]).collect() };
+    let (dest, tmp, backup) = (wide(dest), wide(tmp), wide(backup));
+    // SAFETY: the paths are NUL-terminated UTF-16 strings outliving the
+    // call; no flags, and the reserved pointers null.
     let ok = unsafe {
         ReplaceFileW(
             dest.as_ptr(),
             tmp.as_ptr(),
-            std::ptr::null(),
+            backup.as_ptr(),
             0,
             std::ptr::null(),
             std::ptr::null(),
@@ -76,7 +153,7 @@ pub(super) fn replace(tmp: &Path, dest: &Path) -> std::io::Result<bool> {
     if ok == 0 {
         return Err(std::io::Error::last_os_error());
     }
-    Ok(true)
+    Ok(())
 }
 
 /// Extended attributes, the POSIX ACL (`system.posix_acl_access`) among

@@ -98,12 +98,8 @@ impl Staged {
         let original = std::fs::metadata(dest).ok().filter(|m| m.is_file());
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
-        // Owner-only until it carries the original's access control, so no
-        // one else can open it before then.
-        #[cfg(unix)]
         if original.is_some() {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
+            access::private(&mut options);
         }
         let mut file = options.open(&tmp)?;
         let staged = Self {
@@ -112,7 +108,7 @@ impl Staged {
             published: false,
         };
         if let Some(original) = &original {
-            access::copy(dest, &staged.tmp, &file, original)?;
+            access::restrict(dest, &staged.tmp, &file, original)?;
         }
         write(&mut file)?;
         file.sync_all()?;
@@ -121,9 +117,15 @@ impl Staged {
 
     /// Atomically replace the destination with the staged file.
     pub fn publish(mut self) -> std::io::Result<()> {
-        if !access::replace(&self.tmp, &self.dest)? {
-            std::fs::rename(&self.tmp, &self.dest)?;
+        // A rename would leave the staged file's owner-only DACL in place of
+        // the replaced file's.
+        #[cfg(windows)]
+        if std::fs::symlink_metadata(&self.dest).is_ok_and(|m| m.is_file()) {
+            replace_with_backup(&self.tmp, &self.dest, access::replace)?;
+            self.published = true;
+            return Ok(());
         }
+        std::fs::rename(&self.tmp, &self.dest)?;
         self.published = true;
         Ok(())
     }
@@ -141,6 +143,40 @@ impl Drop for Staged {
             let _ = std::fs::remove_file(&self.tmp);
         }
     }
+}
+
+/// Replace the file `dest` with `tmp` through `replace`, which may move
+/// `dest` to a fresh hidden sibling `backup` on the way and, failing, leave
+/// it there (as `ReplaceFileW` can): the previous file is then put back, so
+/// a failure never leaves `dest` without it. Once replaced, the backup is
+/// dropped.
+#[cfg(any(windows, test))]
+fn replace_with_backup(
+    tmp: &Path,
+    dest: &Path,
+    replace: impl FnOnce(&Path, &Path, &Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let backup = sibling(dest, "old")?;
+    let Err(e) = replace(tmp, dest, &backup) else {
+        // Only the previous version, kept for recovery; should it linger,
+        // it is a hidden sibling like any abandoned stage.
+        let _ = std::fs::remove_file(&backup);
+        return Ok(());
+    };
+    let gone = |p: &Path| std::fs::symlink_metadata(p).is_err();
+    if gone(dest) && !gone(&backup) {
+        if let Err(r) = std::fs::rename(&backup, dest) {
+            return Err(std::io::Error::new(
+                e.kind(),
+                format!(
+                    "{e}; the previous {} is kept at {}: {r}",
+                    dest.display(),
+                    backup.display()
+                ),
+            ));
+        }
+    }
+    Err(e)
 }
 
 /// A directory being built beside its destination, removed unless published.
@@ -531,6 +567,79 @@ mod tests {
             xattr(&p, "com.camunda.spm-test").as_deref(),
             Some(&b"kept"[..])
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A replacement that fails having moved the previous file to its backup
+    /// (as `ReplaceFileW` can) puts it back: no failure loses both versions.
+    #[test]
+    fn a_failed_replacement_puts_the_backup_back() {
+        let dir = scratch("backup-failed");
+        let p = dir.join("state.json");
+        std::fs::write(&p, "old").unwrap();
+        let staged = Staged::write(&p, |f| f.write_all(b"new")).unwrap();
+        let err = replace_with_backup(staged.path(), &p, |_, dest, backup| {
+            std::fs::rename(dest, backup)?;
+            Err(std::io::Error::other("unable to move replacement"))
+        })
+        .unwrap_err();
+        assert_eq!(err.to_string(), "unable to move replacement");
+        drop(staged);
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "old");
+        assert_eq!(entries(&dir), ["state.json"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A successful replacement drops the backup it made on the way.
+    #[test]
+    fn a_replacement_drops_its_backup() {
+        let dir = scratch("backup-ok");
+        let p = dir.join("state.json");
+        std::fs::write(&p, "old").unwrap();
+        let staged = Staged::write(&p, |f| f.write_all(b"new")).unwrap();
+        replace_with_backup(staged.path(), &p, |tmp, dest, backup| {
+            std::fs::rename(dest, backup)?;
+            std::fs::rename(tmp, dest)
+        })
+        .unwrap();
+        drop(staged);
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "new");
+        assert_eq!(entries(&dir), ["state.json"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A replaced file keeps its DACL (here: protected, the current user
+    /// alone), and its stage inherits none of the (more open) directory's
+    /// entries while written.
+    #[cfg(windows)]
+    #[test]
+    fn a_replaced_file_keeps_its_access_control_list() {
+        let icacls = |p: &Path, args: &[&str]| {
+            let out = std::process::Command::new("icacls")
+                .arg(p)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{out:?}");
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        let dir = scratch("acl");
+        let p = dir.join("settings.json");
+        std::fs::write(&p, "old").unwrap();
+        let user = std::env::var("USERNAME").unwrap();
+        icacls(&p, &["/inheritance:r", "/grant:r", &format!("{user}:F")]);
+        let before = icacls(&p, &[]);
+        assert!(!before.contains("(I)"), "{before}");
+        // The directory passes entries on to new files: the stage must not
+        // take them.
+        assert!(icacls(&dir, &[]).contains("(OI)"));
+        let staged = Staged::write(&p, |f| f.write_all(b"new")).unwrap();
+        let stage = icacls(staged.path(), &[]);
+        assert!(!stage.contains("(I)"), "the stage inherited: {stage}");
+        staged.publish().unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "new");
+        assert_eq!(icacls(&p, &[]), before);
+        assert_eq!(entries(&dir), ["settings.json"]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

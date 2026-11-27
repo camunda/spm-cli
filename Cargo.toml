@@ -26,9 +26,10 @@ semver = "1"
 yaml-rust2 = { version = "0.13", default-features = false }
 
 # Directory file identity (`pathid::DirId`): std's `MetadataExt::file_index`
-# is still unstable. Already in the lock through clap.
+# is still unstable; and keeping a replaced file's DACL (`atomic::access`).
+# Already in the lock through clap.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem"] }
 
 # Effective write access (`fsutil::can_create_in`) without writing a probe
 # file. Already in the lock through clap.

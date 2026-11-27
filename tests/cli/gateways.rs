@@ -92,6 +92,11 @@ const GUARDS: &[Guard] = &[
                  (`OpenOptions::create_new`) and publishes them (`fs::rename`)",
             ),
             (
+                "src/atomic/access.rs",
+                "sets how `atomic` opens a stage (`OpenOptions`: owner-only, \
+                 exclusive); opens and writes nothing itself",
+            ),
+            (
                 "src/fsutil.rs",
                 "`copy_tree` copies skill content (`fs::copy`) into a staged \
                  directory (`atomic::publish_dir`)",
