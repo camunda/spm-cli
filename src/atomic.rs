@@ -101,12 +101,15 @@ impl Staged {
         if original.is_some() {
             access::private(&mut options);
         }
-        let mut file = options.open(&tmp)?;
+        let file = options.open(&tmp)?;
         let staged = Self {
             tmp,
             dest: dest.to_path_buf(),
             published: false,
         };
+        // Bound after `staged`, so on an error or a panic it is closed before
+        // `staged` removes it: Windows can't delete a file open unshared.
+        let mut file = file;
         if let Some(original) = &original {
             access::restrict(dest, &staged.tmp, &file, original)?;
         }
@@ -372,6 +375,20 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "old");
         staged.publish().unwrap();
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "new");
+        assert_eq!(entries(&dir), ["state.json"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A write that panics, like one that fails, leaves no staged file:
+    /// it is closed before being removed.
+    #[test]
+    fn a_panicking_write_leaves_no_staged_file() {
+        let dir = scratch("panic");
+        let p = dir.join("state.json");
+        std::fs::write(&p, "old").unwrap();
+        let unwound = std::panic::catch_unwind(|| replace(&p, |_| panic!("interrupted")));
+        assert!(unwound.is_err());
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "old");
         assert_eq!(entries(&dir), ["state.json"]);
         std::fs::remove_dir_all(&dir).unwrap();
     }

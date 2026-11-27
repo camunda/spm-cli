@@ -134,10 +134,8 @@ pub(super) fn restrict(_: &Path, _: &Path, _: &File, _: &Metadata) -> std::io::R
 /// at `dest` or, at worst, `backup` (see `replace_with_backup`).
 #[cfg(windows)]
 pub(super) fn replace(tmp: &Path, dest: &Path, backup: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
-    let wide = |p: &Path| -> Vec<u16> { p.as_os_str().encode_wide().chain([0]).collect() };
-    let (dest, tmp, backup) = (wide(dest), wide(tmp), wide(backup));
+    let (dest, tmp, backup) = (verbatim(dest)?, verbatim(tmp)?, verbatim(backup)?);
     // SAFETY: the paths are NUL-terminated UTF-16 strings outliving the
     // call; no flags, and the reserved pointers null.
     let ok = unsafe {
@@ -154,6 +152,24 @@ pub(super) fn replace(tmp: &Path, dest: &Path, backup: &Path) -> std::io::Result
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
+}
+
+/// `p` as a NUL-terminated `\\?\` path, which (as std does for its own
+/// calls) lifts the `MAX_PATH` limit on what `ReplaceFileW` accepts.
+#[cfg(windows)]
+fn verbatim(p: &Path) -> std::io::Result<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt;
+    let wide = |s: &str| -> Vec<u16> { s.encode_utf16().collect() };
+    let p: Vec<u16> = std::path::absolute(p)?.as_os_str().encode_wide().collect();
+    let mut out = if p.starts_with(&wide(r"\\?\")) {
+        p
+    } else if let Some(unc) = p.strip_prefix(&wide(r"\\")[..]) {
+        [wide(r"\\?\UNC\"), unc.to_vec()].concat()
+    } else {
+        [wide(r"\\?\"), p].concat()
+    };
+    out.push(0);
+    Ok(out)
 }
 
 /// Extended attributes, the POSIX ACL (`system.posix_acl_access`) among
