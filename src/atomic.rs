@@ -6,6 +6,8 @@
 //! the new one (or, for a directory where the OS can't swap two entries,
 //! briefly neither; see [`publish_dir`]).
 
+mod access;
+
 use anyhow::Context;
 use std::fs::File;
 use std::io::ErrorKind;
@@ -84,26 +86,24 @@ pub struct Staged {
 
 impl Staged {
     /// Stage what `write` writes as the next content of `dest`, flushed to
-    /// disk, with the permissions of the file it replaces. `dest`'s directory
-    /// must exist. A symlink at `dest` is replaced, not followed: pass a
-    /// [`resolve`]d path to write through it.
+    /// disk, with the access control of the file it replaces (see
+    /// [`access`]): a write that can't keep it fails rather than publish a
+    /// more open file. `dest`'s directory must exist. A symlink at `dest` is
+    /// replaced, not followed: pass a [`resolve`]d path to write through it.
     pub fn write(
         dest: &Path,
         write: impl FnOnce(&mut File) -> std::io::Result<()>,
     ) -> std::io::Result<Self> {
         let tmp = sibling(dest, "tmp")?;
-        let perms = std::fs::metadata(dest)
-            .ok()
-            .filter(|m| m.is_file())
-            .map(|m| m.permissions());
+        let original = std::fs::metadata(dest).ok().filter(|m| m.is_file());
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
-        // Created no more open than the file it replaces (the umask only
-        // narrows it further), so no reader can open it while it is written.
+        // Owner-only until it carries the original's access control, so no
+        // one else can open it before then.
         #[cfg(unix)]
-        if let Some(perms) = &perms {
-            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-            options.mode(perms.mode() & 0o777);
+        if original.is_some() {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
         }
         let mut file = options.open(&tmp)?;
         let staged = Self {
@@ -111,20 +111,19 @@ impl Staged {
             dest: dest.to_path_buf(),
             published: false,
         };
-        write(&mut file)?;
-        // Windows refuses to delete a read-only file, so an unpublished one
-        // could not be cleaned up; replacing a read-only file fails there
-        // anyway.
-        if let Some(perms) = perms.filter(|p| cfg!(unix) || !p.readonly()) {
-            file.set_permissions(perms)?;
+        if let Some(original) = &original {
+            access::copy(dest, &staged.tmp, &file, original)?;
         }
+        write(&mut file)?;
         file.sync_all()?;
         Ok(staged)
     }
 
     /// Atomically replace the destination with the staged file.
     pub fn publish(mut self) -> std::io::Result<()> {
-        std::fs::rename(&self.tmp, &self.dest)?;
+        if !access::replace(&self.tmp, &self.dest)? {
+            std::fs::rename(&self.tmp, &self.dest)?;
+        }
         self.published = true;
         Ok(())
     }
@@ -384,6 +383,154 @@ mod tests {
             f.write_all(b"new")
         })
         .unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The extended attribute `name` of `p`, if it has one.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn xattr(p: &Path, name: &str) -> Option<Vec<u8>> {
+        use std::os::unix::ffi::OsStrExt;
+        let p = std::ffi::CString::new(p.as_os_str().as_bytes()).unwrap();
+        let name = std::ffi::CString::new(name).unwrap();
+        let mut buf = vec![0u8; 4096];
+        // SAFETY: valid NUL-terminated strings and a buffer of `buf.len()`.
+        #[cfg(target_os = "linux")]
+        let n = unsafe { libc::getxattr(p.as_ptr(), name.as_ptr(), buf.as_mut_ptr().cast(), 4096) };
+        // SAFETY: as above.
+        #[cfg(target_os = "macos")]
+        let n = unsafe {
+            libc::getxattr(
+                p.as_ptr(),
+                name.as_ptr(),
+                buf.as_mut_ptr().cast(),
+                4096,
+                0,
+                0,
+            )
+        };
+        let n = usize::try_from(n).ok()?;
+        buf.truncate(n);
+        Some(buf)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn set_xattr(p: &Path, name: &str, value: &[u8]) {
+        use std::os::unix::ffi::OsStrExt;
+        let p = std::ffi::CString::new(p.as_os_str().as_bytes()).unwrap();
+        let name = std::ffi::CString::new(name).unwrap();
+        let (v, len) = (value.as_ptr().cast(), value.len());
+        // SAFETY: valid NUL-terminated strings and a value of `len` bytes.
+        #[cfg(target_os = "linux")]
+        let rc = unsafe { libc::setxattr(p.as_ptr(), name.as_ptr(), v, len, 0) };
+        // SAFETY: as above.
+        #[cfg(target_os = "macos")]
+        let rc = unsafe { libc::setxattr(p.as_ptr(), name.as_ptr(), v, len, 0, 0) };
+        assert_eq!(rc, 0, "{}", std::io::Error::last_os_error());
+    }
+
+    /// A POSIX access ACL (`system.posix_acl_access`): `entries` of
+    /// (tag, perm, id).
+    #[cfg(target_os = "linux")]
+    fn posix_acl(entries: &[(u16, u16, u32)]) -> Vec<u8> {
+        let mut acl = 2u32.to_le_bytes().to_vec();
+        for (tag, perm, id) in entries {
+            acl.extend(tag.to_le_bytes());
+            acl.extend(perm.to_le_bytes());
+            acl.extend(id.to_le_bytes());
+        }
+        acl
+    }
+
+    /// A replaced file keeps its access-control list and extended
+    /// attributes, as an in-place write would: one granting a named user
+    /// read access while denying the owning group (mode 0640) must not turn
+    /// into a plain 0640 file the group can read.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_replaced_file_keeps_its_access_control_list() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("acl");
+        let p = dir.join("settings.json");
+        std::fs::write(&p, "old").unwrap();
+        const ANY: u32 = u32::MAX;
+        // user::rw- user:4242:r-- group::--- mask::r-- other::---
+        let acl = posix_acl(&[
+            (0x01, 6, ANY),
+            (0x02, 4, 4242),
+            (0x04, 0, ANY),
+            (0x10, 4, ANY),
+            (0x20, 0, ANY),
+        ]);
+        set_xattr(&p, "system.posix_acl_access", &acl);
+        set_xattr(&p, "user.spm-test", b"kept");
+        let before = xattr(&p, "system.posix_acl_access").unwrap();
+        replace(&p, |f| f.write_all(b"new")).unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "new");
+        assert_eq!(xattr(&p, "system.posix_acl_access"), Some(before));
+        assert_eq!(xattr(&p, "user.spm-test").as_deref(), Some(&b"kept"[..]));
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o640);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A file without an ACL is not replaced by one inheriting its
+    /// directory's default ACL, which could grant what the file did not.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_replaced_file_gains_no_inherited_access_control_list() {
+        let dir = scratch("acl-default");
+        let p = dir.join("settings.json");
+        std::fs::write(&p, "old").unwrap();
+        const ANY: u32 = u32::MAX;
+        // default: user::rw- user:4242:rw- group::r-- mask::rw- other::---
+        let default = posix_acl(&[
+            (0x01, 6, ANY),
+            (0x02, 6, 4242),
+            (0x04, 4, ANY),
+            (0x10, 6, ANY),
+            (0x20, 0, ANY),
+        ]);
+        set_xattr(&dir, "system.posix_acl_default", &default);
+        assert_eq!(xattr(&p, "system.posix_acl_access"), None);
+        replace(&p, |f| f.write_all(b"new")).unwrap();
+        assert_eq!(xattr(&p, "system.posix_acl_access"), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A replaced file keeps its access-control list and extended
+    /// attributes, as an in-place write would.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_replaced_file_keeps_its_access_control_list() {
+        let dir = scratch("acl");
+        let p = dir.join("settings.json");
+        std::fs::write(&p, "old").unwrap();
+        let acl = |p: &Path| {
+            let out = std::process::Command::new("ls")
+                .arg("-le")
+                .arg(p)
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            let text = String::from_utf8(out.stdout).unwrap();
+            text.lines().skip(1).map(str::to_owned).collect::<Vec<_>>()
+        };
+        let status = std::process::Command::new("chmod")
+            .args(["+a", "user:nobody deny read"])
+            .arg(&p)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        set_xattr(&p, "com.camunda.spm-test", b"kept");
+        let before = acl(&p);
+        assert!(!before.is_empty());
+        replace(&p, |f| f.write_all(b"new")).unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "new");
+        assert_eq!(acl(&p), before);
+        assert_eq!(
+            xattr(&p, "com.camunda.spm-test").as_deref(),
+            Some(&b"kept"[..])
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
