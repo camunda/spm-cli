@@ -72,7 +72,8 @@ impl Vendor for Claude {
         // Rebuild from scratch so removed skills disappear (dir is spm-owned),
         // published whole so a failure keeps the previous marketplace. The
         // skills are claimed once it holds them, before the previous one is
-        // dropped (see `atomic::publish_dir_and`).
+        // dropped, and released should it be put back (see
+        // `atomic::publish_dir_and`).
         atomic::publish_dir_and(
             &market_dir,
             |market_dir| {
@@ -99,7 +100,7 @@ impl Vendor for Claude {
                     }),
                 )
             },
-            || skills.iter().try_for_each(|s| claim(s.name())),
+            |hold| skills.iter().try_for_each(|s| claim(s.name(), hold)),
         )?;
 
         patch_settings(scope, &market_dir, skills)?;
@@ -466,7 +467,7 @@ mod tests {
         let scope = Scope::Project { root: tmp.clone() };
         let s = make_skill(&tmp, "greet");
         Claude
-            .materialize(&scope, "spm-1234", &[s], &[], &mut |_| Ok(()))
+            .materialize(&scope, "spm-1234", &[s], &[], &mut |_, _| Ok(()))
             .unwrap();
 
         assert!(tmp
@@ -501,7 +502,7 @@ mod tests {
                 "spm-1234",
                 std::slice::from_ref(&greet),
                 &[],
-                &mut |_| Ok(()),
+                &mut |_, _| Ok(()),
             )
             .unwrap();
         let settings = tmp.join(".claude/settings.local.json");
@@ -512,7 +513,7 @@ mod tests {
         std::fs::remove_dir_all(other.path()).unwrap();
         let mut claimed = Vec::new();
         let err = Claude
-            .materialize(&scope, "spm-1234", &[greet, other], &[], &mut |n| {
+            .materialize(&scope, "spm-1234", &[greet, other], &[], &mut |n, _| {
                 claimed.push(n.clone());
                 Ok(())
             })

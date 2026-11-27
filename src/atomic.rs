@@ -245,18 +245,29 @@ pub fn publish_dir(
     dest: &Path,
     build: impl FnOnce(&Path) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
-    publish_dir_and(dest, build, || Ok(()))
+    publish_dir_and(dest, build, |_| Ok(()))
 }
 
-/// [`publish_dir`], running `commit` once the new entry is in place, before
-/// the previous one is dropped: should it fail, the previous entry is put
-/// back (or a new one that replaced none is dropped). So what `commit`
-/// records about the new entry (e.g. that spm owns it) is true whenever it
-/// stays, and an entry that can't be recorded never does.
+/// What [`publish_dir_and`] reports about the entry it publishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hold {
+    /// The new entry is in place, and the previous one is yet to be dropped.
+    Claim,
+    /// The new entry was withdrawn after its claim: `dest` holds what it held
+    /// before (or nothing, where it held nothing).
+    Release,
+}
+
+/// [`publish_dir`], reporting the new entry to `record`: [`Hold::Claim`] once
+/// it is in place, before the previous one is dropped, and [`Hold::Release`]
+/// should it then be withdrawn — because the claim failed, or because the
+/// previous entry can't be removed whole and is put back. So what `record`
+/// notes about the new entry (e.g. that spm owns it) is true whenever it
+/// stays, and is taken back whenever it does not.
 pub fn publish_dir_and(
     dest: &Path,
     build: impl FnOnce(&Path) -> anyhow::Result<()>,
-    commit: impl FnOnce() -> anyhow::Result<()>,
+    mut record: impl FnMut(Hold) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let clearing = || format!("clearing {}", dest.display());
     let writing = || format!("writing {}", dest.display());
@@ -277,13 +288,17 @@ pub fn publish_dir_and(
     if !existing {
         std::fs::rename(&tmp, dest).with_context(writing)?;
         staged.0 = None;
-        return commit().inspect_err(|_| {
-            if let Ok(new) = sibling(dest, "tmp") {
-                if std::fs::rename(dest, &new).is_ok() {
-                    drop(StagedDir(Some(new)));
-                }
-            }
-        });
+        let Err(e) = record(Hold::Claim) else {
+            return Ok(());
+        };
+        let Ok(new) = sibling(dest, "tmp") else {
+            return Err(e);
+        };
+        if std::fs::rename(dest, &new).is_err() {
+            return Err(e);
+        }
+        drop(StagedDir(Some(new)));
+        return Err(released(e, dest, record));
     }
 
     // `old` ends up holding the previous entry.
@@ -302,39 +317,54 @@ pub fn publish_dir_and(
         aside
     };
     staged.0 = None;
-    if let Err(e) = commit() {
-        put_back(dest, old)?;
-        return Err(e);
-    }
-    // `remove_dir_all` unlinks a symlink itself, never its target.
-    let Err(e) = std::fs::remove_dir_all(&old) else {
-        return Ok(());
+    let e = match record(Hold::Claim) {
+        Err(e) => e,
+        // `remove_dir_all` unlinks a symlink itself, never its target.
+        Ok(()) => match std::fs::remove_dir_all(&old) {
+            Ok(()) => return Ok(()),
+            // What is left of an entry that can't be removed whole (e.g. a
+            // read-only subdirectory of the user's) goes back in place, as if
+            // removed in place, rather than lingering hidden beside the new one.
+            Err(e) => anyhow::Error::new(e).context(format!("removing {}", dest.display())),
+        },
     };
-    // What is left of an entry that can't be removed whole (e.g. a read-only
-    // subdirectory of the user's) goes back in place, as if removed in place,
-    // rather than lingering hidden beside the new one.
-    put_back(dest, old)?;
-    Err(e).with_context(|| format!("removing {}", dest.display()))
+    if put_back(dest, old)? {
+        return Err(released(e, dest, record));
+    }
+    Err(e)
+}
+
+/// `err`, once `record` heard the entry at `dest` was withdrawn.
+fn released(
+    err: anyhow::Error,
+    dest: &Path,
+    mut record: impl FnMut(Hold) -> anyhow::Result<()>,
+) -> anyhow::Error {
+    match record(Hold::Release) {
+        Ok(()) => err,
+        Err(e) => err.context(format!("also failed to release {}: {e:#}", dest.display())),
+    }
 }
 
 /// Put the previous entry `old` back at `dest` and drop the new one there,
 /// as far as the OS allows: whatever can't be moved stays where it is.
-fn put_back(dest: &Path, old: PathBuf) -> std::io::Result<()> {
+/// `true` once `old` is back in place, the new entry gone from `dest`.
+fn put_back(dest: &Path, old: PathBuf) -> std::io::Result<bool> {
     let new = if exchange(&old, dest).unwrap_or(false) {
-        Some(old)
+        old
     } else {
         let new = sibling(dest, "tmp")?;
-        match std::fs::rename(dest, &new) {
-            Ok(()) if std::fs::rename(&old, dest).is_ok() => Some(new),
-            Ok(()) => {
-                let _ = std::fs::rename(&new, dest);
-                None
-            }
-            Err(_) => None,
+        if std::fs::rename(dest, &new).is_err() {
+            return Ok(false);
         }
+        if std::fs::rename(&old, dest).is_err() {
+            let _ = std::fs::rename(&new, dest);
+            return Ok(false);
+        }
+        new
     };
-    drop(StagedDir(new));
-    Ok(())
+    drop(StagedDir(Some(new)));
+    Ok(true)
 }
 
 /// Atomically swap the entries at `a` and `b`, both existing: `false`, with
@@ -929,13 +959,21 @@ mod tests {
         let root = scratch("dir-commit");
         let dest = root.join("skill");
         publish_dir(&dest, |d| write_dir(d, "old")).unwrap();
+        let mut heard = Vec::new();
         let err = publish_dir_and(
             &dest,
             |d| write_dir(d, "new"),
-            || anyhow::bail!("record not saved"),
+            |hold| {
+                heard.push(hold);
+                match hold {
+                    Hold::Claim => anyhow::bail!("record not saved"),
+                    Hold::Release => Ok(()),
+                }
+            },
         )
         .unwrap_err();
         assert_eq!(format!("{err:#}"), "record not saved");
+        assert_eq!(heard, [Hold::Claim, Hold::Release]);
         assert_eq!(
             std::fs::read_to_string(dest.join("sub/file")).unwrap(),
             "old"
@@ -943,19 +981,30 @@ mod tests {
         assert_eq!(entries(&root), ["skill"]);
 
         let fresh = root.join("fresh");
-        let committed = std::cell::Cell::new(false);
-        publish_dir_and(
+        let mut placed = Vec::new();
+        let err = publish_dir_and(
             &fresh,
             |d| write_dir(d, "new"),
-            || {
-                committed.set(fresh.join("sub/file").exists());
-                anyhow::bail!("record not saved")
+            |hold| {
+                placed.push((hold, fresh.join("sub/file").exists()));
+                match hold {
+                    Hold::Claim => anyhow::bail!("record not saved"),
+                    Hold::Release => anyhow::bail!("record still not saved"),
+                }
             },
         )
         .unwrap_err();
-        assert!(
-            committed.get(),
-            "the commit runs once the entry is in place"
+        assert_eq!(
+            placed,
+            [(Hold::Claim, true), (Hold::Release, false)],
+            "claimed once in place, released once withdrawn"
+        );
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "also failed to release {}: record still not saved: record not saved",
+                fresh.display()
+            )
         );
         assert_eq!(entries(&root), ["skill"]);
         std::fs::remove_dir_all(&root).unwrap();
@@ -1043,11 +1092,25 @@ mod tests {
             std::fs::remove_dir_all(&root).unwrap();
             return;
         }
-        let err = publish_dir(&dest, |d| write_dir(d, "new")).unwrap_err();
+        let mut heard = Vec::new();
+        let err = publish_dir_and(
+            &dest,
+            |d| write_dir(d, "new"),
+            |hold| {
+                heard.push(hold);
+                Ok(())
+            },
+        )
+        .unwrap_err();
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(
             format!("{err:#}").starts_with(&format!("removing {}", dest.display())),
             "{err:#}"
+        );
+        assert_eq!(
+            heard,
+            [Hold::Claim, Hold::Release],
+            "claimed, then released"
         );
         assert!(locked.join("sub").is_dir(), "left in place");
         assert!(!dest.join("sub").exists(), "the new build is dropped");

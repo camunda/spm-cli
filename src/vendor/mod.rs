@@ -3,6 +3,7 @@ mod contract_tests;
 mod dirskills;
 mod shareddir;
 
+pub use crate::atomic::Hold;
 use crate::ids::DepName;
 use crate::materialized::{MaterializedPlugin, MaterializedSkill};
 use crate::scope::Scope;
@@ -77,9 +78,9 @@ pub fn classify(skills_dir: &Path, expected: &[DepName], detect_stale: bool) -> 
 /// [`Scope::Project`](crate::scope::Scope) that is a project-local, gitignored
 /// directory; in [`Scope::Global`](crate::scope::Scope) it is a user-global
 /// location shared across every project.
-/// Records that spm is about to modify the named skill entry (see
-/// [`Vendor::materialize`]).
-pub type Claim<'a> = &'a mut dyn FnMut(&DepName) -> Result<()>;
+/// Records that spm is about to modify the named skill entry, or that a
+/// replacement it claimed was withdrawn (see [`Vendor::materialize`]).
+pub type Claim<'a> = &'a mut dyn FnMut(&DepName, Hold) -> Result<()>;
 
 pub trait Vendor {
     fn name(&self) -> &'static str;
@@ -99,7 +100,9 @@ pub trait Vendor {
     /// entry `name` in a dir it shares with the user, or as it replaces one
     /// whole: once the new entry is in place, before the previous one (perhaps
     /// the user's) is dropped, so a failed replacement or claim puts that
-    /// back (`atomic::publish_dir_and`). The ownership record
+    /// back (`atomic::publish_dir_and`). A replacement withdrawn after its
+    /// claim is reported with [`Hold::Release`]: the name then holds what it
+    /// held before, owned only if it was. The ownership record
     /// (`crate::owned`) then covers everything spm touched even if a later
     /// step fails — and nothing it never reached.
     fn materialize(
@@ -285,7 +288,7 @@ mod tests {
 
         let greet = make_skill(&root, "greet");
         let mut claimed = Vec::new();
-        v.materialize(&scope, "id", &[greet], &[], &mut |n| {
+        v.materialize(&scope, "id", &[greet], &[], &mut |n, _| {
             claimed.push(n.clone());
             Ok(())
         })
@@ -322,7 +325,7 @@ mod tests {
             v.skill_paths(&scope, &[dep("greet")]).unwrap(),
             [dir.join("greet")]
         );
-        v.materialize(&scope, "id", &[], &[dep("greet")], &mut |_| Ok(()))
+        v.materialize(&scope, "id", &[], &[dep("greet")], &mut |_, _| Ok(()))
             .unwrap();
         assert!(!dir.exists(), "an empty set leaves no dir");
         std::fs::remove_dir_all(&root).unwrap();

@@ -379,7 +379,7 @@ mod tests {
             "spm-1234",
             &[greet],
             &[dep("old-skill")],
-            &mut |_| Ok(()),
+            &mut |_, _| Ok(()),
         )
         .unwrap();
 

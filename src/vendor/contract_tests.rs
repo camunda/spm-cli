@@ -205,7 +205,7 @@ fn materialize(
     previous: (&[DepName], &[DepName]),
 ) -> BTreeSet<DepName> {
     let mut claimed = BTreeSet::new();
-    v.materialize(scope, "spm-contract", skills, previous.0, &mut |n| {
+    v.materialize(scope, "spm-contract", skills, previous.0, &mut |n, _| {
         claimed.insert(n.clone());
         Ok(())
     })
