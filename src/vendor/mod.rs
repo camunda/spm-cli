@@ -257,12 +257,7 @@ mod tests {
     use crate::ids::dep;
 
     fn scratch(name: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let p =
-            std::env::temp_dir().join(format!("spm-vendor-{name}-{}-{nanos}", std::process::id()));
+        let p = crate::testutil::scratch_path(&format!("spm-vendor-{name}"));
         std::fs::create_dir_all(&p).unwrap();
         p
     }

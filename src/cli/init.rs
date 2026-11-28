@@ -52,14 +52,7 @@ mod tests {
     /// directly (e.g. if a future caller stops going through clap).
     #[test]
     fn init_rejects_empty_targets_vec() {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "spm-cli-test-init-empty-targets-{}-{nanos}",
-            std::process::id(),
-        ));
+        let dir = crate::testutil::scratch_path("spm-cli-test-init-empty-targets");
         std::fs::create_dir_all(&dir).unwrap();
         let err = init(&Scope::Project { root: dir.clone() }, Vec::new()).unwrap_err();
         assert!(

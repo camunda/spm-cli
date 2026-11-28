@@ -412,16 +412,7 @@ mod tests {
     use std::io::Write;
 
     fn scratch(tag: &str) -> PathBuf {
-        static N: AtomicU64 = AtomicU64::new(0);
-        let n = N.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!(
-            "spm-atomic-{tag}-{}-{n}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let d = crate::testutil::scratch_path(&format!("spm-atomic-{tag}"));
         std::fs::create_dir_all(&d).unwrap();
         d
     }

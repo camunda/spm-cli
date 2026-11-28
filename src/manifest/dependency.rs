@@ -122,14 +122,7 @@ mod tests {
     /// can reach `resolver::resolve`/`StoreKey::derive`.
     #[test]
     fn dependency_manifest_rejects_non_sha_commit() {
-        let dir = std::env::temp_dir().join(format!(
-            "spm-depman-badcommit-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = crate::testutil::scratch_path("spm-depman-badcommit");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             Manifest::path_in(&dir),
@@ -150,14 +143,7 @@ mod tests {
     /// surfacing as a confusing `refs/heads/` or a silent repo-root pin.
     #[test]
     fn dependency_manifest_rejects_empty_selector_fields() {
-        let base = std::env::temp_dir().join(format!(
-            "spm-depman-empty-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let base = crate::testutil::scratch_path("spm-depman-empty");
         for (json, needle) in [
             (
                 r#"{"skills":{"leaf":{"git":"","branch":"main"}}}"#,
@@ -195,14 +181,7 @@ mod tests {
 
     #[test]
     fn dependency_manifest_rejects_oversized_file_before_parsing() {
-        let dir = std::env::temp_dir().join(format!(
-            "spm-depman-big-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = crate::testutil::scratch_path("spm-depman-big");
         std::fs::create_dir_all(&dir).unwrap();
         // Valid JSON, but padded past the cap: must fail on size, not parse.
         let pad = " ".repeat(MAX_NESTED_MANIFEST_BYTES as usize);
@@ -217,14 +196,7 @@ mod tests {
     /// targets, and nested plugins are out of scope in v1).
     #[test]
     fn dependency_manifest_parses_skills_and_ignores_targets_and_plugins() {
-        let dir = std::env::temp_dir().join(format!(
-            "spm-depman-lenient-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = crate::testutil::scratch_path("spm-depman-lenient");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             Manifest::path_in(&dir),
@@ -239,14 +211,7 @@ mod tests {
 
     /// Writes `body` as a nested `ai.json` in a fresh dir and loads it.
     fn load_nested(tag: &str, body: &str) -> (std::path::PathBuf, Result<DependencyManifest>) {
-        let dir = std::env::temp_dir().join(format!(
-            "spm-depman-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = crate::testutil::scratch_path(&format!("spm-depman-{tag}"));
         std::fs::create_dir_all(&dir).unwrap();
         let path = Manifest::path_in(&dir);
         std::fs::write(&path, body).unwrap();
@@ -298,14 +263,7 @@ mod tests {
     /// only by the root project's manifest.
     #[test]
     fn dependency_manifest_rejects_nested_resolve_transitive() {
-        let dir = std::env::temp_dir().join(format!(
-            "spm-depman-nested-flag-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = crate::testutil::scratch_path("spm-depman-nested-flag");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             Manifest::path_in(&dir),
@@ -324,14 +282,7 @@ mod tests {
     /// to an outside, unscanned manifest after the boundary check).
     #[test]
     fn dependency_manifest_load_file_reads_the_given_path() {
-        let dir = std::env::temp_dir().join(format!(
-            "spm-depman-loadfile-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let dir = crate::testutil::scratch_path("spm-depman-loadfile");
         std::fs::create_dir_all(&dir).unwrap();
         // The real, validated manifest lives at a non-default filename; the
         // default `ai.json` slot holds a decoy the loader must NOT read.

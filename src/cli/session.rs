@@ -246,11 +246,7 @@ mod tests {
     /// An isolated `SPM_HOME` (held for the test, which also serializes every
     /// test that takes the process-wide lock) and a project scope.
     fn sandbox(name: &str) -> (PathBuf, Scope, SpmHomeGuard) {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("spm-session-{name}-{nanos}"));
+        let root = crate::testutil::scratch_path(&format!("spm-session-{name}"));
         let project = root.join("project");
         std::fs::create_dir_all(&project).unwrap();
         let guard = SpmHomeGuard::set(&root.join("home"));

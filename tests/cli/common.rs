@@ -4,7 +4,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 pub static COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -20,13 +19,15 @@ pub struct Sandbox {
 
 impl Sandbox {
     pub fn new() -> Self {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+        // The pid and a counter, not the wall clock, keep sandboxes apart (#195);
+        // an earlier run's leftovers at the same name are removed.
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-        let root =
-            std::env::temp_dir().join(format!("spm-test-{}-{nanos}-{n}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("spm-test-{}-{n}", std::process::id()));
+        if let Err(e) = std::fs::remove_dir_all(&root) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                panic!("cannot clear the leftover sandbox {}: {e}", root.display());
+            }
+        }
         let sb = Sandbox {
             skill_repo: root.join("skill"),
             project: root.join("project"),

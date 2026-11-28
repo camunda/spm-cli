@@ -1,5 +1,5 @@
 //! Test-hygiene guard: test code never sleeps, never times itself against the
-//! wall clock and never retries (AGENTS.md "No Such Thing as Flaky Tests",
+//! wall clock, never names things after it and never retries (AGENTS.md "No Such Thing as Flaky Tests",
 //! "No Test Retries"). A test that waits for "long enough", asserts a
 //! duration, or passes on a later attempt is non-deterministic; synchronize
 //! on an event instead (see the barriers in `concurrency.rs`).
@@ -31,6 +31,8 @@ fn forbidden(ident: &Ident) -> Option<&'static str> {
         Some("sleeps: wait on an event (channel, barrier, child exit) instead")
     } else if name == "Instant" || name == "elapsed" {
         Some("measures wall-clock time: assert on behavior, not on how long it took")
+    } else if name == "SystemTime" || name == "UNIX_EPOCH" {
+        Some("derives a value from the wall clock, which parallel tests can share: name scratch paths with `crate::testutil::scratch_path` or a counter")
     } else if ["retry", "retries", "rerun", "flaky"]
         .iter()
         .any(|w| lower.contains(w))
@@ -232,9 +234,10 @@ fn with_retries() {}
 #[test_case(retries = 3)] fn e() {}
 fn f() { proptest! { fn g() { tokio::time::sleep(d); } } }
 use std::thread::sleep as nap;
+fn h() { let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH); }
 ";
     let lines: Vec<usize> = violations(src, true).iter().map(|v| v.0).collect();
-    assert_eq!(lines, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(lines, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 9]);
 }
 
 /// In a shipped file only `cfg(test)`-gated code is judged; comments,

@@ -415,11 +415,7 @@ mod tests {
     /// [`ScopeSession::snapshot`], so with both broken the lock is reported.
     #[test]
     fn shadowed_names_reads_the_other_lock_before_its_links() {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("spm-status-order-{nanos}"));
+        let root = crate::testutil::scratch_path("spm-status-order");
         let home = root.join("home");
         std::fs::create_dir_all(root.join("project")).unwrap();
         let _home = crate::paths::SpmHomeGuard::set(&home);

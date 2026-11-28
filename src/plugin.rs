@@ -166,11 +166,7 @@ mod tests {
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!("spm-plugin-{name}-{}-{nanos}", std::process::id()))
+        crate::testutil::scratch_path(&format!("spm-plugin-{name}"))
     }
 
     /// Build a plugin root with the given plugin.json body and a `skills/`

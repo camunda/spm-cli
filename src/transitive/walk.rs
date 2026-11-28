@@ -491,14 +491,7 @@ mod tests {
     #[test]
     fn nested_manifest_path_rejects_symlink_escaping_boundary() {
         use std::os::unix::fs::symlink;
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let base = std::env::temp_dir().join(format!(
-            "spm-transitive-nested-escape-{}-{nanos}",
-            std::process::id()
-        ));
+        let base = crate::testutil::scratch_path("spm-transitive-nested-escape");
         let checkout = base.join("checkout");
         std::fs::create_dir_all(&checkout).unwrap();
         // A real manifest living outside the checkout — the exfiltration target.
@@ -521,14 +514,7 @@ mod tests {
     /// no manifest reads as "no transitive deps".
     #[test]
     fn nested_manifest_path_accepts_in_boundary_and_absent() {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let checkout = std::env::temp_dir().join(format!(
-            "spm-transitive-nested-ok-{}-{nanos}",
-            std::process::id()
-        ));
+        let checkout = crate::testutil::scratch_path("spm-transitive-nested-ok");
         std::fs::create_dir_all(&checkout).unwrap();
         let root = std::fs::canonicalize(&checkout).unwrap();
         assert_eq!(nested_manifest_path(&root, &root).unwrap(), None);

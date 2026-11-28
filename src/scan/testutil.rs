@@ -8,17 +8,7 @@ use super::finding::Finding;
 
 /// A fresh, unique scratch directory.
 pub(super) fn tmp_dir() -> PathBuf {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static N: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "spm-scan-dir-{}-{}-{}",
-        std::process::id(),
-        N.fetch_add(1, Ordering::SeqCst),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let dir = crate::testutil::scratch_path("spm-scan-dir");
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }

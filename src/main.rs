@@ -24,6 +24,7 @@ mod scope;
 mod shell;
 mod skillcheck;
 mod store;
+mod testutil;
 mod transitive;
 mod vendor;
 mod version;
