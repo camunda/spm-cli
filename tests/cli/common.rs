@@ -23,7 +23,11 @@ impl Sandbox {
         // an earlier run's leftovers at the same name are removed.
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         let root = std::env::temp_dir().join(format!("spm-test-{}-{n}", std::process::id()));
-        std::fs::remove_dir_all(&root).ok();
+        if let Err(e) = std::fs::remove_dir_all(&root) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                panic!("cannot clear the leftover sandbox {}: {e}", root.display());
+            }
+        }
         let sb = Sandbox {
             skill_repo: root.join("skill"),
             project: root.join("project"),

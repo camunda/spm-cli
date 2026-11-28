@@ -1,14 +1,15 @@
 #![cfg(test)]
 //! Helpers shared by unit tests across modules.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A fresh scratch path under the temp dir, named `<prefix>-<pid>-<n>`: the
 /// pid keeps test processes apart and a process-wide counter keeps parallel
 /// tests apart. Not the wall clock, whose resolution lets two threads get the
 /// same name (#195). Whatever an earlier run with the same pid left at the
-/// path is removed; the path itself is not created.
+/// path is removed, and a leftover that cannot be removed fails the test
+/// rather than leak into it; the path itself is not created.
 pub(crate) fn scratch_path(prefix: &str) -> PathBuf {
     static N: AtomicU64 = AtomicU64::new(0);
     let path = std::env::temp_dir().join(format!(
@@ -16,6 +17,18 @@ pub(crate) fn scratch_path(prefix: &str) -> PathBuf {
         std::process::id(),
         N.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::remove_dir_all(&path).ok();
+    remove_leftover(&path);
     path
+}
+
+/// Removes what an earlier run left at `path`; nothing there is fine.
+fn remove_leftover(path: &Path) {
+    if let Err(e) = std::fs::remove_dir_all(path) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            panic!(
+                "cannot clear the leftover scratch dir {}: {e}",
+                path.display()
+            );
+        }
+    }
 }
